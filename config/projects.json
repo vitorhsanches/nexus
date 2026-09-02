@@ -1,0 +1,32 @@
+﻿{
+  "projects": [
+    {
+      "id": "norte",
+      "name": "Norte",
+      "path": "C:\\Users\\Vitor Sanches\\Desktop\\Devops\\interface-life",
+      "aliases": [
+        "norte",
+        "interface life",
+        "today",
+        "agenda",
+        "daily focus",
+        "task",
+        "tasks",
+        "reminder",
+        "reminders"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "orchestrator-poc",
+      "name": "Orchestrator POC",
+      "path": "C:\\Users\\Vitor Sanches\\Desktop\\Devops\\codex-omniroute-poc",
+      "aliases": [
+        "poc",
+        "orchestrator poc",
+        "codex poc"
+      ],
+      "enabled": true
+    }
+  ]
+}
