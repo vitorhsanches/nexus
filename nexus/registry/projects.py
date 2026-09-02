@@ -55,3 +55,15 @@ def list_projects():
             ORDER BY name
             """
         ).fetchall()
+
+
+def get_project(project_id: str):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, name, path, enabled
+            FROM projects
+            WHERE id = ?
+            """,
+            (project_id,),
+        ).fetchone()
