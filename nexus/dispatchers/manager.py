@@ -38,15 +38,143 @@ def _find_codex() -> Path:
     )
 
 
-def _extract_plan(output: str) -> dict:
-    match = PLAN_PATTERN.search(output)
+def _validate_plan(plan: dict) -> dict:
+    allowed_complexity = {"LOW", "MEDIUM", "HIGH"}
+    allowed_risk = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 
-    if not match:
+    allowed_routes = {
+        "mechanical",
+        "standard-coding",
+        "complex-coding",
+        "review-critical",
+        "security-critical",
+    }
+
+    allowed_paths = {
+        "OMNIROUTE",
+        "NATIVE_CODEX",
+    }
+
+    allowed_efforts = {
+        "low",
+        "medium",
+        "high",
+    }
+
+    if plan.get("complexity") not in allowed_complexity:
         raise ValueError(
-            "Manager did not return a valid NEXUS plan envelope."
+            f"Invalid complexity: {plan.get('complexity')!r}"
         )
 
-    return json.loads(match.group(1))
+    if plan.get("risk") not in allowed_risk:
+        raise ValueError(
+            f"Invalid risk: {plan.get('risk')!r}"
+        )
+
+    parallelism = plan.get("parallelism")
+
+    if (
+        not isinstance(parallelism, int)
+        or isinstance(parallelism, bool)
+        or not 1 <= parallelism <= 3
+    ):
+        raise ValueError(
+            f"Invalid parallelism: {parallelism!r}"
+        )
+
+    summary = plan.get("summary")
+
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("Plan summary is missing.")
+
+    workers = plan.get("workers")
+
+    if not isinstance(workers, list) or not workers:
+        raise ValueError(
+            "Plan must contain at least one Worker."
+        )
+
+    for index, worker in enumerate(workers, start=1):
+        if not isinstance(worker, dict):
+            raise ValueError(
+                f"Worker {index} is not an object."
+            )
+
+        route_class = worker.get("route_class")
+
+        if route_class not in allowed_routes:
+            raise ValueError(
+                f"Worker {index} has invalid route_class: "
+                f"{route_class!r}"
+            )
+
+        execution_path = worker.get("execution_path")
+
+        if execution_path not in allowed_paths:
+            raise ValueError(
+                f"Worker {index} has invalid execution_path: "
+                f"{execution_path!r}"
+            )
+
+        effort = worker.get("effort")
+
+        if effort not in allowed_efforts:
+            raise ValueError(
+                f"Worker {index} has invalid effort: "
+                f"{effort!r}"
+            )
+
+        provider = worker.get("provider")
+        model = worker.get("model")
+        scope = worker.get("scope")
+        reason = worker.get("reason")
+
+        for field_name, value in (
+            ("provider", provider),
+            ("model", model),
+            ("scope", scope),
+            ("reason", reason),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"Worker {index} has invalid {field_name}."
+                )
+
+        # Prevent prompt-template placeholders from being accepted.
+        if "|" in model:
+            raise ValueError(
+                f"Worker {index} model looks like a template: "
+                f"{model!r}"
+            )
+
+    return plan
+
+
+def _extract_plan(output: str) -> dict:
+    matches = list(PLAN_PATTERN.finditer(output))
+
+    if not matches:
+        raise ValueError(
+            "Manager did not return a NEXUS plan envelope."
+        )
+
+    errors = []
+
+    # Codex may echo the prompt before printing the Manager response.
+    # Always inspect envelopes from newest to oldest.
+    for match in reversed(matches):
+        try:
+            plan = json.loads(match.group(1))
+            return _validate_plan(plan)
+        except (json.JSONDecodeError, ValueError) as error:
+            errors.append(str(error))
+
+    details = "; ".join(errors[:3])
+
+    raise ValueError(
+        "Manager returned plan envelopes, but none passed validation. "
+        f"Errors: {details}"
+    )
 
 
 def run_manager(
@@ -204,3 +332,4 @@ Do not place markdown fences around the JSON envelope.
         "exit_code": exit_code,
         "plan": plan,
     }
+
