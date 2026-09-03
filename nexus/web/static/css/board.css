@@ -1,0 +1,305 @@
+:root {
+  --bg: #0e1116;
+  --bg-elev: #161a21;
+  --bg-elev-2: #1c212b;
+  --border: #2a313d;
+  --text: #d7dee8;
+  --text-muted: #8b94a3;
+  --accent: #4c8dff;
+  --accent-soft: rgba(76, 141, 255, 0.14);
+  --ok: #2eb872;
+  --warn: #f0b429;
+  --danger: #ef5b5b;
+  --purple: #9d7bf5;
+  --radius: 10px;
+  --gap: 16px;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* ---------- Top bar ---------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 12px 20px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px; height: 38px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 800;
+  font-size: 18px;
+}
+.brand-title { margin: 0; font-size: 16px; font-weight: 700; }
+.brand-sub { color: var(--text-muted); font-size: 12px; }
+
+.summary { display: flex; gap: 20px; }
+.stat { display: flex; flex-direction: column; align-items: center; }
+.stat-value { font-size: 20px; font-weight: 700; }
+.stat-label { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.stat-accent .stat-value { color: var(--accent); }
+
+.refresh-btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+.refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+.refresh-btn:disabled { opacity: 0.5; cursor: wait; }
+
+/* ---------- Layout ---------- */
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr 320px;
+  gap: var(--gap);
+  padding: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 1200px) {
+  .layout { grid-template-columns: 1fr; }
+  .summary { display: none; }
+}
+
+.panel, .board-panel {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  min-width: 0;
+}
+
+.panel-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text);
+}
+.panel-title-spaced { margin-top: 24px; }
+.muted { color: var(--text-muted); font-weight: 500; }
+
+/* ---------- Mission list ---------- */
+.mission-list { display: flex; flex-direction: column; gap: 10px; }
+.mission-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-elev-2);
+}
+.mission-card .mission-title { font-weight: 600; }
+.mission-card .mission-meta {
+  display: flex; justify-content: space-between;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.status-pill.running, .status-pill.busy { background: rgba(76,141,255,0.18); color: var(--accent); }
+.status-pill.failed, .status-pill.error { background: rgba(239,91,91,0.16); color: var(--danger); }
+.status-pill.completed, .status-pill.available, .status-pill.done { background: rgba(46,184,114,0.16); color: var(--ok); }
+.status-pill.review { background: rgba(240,180,41,0.16); color: var(--warn); }
+
+/* ---------- Board ---------- */
+.board {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(160px, 1fr));
+  gap: 12px;
+}
+@media (max-width: 1200px) { .board { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 700px) { .board { grid-template-columns: repeat(2, 1fr); } }
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  min-height: 180px;
+}
+.column-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.column-count {
+  background: var(--bg-elev);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.column-cards { display: flex; flex-direction: column; gap: 8px; min-height: 40px; }
+
+.task-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 9px 10px;
+  cursor: default;
+}
+.task-card .task-title { font-weight: 600; font-size: 13px; }
+.task-card .task-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+.task-card .task-caps {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.task-card .task-caps .cap {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+.task-card.priority-high { border-left-color: var(--danger); }
+.task-card.priority-medium { border-left-color: var(--warn); }
+.task-card.priority-low { border-left-color: var(--ok); }
+
+.codex-side { grid-column: 3 / 7; border: 1px dashed var(--border); border-radius: var(--radius); padding: 12px; color: var(--text-muted); }
+.codex-side h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text); }
+.codex-side .placeholder { font-size: 12px; }
+
+/* ---------- Agents & sessions ---------- */
+.agent-list { display: flex; flex-direction: column; gap: 8px; }
+.agent-card {
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev-2);
+}
+.agent-card .agent-name { font-weight: 600; }
+.agent-card .agent-meta {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.session-list { display: flex; flex-direction: column; gap: 8px; }
+.session-card {
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: var(--bg-elev-2);
+}
+.session-card.session-running { border-left-color: var(--accent); }
+.session-card.session-completed { border-left-color: var(--ok); }
+.session-card.session-failed { border-left-color: var(--danger); }
+.session-card.session-cancelled { border-left-color: var(--text-muted); }
+.session-card .session-title { font-weight: 600; font-size: 12px; }
+.session-card .session-meta {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 2px;
+  font-style: italic;
+}
+
+.error-banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(239,91,91,0.4);
+  background: rgba(239,91,91,0.1);
+  color: var(--danger);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 14px 20px;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+.footer .updated { font-family: var(--mono); }
+
+/* Mission count pills */
+.counts { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+.count-pill {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-family: var(--mono);
+}
+.count-backlog { color: var(--text-muted); }
+.count-ready { color: var(--warn); }
+.count-running { color: var(--accent); }
+.count-review { color: var(--purple); }
+.count-done { color: var(--ok); }
+.count-failed { color: var(--danger); }
+
+.task-assignee { margin-top: 6px; font-size: 11px; color: var(--text-muted); }
+.task-caps.ac { color: var(--purple); }
+.meta-item { font-family: var(--mono); }

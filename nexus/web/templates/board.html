@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus Mission Board</title>
+  <link rel="stylesheet" href="/static/css/board.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">N</span>
+      <div>
+        <h1 class="brand-title">Nexus Mission Board</h1>
+        <span class="brand-sub">Local Mission Board UI &middot; v{{ app_version }}</span>
+      </div>
+    </div>
+    <div class="summary" id="summary">
+      <div class="stat">
+        <span class="stat-value" id="stat-missions">{{ summary.missions }}</span>
+        <span class="stat-label">Missions</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value" id="stat-tasks">{{ summary.tasks }}</span>
+        <span class="stat-label">Tasks</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value" id="stat-agents">{{ summary.agents }}</span>
+        <span class="stat-label">Agents</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value" id="stat-sessions">{{ summary.sessions }}</span>
+        <span class="stat-label">Sessions</span>
+      </div>
+      <div class="stat stat-accent">
+        <span class="stat-value" id="stat-active">{{ summary.active_sessions }}</span>
+        <span class="stat-label">Active</span>
+      </div>
+    </div>
+    <button class="refresh-btn" id="refresh-btn" type="button" title="Refresh data">Refresh</button>
+  </header>
+
+  <main class="layout">
+    <section class="panel panel-missions" id="panel-missions">
+      <h2 class="panel-title">Missions <span class="muted" id="mission-count"></span></h2>
+      <div class="mission-list" id="mission-list"></div>
+    </section>
+
+    <section class="board-panel">
+      <h2 class="panel-title">Task Board <span class="muted" id="task-count"></span></h2>
+      <div class="board" id="board">
+        {% for column in columns %}
+        <div class="column" data-column="{{ column }}">
+          <h3 class="column-title">{{ column }} <span class="column-count" data-count-for="{{ column }}">0</span></h3>
+          <div class="column-cards" data-cards-for="{{ column }}"></div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <aside class="panel">
+      <h2 class="panel-title">Active Agents <span class="muted" id="agent-count"></span></h2>
+      <div class="agent-list" id="agent-list"></div>
+
+      <h2 class="panel-title panel-title-spaced">Execution Sessions <span class="muted" id="session-count"></span></h2>
+      <div class="session-list" id="session-list"></div>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    <span>Nexus Local Mission Board &middot; read-only local view</span>
+    <span class="updated" id="updated-at"></span>
+  </footer>
+
+  <script src="/static/js/board.js"></script>
+</body>
+</html>
