@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import re
 import subprocess
@@ -87,11 +87,28 @@ def _validate_plan(plan: dict) -> dict:
     if not isinstance(summary, str) or not summary.strip():
         raise ValueError("Plan summary is missing.")
 
+    allowed_intents = {"EXECUTION", "ANALYSIS", "QUESTION", "PLANNING"}
+
+    intent = plan.get("intent")
+
+    if intent not in allowed_intents:
+        raise ValueError(
+            f"Invalid intent: {intent!r}"
+        )
+
     workers = plan.get("workers")
 
-    if not isinstance(workers, list) or not workers:
+    if not isinstance(workers, list):
+        raise ValueError("Plan workers must be a list.")
+
+    if intent == "EXECUTION" and not workers:
         raise ValueError(
-            "Plan must contain at least one Worker."
+            "EXECUTION plan must contain at least one Worker."
+        )
+
+    if intent == "QUESTION" and workers:
+        raise ValueError(
+            "QUESTION plan must not contain workers."
         )
 
     for index, worker in enumerate(workers, start=1):
@@ -279,7 +296,7 @@ Do not place markdown fences around the JSON envelope.
     ]
 
     print()
-    print("NEXUS → MANAGER")
+    print("NEXUS ? MANAGER")
     print("=" * 70)
     print(f"Agent : {manager_id}")
     print(f"Model : {model}")

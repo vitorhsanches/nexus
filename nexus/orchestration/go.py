@@ -173,7 +173,10 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
                 run_id=run_id,
             )
 
-    final_worker = worker_results[-1]["worker"]
+    if worker_results:
+        final_worker = worker_results[-1]["worker"]
+    else:
+        final_worker = None
 
     update_run_result(
         run_id,
