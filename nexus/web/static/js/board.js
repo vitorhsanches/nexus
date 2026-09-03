@@ -163,6 +163,7 @@
   function showError(message) {
     var banner = document.querySelector(".error-banner");
     if (banner) banner.remove();
+    if (!message) return;
     var node = el("div", "error-banner", "Data load failed: " + message);
     var layout = document.querySelector(".layout");
     if (layout && layout.firstChild) layout.insertBefore(node, layout.firstChild);
