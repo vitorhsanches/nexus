@@ -2,13 +2,16 @@
 
 Assigns an available agent to a task from the existing Task Registry,
 drives both the task and agent lifecycles, and simulates the agent's work.
-No external AI models are invoked.
+Each execution is wrapped in an AgentSession from the Nexus Agent Workspace
+V1, which tracks the task-to-agent link across the run. No external AI models
+are invoked.
 """
 
 from nexus.agents.models import TaskExecutionResult
 from nexus.agents.registry import NoAvailableAgentError
 from nexus.capabilities.router import select_agent_for_capabilities
 from nexus.tasks.registry import get_task, update_task_status
+from nexus.workspaces.service import complete_session, fail_session, start_session
 
 
 class AgentExecutor:
@@ -16,14 +19,16 @@ class AgentExecutor:
 
     def __init__(self, agent_registry):
         self.agent_registry = agent_registry
+        self.last_session = None
 
     def execute_task(self, task_id, agent_id=None):
         """Execute a task with an explicit or automatically selected agent.
 
         When ``agent_id`` is omitted, the capability router selects the best
-        available agent for the task's required capabilities. Returns a
-        TaskExecutionResult on success and raises an exception on failure
-        paths that prevent execution.
+        available agent for the task's required capabilities. The execution is
+        tracked in an AgentSession, which is marked COMPLETED on success and
+        FAILED on exception. Returns a TaskExecutionResult on success and
+        raises an exception on failure paths that prevent execution.
         """
         task = get_task(task_id)
 
@@ -36,19 +41,31 @@ class AgentExecutor:
                 agent_registry=self.agent_registry,
             )
 
-        # Assign agent and move both lifecycles through their valid chains.
+        # Assign agent and move the agent lifecycle into BUSY.
         task.assigned_agent = agent.agent_id
         self.agent_registry.update_agent_status(agent.agent_id, "BUSY")
 
+        # 1-2. Create the AgentSession and mark it RUNNING.
+        session = start_session(task_id=task_id, agent_id=agent.agent_id)
+        self.last_session = session
+
         ok = False
         try:
+            # 3. Run the existing simulated execution.
             self._run_task_lifecycle(task_id)
             ok = True
+        except Exception as exc:  # noqa: BLE001 - session must reflect failure
+            # 5. Mark the session FAILED on exception.
+            fail_session(session.session_id, error=str(exc))
+            raise
         finally:
             if ok:
                 self.agent_registry.update_agent_status(agent.agent_id, "AVAILABLE")
             else:
                 self.agent_registry.update_agent_status(agent.agent_id, "FAILED")
+
+        # 4. Mark the session COMPLETED on success.
+        complete_session(session.session_id, result="Task executed successfully")
 
         return TaskExecutionResult(
             task_id=task_id,
