@@ -1,10 +1,13 @@
-﻿import argparse
+import argparse
+import sys
 
 from nexus.registry.database import initialize_database
 from nexus.registry.projects import list_projects, sync_projects
 from nexus.registry.runs import count_active_runs, list_runs
 from nexus.registry.agents import count_active_agents, list_agents
 from nexus.orchestration.demo import create_demo_run
+from nexus.orchestration.go import GoError, run_go
+from nexus.orchestration.show import RunNotFoundError, show_run
 
 
 def _bootstrap() -> None:
@@ -159,28 +162,89 @@ def demo_command() -> None:
     print()
 
 
+def go_command(request: str) -> None:
+    try:
+        result = run_go(request)
+
+    except GoError as error:
+        print()
+        print(f"NEXUS GO FAILED: {error.code}")
+        print("=" * 60)
+        print(str(error))
+
+        if error.run_id:
+            print(f"Run : {error.run_id}")
+
+        print()
+        sys.exit(1)
+        return
+
+    print()
+    print("NEXUS GO COMPLETE")
+    print("=" * 60)
+    print(f"Run    : {result['run_id']}")
+    print(f"Status : {result['status']}")
+    print()
+
+
+def show_command(run_id: str) -> None:
+    try:
+        show_run(run_id)
+
+    except RunNotFoundError as error:
+        print()
+        print("NEXUS SHOW FAILED: RUN_NOT_FOUND")
+        print("=" * 60)
+        print(str(error))
+        print()
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="nexus",
         description="Nexus multi-project agent orchestration control plane.",
     )
 
-    parser.add_argument(
-        "command",
-        nargs="?",
-        default="status",
-        choices=[
-            "status",
-            "projects",
-            "runs",
-            "agents",
-            "demo",
-        ],
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("status", help="Show orchestration overview.")
+    subparsers.add_parser("projects", help="List registered projects.")
+    subparsers.add_parser("runs", help="List Runs.")
+    subparsers.add_parser("agents", help="List Agents.")
+    subparsers.add_parser("demo", help="Create a simulated demo Run.")
+
+    go_parser = subparsers.add_parser(
+        "go",
+        help="Route, plan, and execute a natural-language request.",
+    )
+    go_parser.add_argument(
+        "request",
+        help="Complete natural-language request, e.g. 'No Norte corrija o problema X'.",
+    )
+
+    show_parser = subparsers.add_parser(
+        "show",
+        help="Show full detail for a single Run.",
+    )
+    show_parser.add_argument(
+        "run_id",
+        help="Run id, e.g. RUN-XXXXXXXX.",
     )
 
     args = parser.parse_args()
 
+    command = args.command or "status"
+
     _bootstrap()
+
+    if command == "go":
+        go_command(args.request)
+        return
+
+    if command == "show":
+        show_command(args.run_id)
+        return
 
     commands = {
         "status": status_command,
@@ -190,9 +254,8 @@ def main() -> None:
         "demo": demo_command,
     }
 
-    commands[args.command]()
+    commands[command]()
 
 
 if __name__ == "__main__":
     main()
-

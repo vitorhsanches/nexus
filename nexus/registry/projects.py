@@ -1,4 +1,4 @@
-﻿import json
+import json
 from pathlib import Path
 
 from nexus.registry.database import get_connection
@@ -67,3 +67,24 @@ def get_project(project_id: str):
             """,
             (project_id,),
         ).fetchone()
+
+
+def list_projects_for_routing() -> list[dict]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, path, aliases_json, enabled
+            FROM projects
+            """
+        ).fetchall()
+
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "path": row["path"],
+            "aliases": json.loads(row["aliases_json"] or "[]"),
+            "enabled": bool(row["enabled"]),
+        }
+        for row in rows
+    ]

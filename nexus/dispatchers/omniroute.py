@@ -36,11 +36,6 @@ def run_omniroute_worker(
     effort: str = "low",
     parent_agent_id: str | None = None,
 ) -> dict:
-    if not ADAPTER_PATH.exists():
-        raise FileNotFoundError(
-            f"OmniRoute Worker adapter not found: {ADAPTER_PATH}"
-        )
-
     agent_id = create_agent(
         run_id=run_id,
         role="Worker",
@@ -50,6 +45,18 @@ def run_omniroute_worker(
         status="RUNNING",
         parent_agent_id=parent_agent_id,
     )
+
+    if not ADAPTER_PATH.exists():
+        update_agent_status(agent_id, "FAILED")
+
+        return {
+            "agent_id": agent_id,
+            "exit_code": None,
+            "status": "LAUNCH_FAILED",
+            "branch": None,
+            "worktree": None,
+            "error": f"OmniRoute Worker adapter not found: {ADAPTER_PATH}",
+        }
 
     command = [
         "powershell.exe",
@@ -76,14 +83,26 @@ def run_omniroute_worker(
     print(f"Repo  : {repo}")
     print()
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        update_agent_status(agent_id, "FAILED")
+
+        return {
+            "agent_id": agent_id,
+            "exit_code": None,
+            "status": "LAUNCH_FAILED",
+            "branch": None,
+            "worktree": None,
+            "error": str(error),
+        }
 
     output_lines: list[str] = []
 

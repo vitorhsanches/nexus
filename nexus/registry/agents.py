@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from nexus.registry.database import get_connection
@@ -185,3 +185,31 @@ def update_agent_execution(
             """,
             params,
         )
+
+
+def list_agents_for_run(run_id: str):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT
+                a.id,
+                a.run_id,
+                a.role,
+                a.provider,
+                a.model,
+                a.effort,
+                a.status,
+                a.branch,
+                a.worktree,
+                a.parent_agent_id,
+                a.started_at,
+                a.finished_at,
+                a.result
+            FROM agents a
+            WHERE a.run_id = ?
+            ORDER BY
+                COALESCE(a.started_at, "9999"),
+                a.id
+            """,
+            (run_id,),
+        ).fetchall()

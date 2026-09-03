@@ -1,7 +1,7 @@
 ﻿from copy import deepcopy
 
 from nexus.dispatchers.review import review_worker
-from nexus.orchestration.executor import execute_worker
+from nexus.orchestration.executor import PlanExecutionError, execute_worker
 from nexus.policies.escalation import (
     MAX_SAME_TIER_RETRIES,
     EscalationUnavailable,
@@ -31,14 +31,22 @@ def execute_progressively(
             "RUNNING",
         )
 
-        worker_result = execute_worker(
-            run_id=run_id,
-            repo=repo,
-            manager_id=manager_id,
-            worker=current_worker,
-            worker_index=attempt,
-            previous_failure=previous_failure,
-        )
+        try:
+            worker_result = execute_worker(
+                run_id=run_id,
+                repo=repo,
+                manager_id=manager_id,
+                worker=current_worker,
+                worker_index=attempt,
+                previous_failure=previous_failure,
+            )
+        except PlanExecutionError as error:
+            return {
+                "status": "FAILED",
+                "reason": "WORKER_EXECUTION_FAILED",
+                "history": history,
+                "worker": {"status": "FAILED", "error": str(error)},
+            }
 
         if worker_result["status"] != "COMPLETED":
             return {

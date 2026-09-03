@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from nexus.registry.database import get_connection
@@ -102,6 +102,59 @@ def update_run_status(run_id: str, status: str) -> None:
     if status in {"COMPLETED", "BLOCKED", "FAILED", "CANCELLED"}:
         fields.append("finished_at = ?")
         params.append(_now())
+
+    params.append(run_id)
+
+    with get_connection() as connection:
+        connection.execute(
+            f"""
+            UPDATE runs
+            SET {", ".join(fields)}
+            WHERE id = ?
+            """,
+            params,
+        )
+
+
+def get_run(run_id: str):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT
+                r.id,
+                r.project_id,
+                p.name AS project_name,
+                r.input,
+                r.intent,
+                r.status,
+                r.risk,
+                r.created_at,
+                r.started_at,
+                r.finished_at,
+                r.result,
+                r.commit_sha
+            FROM runs r
+            JOIN projects p ON p.id = r.project_id
+            WHERE r.id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+
+def update_run_result(run_id: str, result: str | None = None, commit_sha: str | None = None) -> None:
+    fields = []
+    params = []
+
+    if result is not None:
+        fields.append("result = ?")
+        params.append(result)
+
+    if commit_sha is not None:
+        fields.append("commit_sha = ?")
+        params.append(commit_sha)
+
+    if not fields:
+        return
 
     params.append(run_id)
 

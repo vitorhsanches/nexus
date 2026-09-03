@@ -129,8 +129,6 @@ def review_worker(
     model: str = "gpt-5.6-luna",
     effort: str = "low",
 ) -> dict:
-    codex = _find_codex()
-
     reviewer_id = create_agent(
         run_id=run_id,
         role="ManagerReview",
@@ -140,6 +138,19 @@ def review_worker(
         status="RUNNING",
         parent_agent_id=worker_id,
     )
+
+    try:
+        codex = _find_codex()
+    except (RuntimeError, FileNotFoundError) as error:
+        update_agent_status(reviewer_id, "FAILED")
+
+        return {
+            "reviewer_id": reviewer_id,
+            "status": "LAUNCH_FAILED",
+            "review": None,
+            "exit_code": None,
+            "error": str(error),
+        }
 
     prompt = f"""
 You are performing a narrow Manager review for a Nexus Worker.
@@ -244,14 +255,25 @@ Do not place markdown fences around the envelope.
     print(f"Worktree : {worktree}")
     print()
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        update_agent_status(reviewer_id, "FAILED")
+
+        return {
+            "reviewer_id": reviewer_id,
+            "status": "LAUNCH_FAILED",
+            "review": None,
+            "exit_code": None,
+            "error": str(error),
+        }
 
     output_lines = []
 

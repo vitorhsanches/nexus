@@ -184,8 +184,6 @@ def run_manager(
     model: str = "gpt-5.6-luna",
     effort: str = "low",
 ) -> dict:
-    codex = _find_codex()
-
     manager_id = create_agent(
         run_id=run_id,
         role="Manager",
@@ -194,6 +192,19 @@ def run_manager(
         effort=effort,
         status="RUNNING",
     )
+
+    try:
+        codex = _find_codex()
+    except (RuntimeError, FileNotFoundError) as error:
+        update_agent_status(manager_id, "FAILED")
+
+        return {
+            "manager_id": manager_id,
+            "status": "LAUNCH_FAILED",
+            "exit_code": None,
+            "plan": None,
+            "error": str(error),
+        }
 
     prompt = f"""
 Use $multi-agent-development-manager.
@@ -276,14 +287,25 @@ Do not place markdown fences around the JSON envelope.
     print(f"Repo  : {repo}")
     print()
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        update_agent_status(manager_id, "FAILED")
+
+        return {
+            "manager_id": manager_id,
+            "status": "LAUNCH_FAILED",
+            "exit_code": None,
+            "plan": None,
+            "error": str(error),
+        }
 
     output_lines: list[str] = []
 
