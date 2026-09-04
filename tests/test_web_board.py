@@ -161,7 +161,7 @@ class WebAppTestCase(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("Nexus Mission Board", response.text)
 
-    def test_create_demo_mission_flow(self):
+    def test_create_mission_flow(self):
         try:
             from starlette.testclient import TestClient
         except ImportError:  # pragma: no cover
@@ -171,25 +171,30 @@ class WebAppTestCase(unittest.TestCase):
 
         client = TestClient(app)
         with client:
-            created = client.post("/api/demo/mission")
-            self.assertEqual(created.status_code, 200)
-            payload = created.json()
-            mission = payload["mission"]
-            self.assertEqual(mission["title"], "Implement Authentication Module")
-            self.assertEqual(
-                {t["title"] for t in payload["tasks"]},
-                {
-                    "Analyze authentication requirements",
-                    "Design authentication architecture",
-                    "Implement authentication flow",
-                },
+            created = client.post(
+                "/api/missions",
+                json={"title": "Ship the board", "description": "From the UI"},
             )
-            self.assertEqual(len(payload["tasks"]), 3)
+            self.assertEqual(created.status_code, 200)
+            mission = created.json()["mission"]
+            self.assertEqual(mission["title"], "Ship the board")
+            self.assertEqual(mission["description"], "From the UI")
 
             missions = client.get("/api/missions").json()["missions"]
-            board = missions[-1]["board"]
-            self.assertEqual(board["mission_id"], mission["mission_id"])
-            self.assertEqual(len(board["task_ids"]), 3)
+            self.assertIn(mission["mission_id"], {m["mission_id"] for m in missions})
+
+    def test_create_mission_requires_title(self):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:  # pragma: no cover
+            self.skipTest("TestClient not installed")
+
+        from nexus.web.app import app
+
+        client = TestClient(app)
+        with client:
+            response = client.post("/api/missions", json={"title": "   "})
+            self.assertEqual(response.status_code, 422)
 
     def test_routes_respond(self):
         try:

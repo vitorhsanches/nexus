@@ -12,8 +12,13 @@ and never writes).
 """
 
 from dataclasses import asdict, is_dataclass
+from uuid import uuid4
 
-from nexus.missions.service import create_mission_from_plan, list_missions
+from nexus.missions.service import (
+    create_mission as create_engine_mission,
+    create_mission_from_plan,
+    list_missions,
+)
 from nexus.tasks import registry as task_registry
 from nexus.web.agents import agent_registry
 from nexus.workspaces import registry as session_registry
@@ -80,6 +85,19 @@ def create_demo_mission(run_id):
     Task Registry; nothing is persisted. Returns the created Mission.
     """
     return create_mission_from_plan(_demo_plan(), run_id=run_id)
+
+
+def create_mission(title, description=None):
+    """Create an empty in-memory Mission through the Mission Engine.
+
+    The mission lives only in the in-memory Mission Engine and is not
+    persisted. Returns the created Mission.
+    """
+    return create_engine_mission(
+        run_id="RUN-" + uuid4().hex[:4].upper(),
+        title=title,
+        description=description,
+    )
 
 
 def _to_dict(value):

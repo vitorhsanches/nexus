@@ -38,7 +38,7 @@
       </div>
     </div>
     <div class="topbar-actions">
-      <button class="demo-btn" id="create-demo-btn" type="button" title="Create a demo mission">CREATE DEMO MISSION</button>
+      <button class="create-btn" id="create-mission-btn" type="button" title="Create a mission">CREATE MISSION</button>
       <button class="refresh-btn" id="refresh-btn" type="button" title="Refresh data">Refresh</button>
     </div>
   </header>
@@ -69,6 +69,25 @@
       <div class="session-list" id="session-list"></div>
     </aside>
   </main>
+
+  <div class="modal-overlay" id="mission-modal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2 class="modal-title">New Mission</h2>
+        <button class="modal-close" id="mission-modal-close" type="button" aria-label="Close">&times;</button>
+      </div>
+      <form id="mission-form">
+        <label class="form-label" for="mission-title">Title</label>
+        <input class="form-input" id="mission-title" name="title" type="text" placeholder="Mission title" required>
+        <label class="form-label" for="mission-description">Description</label>
+        <textarea class="form-input form-textarea" id="mission-description" name="description" placeholder="Mission description"></textarea>
+        <div class="modal-actions">
+          <button class="btn-secondary" id="mission-cancel" type="button">Cancel</button>
+          <button class="btn-primary" id="mission-submit" type="submit">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <footer class="footer">
     <span>Nexus Local Mission Board &middot; read-only local view</span>

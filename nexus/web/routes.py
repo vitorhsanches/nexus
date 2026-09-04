@@ -1,6 +1,7 @@
 ﻿"""JSON API routes for the Nexus Local Mission Board UI V1."""
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from nexus.tasks.registry import TaskNotFoundError
 from nexus.web import execution, services
@@ -58,6 +59,29 @@ def execute_task(task_id: str):
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     return {"execution": summary}
+
+
+class MissionCreateRequest(BaseModel):
+    """Request body for creating a mission through the UI."""
+
+    title: str
+    description: str = ""
+
+
+@router.post("/missions")
+def create_mission(request: MissionCreateRequest):
+    """Create an in-memory Mission through the Mission Engine.
+
+    The mission lives only in memory and is not persisted. Returns the
+    created mission with its board breakdown.
+    """
+    title = request.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title must not be empty")
+
+    description = request.description.strip() or None
+    mission = services.create_mission(title=title, description=description)
+    return {"mission": services._to_dict(mission)}
 
 
 @router.post("/demo/mission")

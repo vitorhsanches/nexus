@@ -10,7 +10,14 @@
     board: document.getElementById("board"),
     agents: document.getElementById("agent-list"),
     sessions: document.getElementById("session-list"),
-    createDemo: document.getElementById("create-demo-btn"),
+    createMission: document.getElementById("create-mission-btn"),
+    modal: document.getElementById("mission-modal"),
+    form: document.getElementById("mission-form"),
+    title: document.getElementById("mission-title"),
+    description: document.getElementById("mission-description"),
+    submit: document.getElementById("mission-submit"),
+    cancel: document.getElementById("mission-cancel"),
+    modalClose: document.getElementById("mission-modal-close"),
     refresh: document.getElementById("refresh-btn"),
     updated: document.getElementById("updated-at"),
     missionCount: document.getElementById("mission-count"),
@@ -209,21 +216,52 @@
     });
   }
 
-  function createDemoMission() {
-    els.createDemo.disabled = true;
-    return fetch("/api/demo/mission", { method: "POST" }).then(function (res) {
-      if (!res.ok) throw new Error("/api/demo/mission -> HTTP " + res.status);
+  function openModal() {
+    els.modal.hidden = false;
+    els.title.value = "";
+    els.description.value = "";
+    els.title.focus();
+  }
+
+  function closeModal() {
+    els.modal.hidden = true;
+  }
+
+  function createMission() {
+    var title = els.title.value.trim();
+    if (!title) return;
+    els.submit.disabled = true;
+    var payload = {
+      title: title,
+      description: els.description.value.trim(),
+    };
+    return fetch("/api/missions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(function (res) {
+      if (!res.ok) throw new Error("/api/missions -> HTTP " + res.status);
       return res.json();
     }).then(function () {
+      closeModal();
       return loadAll();
     }).catch(function (err) {
-      showError("Demo creation failed: " + (err && err.message ? err.message : String(err)));
+      showError("Mission creation failed: " + (err && err.message ? err.message : String(err)));
     }).finally(function () {
-      els.createDemo.disabled = false;
+      els.submit.disabled = false;
     });
   }
 
-  els.createDemo.addEventListener("click", function () { createDemoMission(); });
+  els.createMission.addEventListener("click", function () { openModal(); });
+  els.cancel.addEventListener("click", function () { closeModal(); });
+  els.modalClose.addEventListener("click", function () { closeModal(); });
+  els.modal.addEventListener("click", function (e) {
+    if (e.target === els.modal) closeModal();
+  });
+  els.form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    createMission();
+  });
 
   function executeTask(taskId) {
     return fetch("/api/tasks/" + taskId + "/execute", { method: "POST" }).then(function (res) {
