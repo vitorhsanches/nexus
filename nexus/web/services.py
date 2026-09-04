@@ -49,12 +49,25 @@ DEMO_TASK_TITLES = (
 
 
 def _demo_plan():
-    """Return the deterministic example plan used by the demo endpoint."""
+    """Return the deterministic example plan used by the demo endpoint.
+
+    Each worker carries the ``required_capabilities`` for its task so that the
+    Capability Router can select the matching default agent at execution time.
+    """
+    capabilities_by_title = {
+        DEMO_TASK_TITLES[0]: ["analysis"],
+        DEMO_TASK_TITLES[1]: ["architecture"],
+        DEMO_TASK_TITLES[2]: ["coding"],
+    }
     return {
         "title": "Implement Authentication Module",
         "description": "A demo mission generated from the local Mission Board UI.",
         "workers": [
-            {"scope": title, "reason": "Generated from the demo mission plan."}
+            {
+                "scope": title,
+                "reason": "Generated from the demo mission plan.",
+                "required_capabilities": capabilities_by_title[title],
+            }
             for title in DEMO_TASK_TITLES
         ],
     }

@@ -124,5 +124,37 @@ class MissionGenerationTestCase(unittest.TestCase):
         self.assertIn("Write integration tests", titles)
 
 
+
+class MissionExecutionPolicyTestCase(unittest.TestCase):
+    """Verifies required capabilities propagate from plans into tasks."""
+
+    def _build_plan(self, workers):
+        return {
+            "title": "Plan Mission",
+            "description": "desc",
+            "workers": workers,
+        }
+
+    def test_required_capabilities_carried_into_execution_policy(self):
+        plan = self._build_plan(
+            [
+                {
+                    "scope": "Analyze auth requirements",
+                    "reason": "analysis",
+                    "required_capabilities": ["analysis"],
+                }
+            ]
+        )
+        mission = generate_mission_from_plan(plan, run_id="RUN-1")
+        task = mission.tasks[0]
+        self.assertEqual(task.execution_policy["required_capabilities"], ["analysis"])
+
+    def test_missing_required_capabilities_yields_empty_policy(self):
+        plan = self._build_plan([{"scope": "Build", "reason": "impl"}])
+        mission = generate_mission_from_plan(plan, run_id="RUN-1")
+        task = mission.tasks[0]
+        self.assertNotIn("required_capabilities", task.execution_policy or {})
+
+
 if __name__ == "__main__":
     unittest.main()

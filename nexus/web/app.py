@@ -1,4 +1,4 @@
-"""FastAPI application for the Nexus Local Mission Board UI V1.
+﻿"""FastAPI application for the Nexus Local Mission Board UI V1.
 
 Presents a single-page dashboard over the read-only web services layer and
 exposes JSON endpoints for missions, tasks, agents, and execution sessions.
@@ -9,6 +9,7 @@ Run locally with:
 Open http://localhost:8000 in a browser.
 """
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
+from nexus.agents.bootstrap import initialize_default_agents
 from nexus.web import services
 from nexus.web.routes import router
 
@@ -28,6 +30,13 @@ except Exception:  # pragma: no cover - packaging metadata may be absent
     APP_VERSION = "v1"
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize default agents once when the application starts."""
+    initialize_default_agents()
+    yield
+
+
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
@@ -36,6 +45,7 @@ STATIC_DIR = WEB_DIR / "static"
 def create_app():
     """Build and return the FastAPI application instance."""
     app = FastAPI(
+        lifespan=lifespan,
         title="Nexus Local Mission Board",
         description=(
             "Local visualization for Nexus missions, tasks, agents, and "

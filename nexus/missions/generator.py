@@ -59,4 +59,8 @@ def _execution_policy(worker: dict) -> dict:
         if isinstance(value, str) and value:
             policy[key] = value
 
+    required = worker.get("required_capabilities")
+    if isinstance(required, (list, tuple)) and required:
+        policy["required_capabilities"] = list(required)
+
     return policy
