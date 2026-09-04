@@ -102,6 +102,15 @@
         if (t.acceptance_criteria && t.acceptance_criteria.length) {
           card.appendChild(el("div", "task-caps ac", "AC: " + t.acceptance_criteria.length));
         }
+        if (t.status !== "COMPLETED" && t.status !== "FAILED") {
+          var actions = el("div", "task-actions");
+          var btn = el("button", "execute-btn", "EXECUTE");
+          btn.type = "button";
+          btn.setAttribute("data-task-id", t.task_id);
+          btn.addEventListener("click", function () { executeTask(t.task_id); });
+          actions.appendChild(btn);
+          card.appendChild(actions);
+        }
         cells[name].appendChild(card);
       });
     });
@@ -215,6 +224,17 @@
   }
 
   els.createDemo.addEventListener("click", function () { createDemoMission(); });
+
+  function executeTask(taskId) {
+    return fetch("/api/tasks/" + taskId + "/execute", { method: "POST" }).then(function (res) {
+      if (!res.ok) throw new Error("/api/tasks/" + taskId + "/execute -> HTTP " + res.status);
+      return res.json();
+    }).then(function () {
+      return loadAll();
+    }).catch(function (err) {
+      showError("Execution failed: " + (err && err.message ? err.message : String(err)));
+    });
+  }
   els.refresh.addEventListener("click", function () { loadAll(); });
   loadAll();
   setInterval(loadAll, 15000);

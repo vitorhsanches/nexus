@@ -1,8 +1,9 @@
-"""JSON API routes for the Nexus Local Mission Board UI V1."""
+﻿"""JSON API routes for the Nexus Local Mission Board UI V1."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
-from nexus.web import services
+from nexus.tasks.registry import TaskNotFoundError
+from nexus.web import execution, services
 
 
 router = APIRouter(prefix="/api")
@@ -42,6 +43,21 @@ def board():
 def summary():
     """Return aggregate counters for the dashboard header."""
     return services.get_summary()
+
+
+@router.post("/tasks/{task_id}/execute")
+def execute_task(task_id: str):
+    """Execute a task through the Nexus agent execution pipeline.
+
+    Loads the task, selects an agent via the capability router, opens a
+    workspace session, and advances the lifecycle CREATED -> RUNNING ->
+    COMPLETED. Returns an execution summary.
+    """
+    try:
+        summary = execution.execute_task(task_id)
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+    return {"execution": summary}
 
 
 @router.post("/demo/mission")
