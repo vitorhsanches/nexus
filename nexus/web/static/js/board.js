@@ -10,6 +10,7 @@
     board: document.getElementById("board"),
     agents: document.getElementById("agent-list"),
     sessions: document.getElementById("session-list"),
+    createDemo: document.getElementById("create-demo-btn"),
     refresh: document.getElementById("refresh-btn"),
     updated: document.getElementById("updated-at"),
     missionCount: document.getElementById("mission-count"),
@@ -199,6 +200,21 @@
     });
   }
 
+  function createDemoMission() {
+    els.createDemo.disabled = true;
+    return fetch("/api/demo/mission", { method: "POST" }).then(function (res) {
+      if (!res.ok) throw new Error("/api/demo/mission -> HTTP " + res.status);
+      return res.json();
+    }).then(function () {
+      return loadAll();
+    }).catch(function (err) {
+      showError("Demo creation failed: " + (err && err.message ? err.message : String(err)));
+    }).finally(function () {
+      els.createDemo.disabled = false;
+    });
+  }
+
+  els.createDemo.addEventListener("click", function () { createDemoMission(); });
   els.refresh.addEventListener("click", function () { loadAll(); });
   loadAll();
   setInterval(loadAll, 15000);

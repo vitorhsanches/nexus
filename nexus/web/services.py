@@ -13,7 +13,7 @@ and never writes).
 
 from dataclasses import asdict, is_dataclass
 
-from nexus.missions.service import list_missions
+from nexus.missions.service import create_mission_from_plan, list_missions
 from nexus.tasks import registry as task_registry
 from nexus.web.agents import agent_registry
 from nexus.workspaces import registry as session_registry
@@ -39,6 +39,34 @@ STATUS_TO_COLUMN = {
     "COMPLETED": "DONE",
     "FAILED": "FAILED",
 }
+
+
+DEMO_TASK_TITLES = (
+    "Analyze authentication requirements",
+    "Design authentication architecture",
+    "Implement authentication flow",
+)
+
+
+def _demo_plan():
+    """Return the deterministic example plan used by the demo endpoint."""
+    return {
+        "title": "Implement Authentication Module",
+        "description": "A demo mission generated from the local Mission Board UI.",
+        "workers": [
+            {"scope": title, "reason": "Generated from the demo mission plan."}
+            for title in DEMO_TASK_TITLES
+        ],
+    }
+
+
+def create_demo_mission(run_id):
+    """Create the deterministic demo mission through the Mission Engine.
+
+    The mission and its tasks live only in the in-memory Mission Engine and
+    Task Registry; nothing is persisted. Returns the created Mission.
+    """
+    return create_mission_from_plan(_demo_plan(), run_id=run_id)
 
 
 def _to_dict(value):

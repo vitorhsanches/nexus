@@ -42,3 +42,14 @@ def board():
 def summary():
     """Return aggregate counters for the dashboard header."""
     return services.get_summary()
+
+
+@router.post("/demo/mission")
+def create_demo_mission():
+    """Create a deterministic demo mission through the Mission Engine.
+
+    Temporarily used to exercise the whole mission -> task -> board flow from
+    the UI. The mission is held only in memory and is not persisted.
+    """
+    mission = services.create_demo_mission(run_id="RUN-DEMO")
+    return {"mission": services._to_dict(mission), "tasks": services.get_tasks()}

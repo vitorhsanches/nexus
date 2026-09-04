@@ -72,6 +72,23 @@ html, body {
   font-size: 13px;
 }
 .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
+
+.demo-btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.demo-btn:hover { background: var(--accent); color: var(--bg); }
+.demo-btn:disabled { opacity: 0.5; cursor: wait; }
+
 .refresh-btn:disabled { opacity: 0.5; cursor: wait; }
 
 /* ---------- Layout ---------- */
