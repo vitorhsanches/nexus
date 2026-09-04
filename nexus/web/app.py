@@ -52,9 +52,9 @@ def create_app():
     async def board(request: Request):
         """Render the dashboard shell."""
         return templates.TemplateResponse(
-            "board.html",
-            {
-                "request": request,
+            request=request,
+            name="board.html",
+            context={
                 "app_version": APP_VERSION,
                 "summary": services.get_summary(),
                 "columns": services.COLUMNS,
