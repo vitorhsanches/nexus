@@ -190,6 +190,7 @@ def _mission_board(mission_id):
         task_ids.append(task.task_id)
 
     return {
+        "mission_id": mission_id,
         "columns": [
             {"name": name, "task_ids": columns.get(name, [])} for name in COLUMNS
         ],
