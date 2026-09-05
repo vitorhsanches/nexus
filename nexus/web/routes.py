@@ -69,6 +69,8 @@ class MissionCreateRequest(BaseModel):
 
     title: str
     description: str = ""
+    project_id: str | None = None
+    execution_path: str | None = None
 
 
 @router.post("/missions")
@@ -83,7 +85,12 @@ def create_mission(request: MissionCreateRequest):
         raise HTTPException(status_code=422, detail="title must not be empty")
 
     description = request.description.strip() or None
-    mission = services.create_mission(title=title, description=description)
+    mission = services.create_mission(
+        title=title,
+        description=description,
+        project_id=request.project_id,
+        execution_path=request.execution_path,
+    )
     return {"mission": services._to_dict(mission)}
 
 

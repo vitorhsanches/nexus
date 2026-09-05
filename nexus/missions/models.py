@@ -23,3 +23,5 @@ class Mission:
     status: str = "CREATED"
     tasks: Optional[list] = field(default=None)
     created_at: Optional[str] = None
+    project_id: Optional[str] = None
+    execution_path: Optional[str] = None

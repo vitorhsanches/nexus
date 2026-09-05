@@ -24,6 +24,8 @@ def create_mission(
     title: str,
     description: str | None = None,
     status: str = "CREATED",
+    project_id: str | None = None,
+    execution_path: str | None = None,
 ) -> Mission:
     """Create an empty Mission with no tasks."""
     if status not in MISSION_STATUSES:
@@ -37,6 +39,8 @@ def create_mission(
         status=status,
         tasks=[],
         created_at=_now(),
+        project_id=project_id,
+        execution_path=execution_path,
     )
     _missions[mission.mission_id] = mission
     return mission

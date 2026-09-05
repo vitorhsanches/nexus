@@ -63,15 +63,21 @@ class ManagerAgent:
 
         if isinstance(mission, dict):
             run_id = mission.get("run_id") or "RUN-MANAGER"
+            project_id = mission.get("project_id")
+            execution_path = mission.get("execution_path")
         else:
             run_id = getattr(mission, "run_id", None) or "RUN-MANAGER"
+            project_id = getattr(mission, "project_id", None)
+            execution_path = getattr(mission, "execution_path", None)
 
-        mission = self._materialize(plan, run_id)
+        materialized_mission = self._materialize(
+            plan, run_id, project_id=project_id, execution_path=execution_path
+        )
 
         return ManagerResult(
             manager_id=self.manager_id,
-            mission=mission,
-            tasks=list(mission.tasks),
+            mission=materialized_mission,
+            tasks=list(materialized_mission.tasks),
             intent=plan.intent,
         )
 
@@ -79,9 +85,22 @@ class ManagerAgent:
         """Plan a Mission and return the created Mission with its tasks."""
         return self.execute(mission).mission
 
-    def _materialize(self, plan, run_id: str) -> Mission:
-        """Create a Mission and its tasks through the Mission Engine."""
+    def _materialize(
+        self, plan, run_id: str, project_id=None, execution_path=None
+    ) -> Mission:
+        """Create a Mission and its tasks through the Mission Engine.
+
+        The planner only decides *what* work is needed; orchestration
+        context (project_id/execution_path) decides *where/how* it may
+        execute and is attached here, separately from semantic planning.
+        """
         payload = plan.to_dict()
+
+        if project_id:
+            payload["project_id"] = project_id
+
+        if execution_path:
+            payload["execution_path"] = execution_path
 
         try:
             mission = mission_service.create_mission_from_plan(

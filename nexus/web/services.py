@@ -87,7 +87,7 @@ def create_demo_mission(run_id):
     return create_mission_from_plan(_demo_plan(), run_id=run_id)
 
 
-def create_mission(title, description=None):
+def create_mission(title, description=None, project_id=None, execution_path=None):
     """Create an empty in-memory Mission through the Mission Engine.
 
     The mission lives only in the in-memory Mission Engine and is not
@@ -97,6 +97,8 @@ def create_mission(title, description=None):
         run_id="RUN-" + uuid4().hex[:4].upper(),
         title=title,
         description=description,
+        project_id=project_id,
+        execution_path=execution_path,
     )
 
 

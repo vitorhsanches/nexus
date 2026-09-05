@@ -24,6 +24,14 @@ def generate_mission_from_plan(plan: dict, run_id: str) -> Mission:
     if not isinstance(description, str):
         description = None
 
+    plan_project_id = plan.get("project_id")
+    plan_project_id = plan_project_id if isinstance(plan_project_id, str) and plan_project_id else None
+
+    plan_execution_path = plan.get("execution_path")
+    plan_execution_path = (
+        plan_execution_path if isinstance(plan_execution_path, str) and plan_execution_path else None
+    )
+
     mission = Mission(
         mission_id=plan.get("mission_id") or _new_mission_id(),
         run_id=run_id,
@@ -31,6 +39,8 @@ def generate_mission_from_plan(plan: dict, run_id: str) -> Mission:
         description=description,
         status="CREATED",
         tasks=[],
+        project_id=plan_project_id,
+        execution_path=plan_execution_path,
     )
 
     workers = plan.get("workers") or []
@@ -43,15 +53,21 @@ def generate_mission_from_plan(plan: dict, run_id: str) -> Mission:
             description=str(worker.get("reason") or "Generated from plan."),
             status="CREATED",
             priority=str(worker.get("priority") or "MEDIUM"),
-            execution_policy=_execution_policy(worker),
+            execution_policy=_execution_policy(
+                worker, plan_project_id, plan_execution_path
+            ),
         )
         mission.tasks.append(task)
 
     return mission
 
 
-def _execution_policy(worker: dict) -> dict:
-    """Build an execution policy from a worker while preserving provider/model."""
+def _execution_policy(worker: dict, plan_project_id=None, plan_execution_path=None) -> dict:
+    """Build an execution policy from a worker while preserving provider/model.
+
+    Plan-level ``project_id``/``execution_path`` are inherited into every
+    generated task unless the worker explicitly overrides them.
+    """
     policy = {}
 
     for key in ("provider", "model", "effort", "route_class", "execution_path"):
@@ -62,5 +78,14 @@ def _execution_policy(worker: dict) -> dict:
     required = worker.get("required_capabilities")
     if isinstance(required, (list, tuple)) and required:
         policy["required_capabilities"] = list(required)
+
+    worker_project_id = worker.get("project_id")
+    if isinstance(worker_project_id, str) and worker_project_id:
+        policy["project_id"] = worker_project_id
+    elif plan_project_id:
+        policy["project_id"] = plan_project_id
+
+    if "execution_path" not in policy and plan_execution_path:
+        policy["execution_path"] = plan_execution_path
 
     return policy
