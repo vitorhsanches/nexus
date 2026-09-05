@@ -4,11 +4,14 @@ Thin orchestration over the existing Agent Execution Loop and Agent Workspace.
 For a given task it drives the whole execution flow by reusing the current
 abstractions: the Task Registry, the AgentExecutor (which selects an agent via
 the capability router, opens a workspace session, and advances the task
-lifecycle), and the Task Registry Attempt record. No external AI models are
-invoked.
+lifecycle), and the Task Registry Attempt record. Execution policy resolution
+(simulated vs. omniroute, and the real repository target for omniroute) is
+delegated to ``nexus.agents.policy.resolve_execution_policy`` so the safe
+default (SimulatedAdapter) is always used unless a task explicitly opts in.
 """
 
 from nexus.agents.executor import AgentExecutor
+from nexus.agents.policy import resolve_execution_policy
 from nexus.tasks import registry as task_registry
 from nexus.web.agents import agent_registry
 
@@ -16,22 +19,44 @@ from nexus.web.agents import agent_registry
 def execute_task(task_id):
     """Execute a task through the existing pipeline and return a summary.
 
-    Retrieves the task from the Task Registry, runs the existing
-    ``AgentExecutor`` (which selects an agent automatically via the capability
-    router, creates a workspace execution session, and advances the task status
-    through CREATED -> RUNNING -> COMPLETED), records an execution attempt, and
-    returns an execution summary dict.
+    Retrieves the task from the Task Registry, resolves its execution policy
+    (adapter + workspace target), runs the existing ``AgentExecutor`` (which
+    selects an agent automatically via the capability router, creates a
+    workspace execution session, and advances the task status through
+    CREATED -> RUNNING -> COMPLETED, or RUNNING -> FAILED on adapter
+    failure), records an execution attempt, and returns an execution summary
+    dict. Raises ``ExecutionPolicyError`` before any lifecycle transition or
+    subprocess invocation when the policy cannot be resolved safely.
     """
-    task_registry.get_task(task_id)
+    task = task_registry.get_task(task_id)
 
-    executor = AgentExecutor(agent_registry)
-    result = executor.execute_task(task_id)
+    resolved = resolve_execution_policy(task.execution_policy)
+
+    executor = AgentExecutor(agent_registry, adapter=resolved.adapter)
+
+    try:
+        result = executor.execute_task(
+            task_id, workspace_path=resolved.workspace_path
+        )
+    except Exception:
+        task = task_registry.get_task(task_id)
+        agent_id = task.assigned_agent
+        if agent_id is not None:
+            agent = agent_registry.get_agent(agent_id)
+            attempt = task_registry.create_attempt(
+                task_id=task_id,
+                agent_id=agent_id,
+                model=agent.model,
+                status=task.status,
+                result=None,
+            )
+        raise
 
     agent = agent_registry.get_agent(result.agent_id)
     attempt = task_registry.create_attempt(
         task_id=task_id,
         agent_id=result.agent_id,
-        model=agent.model,
+        model=result.routed_model or agent.model,
         status=result.status,
         result=result.output,
     )
@@ -43,6 +68,10 @@ def execute_task(task_id):
         "task_id": task_id,
         "status": task.status,
         "assigned_agent": result.agent_id,
+        "execution_path": resolved.execution_path,
+        "workspace_path": resolved.workspace_path,
+        "project_id": resolved.project_id,
+        "routed_model": result.routed_model,
         "attempt_id": attempt.attempt_id,
         "session_id": session.session_id if session is not None else None,
         "output": result.output,

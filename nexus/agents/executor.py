@@ -28,7 +28,7 @@ class AgentExecutor:
         # never invokes external models unless a real adapter is supplied.
         self.adapter = adapter if adapter is not None else SimulatedAdapter()
 
-    def execute_task(self, task_id, agent_id=None):
+    def execute_task(self, task_id, agent_id=None, adapter=None, workspace_path=None):
         """Execute a task with an explicit or automatically selected agent.
 
         When ``agent_id`` is omitted, the capability router selects the best
@@ -56,15 +56,21 @@ class AgentExecutor:
         session = start_session(task_id=task_id, agent_id=agent.agent_id)
         self.last_session = session
 
+        active_adapter = adapter if adapter is not None else self.adapter
+
         ok = False
+        reached_running = False
         adapter_result = None
         try:
             # 3. Advance the task lifecycle up to RUNNING, then delegate the
             # actual work to the configured adapter.
             self._run_task_lifecycle(task_id)
+            reached_running = True
 
-            context = self._build_context(task, agent, required)
-            adapter_result = self.adapter.run(context)
+            context = self._build_context(
+                task, agent, required, workspace_path=workspace_path
+            )
+            adapter_result = active_adapter.run(context)
 
             if not adapter_result.success:
                 raise RuntimeError(adapter_result.error or "Adapter execution failed")
@@ -76,6 +82,11 @@ class AgentExecutor:
         except Exception as exc:  # noqa: BLE001 - session must reflect failure
             # 5. Mark the session FAILED on exception.
             fail_session(session.session_id, error=str(exc))
+            # Only move the task to FAILED once it has actually reached
+            # RUNNING; a lifecycle failure earlier in the chain must not
+            # attempt an invalid transition.
+            if reached_running:
+                update_task_status(task_id, "FAILED")
             raise
         finally:
             if ok:
@@ -92,6 +103,7 @@ class AgentExecutor:
             status="COMPLETED",
             output=adapter_result.output or "Task executed successfully by agent",
             error=None,
+            routed_model=adapter_result.routed_model,
         )
 
     @staticmethod
@@ -105,14 +117,15 @@ class AgentExecutor:
             update_task_status(task_id, target)
 
     @staticmethod
-    def _build_context(task, agent, required_capabilities):
+    def _build_context(task, agent, required_capabilities, workspace_path=None):
         policy = task.execution_policy if isinstance(task.execution_policy, dict) else None
         mission_context = None
         if policy is not None:
             mission_context = policy.get("mission_context")
-        workspace_path = None
-        if policy is not None:
-            workspace_path = policy.get("workspace_path")
+
+        resolved_workspace_path = workspace_path
+        if resolved_workspace_path is None and policy is not None:
+            resolved_workspace_path = policy.get("workspace_path")
 
         return ExecutionContext(
             task_id=task.task_id,
@@ -120,7 +133,7 @@ class AgentExecutor:
             required_capabilities=list(required_capabilities or []),
             execution_policy=policy,
             mission_context=mission_context,
-            workspace_path=workspace_path,
+            workspace_path=resolved_workspace_path,
             agent_id=agent.agent_id,
             agent_model=agent.model,
         )

@@ -19,6 +19,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from nexus.agents.bootstrap import initialize_default_agents
+from nexus.registry.database import initialize_database
+from nexus.registry.projects import sync_projects
 from nexus.web import services
 from nexus.web.routes import router
 
@@ -32,7 +34,14 @@ except Exception:  # pragma: no cover - packaging metadata may be absent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize default agents once when the application starts."""
+    """Initialize the project registry and default agents on startup.
+
+    Reuses the existing Project Router infrastructure (SQLite-backed
+    registry + config/projects.json sync) rather than creating a second
+    registry. Both calls are idempotent, so repeated startups are safe.
+    """
+    initialize_database()
+    sync_projects()
     initialize_default_agents()
     yield
 

@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from nexus.agents.policy import ExecutionPolicyError
 from nexus.tasks.registry import TaskNotFoundError
 from nexus.web import execution, services
 
@@ -58,6 +59,8 @@ def execute_task(task_id: str):
         summary = execution.execute_task(task_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+    except ExecutionPolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return {"execution": summary}
 
 

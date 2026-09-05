@@ -124,20 +124,26 @@ class OmniRouteAdapter(ExecutionAdapter):
         command = build_command(
             context, script_path=self.script_path, shell=self.shell
         )
+        model, _effort = select_route(context.required_capabilities)
 
         try:
             completed = self._runner(command)
         except Exception as exc:  # noqa: BLE001 - surfaced as adapter failure
-            return AdapterResult(success=False, output=None, error=str(exc))
+            return AdapterResult(
+                success=False, output=None, error=str(exc), routed_model=model
+            )
 
         if completed.returncode != 0:
             return AdapterResult(
                 success=False,
                 output=completed.stdout,
                 error=completed.stderr or f"Worker exited with code {completed.returncode}",
+                routed_model=model,
             )
 
-        return AdapterResult(success=True, output=completed.stdout, error=None)
+        return AdapterResult(
+            success=True, output=completed.stdout, error=None, routed_model=model
+        )
 
     @staticmethod
     def _run_subprocess(command):

@@ -33,6 +33,7 @@ class AdapterResult:
     success: bool
     output: Optional[str] = None
     error: Optional[str] = None
+    routed_model: Optional[str] = None
 
 
 class ExecutionAdapter(ABC):

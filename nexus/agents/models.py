@@ -39,3 +39,4 @@ class TaskExecutionResult:
     status: str
     output: Optional[str] = None
     error: Optional[str] = None
+    routed_model: Optional[str] = None
