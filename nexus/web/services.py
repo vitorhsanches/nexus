@@ -22,6 +22,7 @@ from nexus.missions.service import (
     get_mission as get_engine_mission,
     list_missions,
     MissionNotFoundError,
+    update_mission_status,
 )
 from nexus.tasks import registry as task_registry
 from nexus.web.agents import agent_registry
@@ -235,29 +236,60 @@ def _mission_board(mission_id):
     }
 
 
+def _normalize_to_ready(mission_id):
+    """Advance a Mission through legal transitions until it reaches READY.
+
+    Safe to call when the Mission is already CREATED, PLANNING, or READY.
+    Never touches COMPLETED or FAILED Missions.
+    """
+    mission = get_engine_mission(mission_id)
+    if mission.status == "CREATED":
+        mission = update_mission_status(mission_id, "PLANNING")
+    if mission.status == "PLANNING":
+        mission = update_mission_status(mission_id, "READY")
+    return mission
+
+
 def plan_mission(mission_id):
     """Plan an existing Mission through the Manager Agent (idempotent).
 
-    Loads the Mission from the Mission Engine, then runs the existing
+    Owns the Mission planning lifecycle end to end: CREATED -> PLANNING ->
+    READY. Loads the Mission from the Mission Engine, then runs the existing
     deterministic ManagerAgent against it so generated Tasks inherit the
     Mission's project_id/execution_path and are immediately visible on the
     existing Mission Board. Never executes any Task.
 
     If the Mission already owns Tasks (i.e. it was already planned), the
     Manager is not invoked again and the existing Mission/Tasks are
-    returned as-is, so calling this twice never creates duplicate Tasks or
-    duplicate Board entries.
+    returned as-is (normalized to READY), so calling this twice never
+    creates duplicate Tasks or duplicate Board entries.
 
-    Raises MissionNotFoundError when mission_id is unknown, and
-    ManagerError when the Manager fails to materialize a plan.
+    Raises MissionNotFoundError when mission_id is unknown, and re-raises
+    the original planning/materialization error (including ManagerError)
+    after moving the Mission to FAILED when a legal failure transition
+    exists. Never leaves a Mission stuck PLANNING.
     """
     mission = get_engine_mission(mission_id)
+
+    if mission.status in ("COMPLETED", "FAILED"):
+        existing_tasks = [
+            task for task in task_registry.list_tasks()
+            if task.mission_id == mission_id
+        ]
+        return {
+            "mission": mission,
+            "tasks": existing_tasks,
+            "intent": None,
+            "manager_id": None,
+            "board_seeded": False,
+        }
 
     existing_tasks = [
         task for task in task_registry.list_tasks()
         if task.mission_id == mission_id
     ]
     if existing_tasks:
+        mission = _normalize_to_ready(mission_id)
         try:
             board = board_service.get_board(mission_id)
         except board_service.BoardNotFoundError:
@@ -270,11 +302,30 @@ def plan_mission(mission_id):
             "board_seeded": any(board.columns.values()),
         }
 
-    manager = ManagerAgent()
-    result = manager.execute(mission)
+    if mission.status == "CREATED":
+        mission = update_mission_status(mission_id, "PLANNING")
+
+    try:
+        manager = ManagerAgent()
+        result = manager.execute(mission)
+    except Exception as planning_error:
+        current = get_engine_mission(mission_id)
+        if current.status not in ("COMPLETED", "FAILED"):
+            try:
+                update_mission_status(mission_id, "FAILED")
+            except Exception as lifecycle_error:
+                raise RuntimeError(
+                    f"Planning failed and Mission {mission_id!r} could not "
+                    f"transition to FAILED: {lifecycle_error}"
+                ) from planning_error
+        raise
+
+    materialized_id = result.mission.mission_id
+    _normalize_to_ready(materialized_id)
+    final_mission = get_engine_mission(materialized_id)
 
     return {
-        "mission": result.mission,
+        "mission": final_mission,
         "tasks": result.tasks,
         "intent": result.intent,
         "manager_id": result.manager_id,

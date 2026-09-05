@@ -44,20 +44,24 @@ def generate_mission_from_plan(plan: dict, run_id: str) -> Mission:
     )
 
     workers = plan.get("workers") or []
+    previous_task_id = None
     for index, worker in enumerate(workers, start=1):
         if not isinstance(worker, dict):
             continue
+        dependencies = [previous_task_id] if previous_task_id is not None else []
         task = registry.create_task(
             mission_id=mission.mission_id,
             title=str(worker.get("scope") or f"Worker {index}"),
             description=str(worker.get("reason") or "Generated from plan."),
             status="CREATED",
             priority=str(worker.get("priority") or "MEDIUM"),
+            dependencies=dependencies,
             execution_policy=_execution_policy(
                 worker, plan_project_id, plan_execution_path
             ),
         )
         mission.tasks.append(task)
+        previous_task_id = task.task_id
 
     return mission
 

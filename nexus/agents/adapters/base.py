@@ -24,6 +24,8 @@ class ExecutionContext:
     workspace_path: Optional[str] = None
     agent_id: Optional[str] = None
     agent_model: Optional[str] = None
+    task_description: Optional[str] = None
+    acceptance_criteria: Optional[list] = None
 
 
 @dataclass(slots=True)

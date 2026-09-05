@@ -58,9 +58,15 @@ def build_prompt(context):
         f"Task ID: {context.task_id}",
         f"Task Title: {context.task_title}",
     ]
+    if getattr(context, "task_description", None):
+        lines.append(f"Task Description: {context.task_description}")
     if context.required_capabilities:
         lines.append(
             "Required capabilities: " + ", ".join(context.required_capabilities)
+        )
+    if getattr(context, "acceptance_criteria", None):
+        lines.append(
+            "Acceptance criteria: " + "; ".join(context.acceptance_criteria)
         )
     if context.mission_context:
         lines.append(f"Mission context: {context.mission_context}")

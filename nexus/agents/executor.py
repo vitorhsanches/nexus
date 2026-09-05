@@ -28,7 +28,14 @@ class AgentExecutor:
         # never invokes external models unless a real adapter is supplied.
         self.adapter = adapter if adapter is not None else SimulatedAdapter()
 
-    def execute_task(self, task_id, agent_id=None, adapter=None, workspace_path=None):
+    def execute_task(
+        self,
+        task_id,
+        agent_id=None,
+        adapter=None,
+        workspace_path=None,
+        mission_context=None,
+    ):
         """Execute a task with an explicit or automatically selected agent.
 
         When ``agent_id`` is omitted, the capability router selects the best
@@ -68,7 +75,11 @@ class AgentExecutor:
             reached_running = True
 
             context = self._build_context(
-                task, agent, required, workspace_path=workspace_path
+                task,
+                agent,
+                required,
+                workspace_path=workspace_path,
+                mission_context=mission_context,
             )
             adapter_result = active_adapter.run(context)
 
@@ -117,11 +128,13 @@ class AgentExecutor:
             update_task_status(task_id, target)
 
     @staticmethod
-    def _build_context(task, agent, required_capabilities, workspace_path=None):
+    def _build_context(
+        task, agent, required_capabilities, workspace_path=None, mission_context=None
+    ):
         policy = task.execution_policy if isinstance(task.execution_policy, dict) else None
-        mission_context = None
-        if policy is not None:
-            mission_context = policy.get("mission_context")
+        resolved_mission_context = mission_context
+        if resolved_mission_context is None and policy is not None:
+            resolved_mission_context = policy.get("mission_context")
 
         resolved_workspace_path = workspace_path
         if resolved_workspace_path is None and policy is not None:
@@ -132,10 +145,16 @@ class AgentExecutor:
             task_title=task.title,
             required_capabilities=list(required_capabilities or []),
             execution_policy=policy,
-            mission_context=mission_context,
+            mission_context=resolved_mission_context,
             workspace_path=resolved_workspace_path,
             agent_id=agent.agent_id,
             agent_model=agent.model,
+            task_description=task.description,
+            acceptance_criteria=(
+                list(task.acceptance_criteria)
+                if task.acceptance_criteria is not None
+                else None
+            ),
         )
 
 

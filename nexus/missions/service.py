@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from nexus.missions.lifecycle import transition
 from nexus.missions.models import Mission, MISSION_STATUSES
 from nexus.tasks import registry
 
@@ -69,6 +70,12 @@ def get_mission(mission_id: str) -> Mission:
 
 def list_missions() -> list:
     return list(_missions.values())
+
+
+def update_mission_status(mission_id, status):
+    mission = get_mission(mission_id)
+    mission.status = transition(mission.status, status)
+    return mission
 
 
 # Internal in-memory store.

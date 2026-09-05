@@ -5,9 +5,11 @@ from pydantic import BaseModel
 
 from nexus.agents.policy import ExecutionPolicyError
 from nexus.manager.agent import ManagerError
+from nexus.missions.scheduler import MissionDependencyError
 from nexus.missions.service import MissionNotFoundError
 from nexus.tasks.registry import TaskNotFoundError
-from nexus.web import execution, services
+from nexus.web import execution, mission_execution, services
+from nexus.web.mission_execution import MissionConflictError, MissionExecutionError
 
 
 router = APIRouter(prefix="/api")
@@ -123,6 +125,35 @@ def plan_mission(mission_id: str):
         "manager_id": result["manager_id"],
         "board_seeded": result["board_seeded"],
     }
+
+
+@router.post("/missions/{mission_id}/execute")
+def execute_mission(mission_id: str):
+    """Execute a Mission end to end through the Mission Execution Orchestrator.
+
+    Plans the Mission if necessary, validates its dependency graph, then
+    executes eligible Tasks sequentially through the existing Task
+    execution pipeline, passing predecessor evidence to dependent Tasks.
+    Returns a Mission execution summary. Idempotent once COMPLETED.
+    """
+    try:
+        summary = mission_execution.execute_mission(mission_id)
+    except MissionNotFoundError:
+        raise HTTPException(
+            status_code=404, detail=f"Mission not found: {mission_id}"
+        )
+    except MissionDependencyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ExecutionPolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except MissionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except MissionExecutionError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except ManagerError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"execution": summary}
 
 
 @router.post("/demo/mission")

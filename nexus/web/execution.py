@@ -16,7 +16,7 @@ from nexus.tasks import registry as task_registry
 from nexus.web.agents import agent_registry
 
 
-def execute_task(task_id):
+def execute_task(task_id, mission_context=None):
     """Execute a task through the existing pipeline and return a summary.
 
     Retrieves the task from the Task Registry, resolves its execution policy
@@ -36,7 +36,9 @@ def execute_task(task_id):
 
     try:
         result = executor.execute_task(
-            task_id, workspace_path=resolved.workspace_path
+            task_id,
+            workspace_path=resolved.workspace_path,
+            mission_context=mission_context,
         )
     except Exception:
         task = task_registry.get_task(task_id)
