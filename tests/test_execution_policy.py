@@ -1,4 +1,4 @@
-﻿"""Tests for Nexus v1.5 Real Board Task Execution V1: execution policy,
+"""Tests for Nexus v1.5 Real Board Task Execution V1: execution policy,
 project-target resolution, failure lifecycle, and routed-model reporting.
 """
 
@@ -23,6 +23,7 @@ from nexus.agents.policy import (
 )
 from nexus.agents.registry import AgentRegistry
 from nexus.router import ProjectNotFoundError
+from nexus.routing.telemetry import OmniRouteTelemetrySnapshot
 from nexus.web.agents import agent_registry
 
 
@@ -181,6 +182,18 @@ class SimulatedSummaryTestCase(unittest.TestCase):
 class OmniRouteSummaryTestCase(unittest.TestCase):
     def setUp(self):
         _reset()
+
+        # These are unit/integration tests for execution policy and Worker
+        # lifecycle, not live OmniRoute telemetry tests. The production
+        # Adapter still creates its default AdaptiveRoutingService and
+        # OmniRouteTelemetryClient, but collection is isolated here so the
+        # suite can never perform real network I/O.
+        telemetry_patcher = patch(
+            "nexus.routing.service.OmniRouteTelemetryClient.collect",
+            return_value=OmniRouteTelemetrySnapshot(),
+        )
+        telemetry_patcher.start()
+        self.addCleanup(telemetry_patcher.stop)
 
     def test_omniroute_selected_and_routed_model_recorded(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,4 +1,4 @@
-﻿"""Tests for the Real Agent Adapter Layer V1."""
+"""Tests for the Real Agent Adapter Layer V1."""
 
 import unittest
 from unittest.mock import patch
@@ -19,6 +19,7 @@ from nexus.agents.executor import AgentExecutor
 from nexus.agents.models import Agent
 from nexus.agents.registry import AgentRegistry
 from nexus.tasks.registry import create_task, get_task
+from nexus.routing.service import RoutingDecision
 
 
 class SimulatedAdapterTestCase(unittest.TestCase):
@@ -46,6 +47,33 @@ class RecordingAdapter:
     def run(self, context):
         self.received_context = context
         return self.result
+
+
+class NoNetworkRoutingService:
+    """Deterministic routing double for adapter unit tests."""
+
+    def select_route_for_task(
+        self,
+        required_capabilities=None,
+        execution_policy=None,
+    ):
+        model, effort = select_route(
+            required_capabilities
+        )
+        provider = (
+            "opencode"
+            if model == MECHANICAL_MODEL
+            else "claude"
+        )
+        return RoutingDecision(
+            model=model,
+            provider=provider,
+            effort=effort,
+            execution_path="OMNIROUTE",
+            reason="offline unit-test routing double",
+            fallbacks=(),
+            degraded=False,
+        )
 
 
 class AgentExecutorAdapterIntegrationTestCase(unittest.TestCase):
@@ -207,7 +235,12 @@ class OmniRouteAdapterRunnerTestCase(unittest.TestCase):
             captured["command"] = command
             return FakeCompleted()
 
-        adapter = OmniRouteAdapter(script_path="worker.ps1", runner=fake_runner, shell="powershell")
+        adapter = OmniRouteAdapter(
+            script_path="worker.ps1",
+            runner=fake_runner,
+            shell="powershell",
+            routing_service=NoNetworkRoutingService(),
+        )
         result = adapter.run(
             ExecutionContext(task_id="TASK-3", task_title="Do work")
         )
@@ -224,7 +257,12 @@ class OmniRouteAdapterRunnerTestCase(unittest.TestCase):
         def fake_runner(command):
             return FakeCompleted()
 
-        adapter = OmniRouteAdapter(script_path="worker.ps1", runner=fake_runner, shell="powershell")
+        adapter = OmniRouteAdapter(
+            script_path="worker.ps1",
+            runner=fake_runner,
+            shell="powershell",
+            routing_service=NoNetworkRoutingService(),
+        )
         result = adapter.run(
             ExecutionContext(task_id="TASK-4", task_title="Do work")
         )
@@ -243,8 +281,17 @@ class OmniRouteAdapterRunnerTestCase(unittest.TestCase):
                 "Completed", (), {"returncode": 0, "stdout": "ok", "stderr": ""}
             )()
 
-            adapter = OmniRouteAdapter(script_path="worker.ps1", shell="powershell")
-            adapter.run(ExecutionContext(task_id="TASK-8", task_title="Do work"))
+            adapter = OmniRouteAdapter(
+                script_path="worker.ps1",
+                shell="powershell",
+                routing_service=NoNetworkRoutingService(),
+            )
+            adapter.run(
+                ExecutionContext(
+                    task_id="TASK-8",
+                    task_title="Do work",
+                )
+            )
 
             _, kwargs = mock_run.call_args
             self.assertEqual(kwargs.get("input"), "")

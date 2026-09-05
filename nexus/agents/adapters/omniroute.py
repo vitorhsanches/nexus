@@ -16,6 +16,17 @@ Transport boundary (do not collapse these layers):
 The task prompt is therefore passed as the value of the wrapper's ``-Task``
 CLI parameter, exactly as the wrapper's own contract requires. Nothing is
 piped to the wrapper process's stdin from here.
+
+Adaptive routing (Nexus v2.0-C)
+--------------------------------
+For a NEW execution with no explicit ``route_override``, ``OmniRouteAdapter``
+delegates initial route selection to an injected
+``AdaptiveRoutingService`` (runtime telemetry + resource-aware scoring).
+When ``route_override`` is present -- the retry/escalation path -- routing
+bypasses telemetry completely and continues through the existing v1.9
+``validate_route_for_class`` ladder, exactly as before. ``select_route()``
+and ``build_command()`` remain deterministic and network-free on their own
+for standalone/backward-compatible use.
 """
 
 import shutil
@@ -45,8 +56,10 @@ def select_route(required_capabilities, route_override=None):
 
     Mechanical capabilities route to ``oc/big-pickle``; everything else is
     treated as standard coding work and routes to ``cc/claude-sonnet-5-low``.
-    Both routes use ``low`` effort in V1. This is the single hook that a
-    future Sol escalation policy could extend.
+    Both routes use ``low`` effort in V1. This function is deterministic and
+    network-free: it is the legacy static policy, used directly when a
+    ``route_override`` is present (the retry/escalation path) and available
+    standalone for backward compatibility.
 
     When ``route_override`` is provided (a dict with ``model`` and optional
     ``effort``), it is used verbatim instead of deriving the route from
@@ -103,8 +116,14 @@ def resolve_shell():
     return "pwsh" if shutil.which("pwsh") else "powershell"
 
 
-def build_command(context, script_path=DEFAULT_WORKER_SCRIPT, shell=None):
+def build_command(context, script_path=DEFAULT_WORKER_SCRIPT, shell=None, route=None):
     """Build the full PowerShell command list for a task.
+
+    ``route``, when provided, is a pre-resolved ``(model, effort)`` pair
+    (e.g. from adaptive routing) that is used verbatim instead of deriving
+    the route here via ``select_route()``. When omitted, the legacy static
+    ``select_route()`` policy is used directly, preserving standalone,
+    network-free, backward-compatible behavior for existing callers/tests.
 
     The task prompt is passed as the value of the wrapper's ``-Task``
     parameter. The wrapper (``omniroute-worker.ps1``) is solely responsible
@@ -112,9 +131,12 @@ def build_command(context, script_path=DEFAULT_WORKER_SCRIPT, shell=None):
     never talks to Codex directly and never pipes anything to the wrapper's
     own stdin.
     """
-    model, effort = select_route(
-        context.required_capabilities, getattr(context, "route_override", None)
-    )
+    if route is not None:
+        model, effort = route
+    else:
+        model, effort = select_route(
+            context.required_capabilities, getattr(context, "route_override", None)
+        )
     repo = context.workspace_path or "."
     prompt = build_prompt(context)
     shell = shell or resolve_shell()
@@ -139,20 +161,62 @@ def build_command(context, script_path=DEFAULT_WORKER_SCRIPT, shell=None):
 
 
 class OmniRouteAdapter(ExecutionAdapter):
-    """Adapter that shells out to the OmniRoute worker wrapper."""
+    """Adapter that shells out to the OmniRoute worker wrapper.
 
-    def __init__(self, script_path=DEFAULT_WORKER_SCRIPT, runner=None, shell=None):
+    ``routing_service``, when supplied (or lazily constructed on first use),
+    is only consulted for NEW executions with no ``route_override``. The
+    retry/escalation ``route_override`` path always bypasses it and uses the
+    existing v1.9 ``select_route()``/``validate_route_for_class()`` policy,
+    exactly as before.
+    """
+
+    def __init__(
+        self,
+        script_path=DEFAULT_WORKER_SCRIPT,
+        runner=None,
+        shell=None,
+        routing_service=None,
+    ):
         self.script_path = script_path
         self.shell = shell
         # Injectable for tests; defaults to the real subprocess runner.
         self._runner = runner or self._run_subprocess
+        # Injectable for tests. Constructing an AdaptiveRoutingService
+        # performs no network I/O; telemetry is only collected lazily
+        # inside select_route_for_task(), and only for the adaptive path.
+        self.routing_service = routing_service
+
+    def _resolve_routing_service(self):
+        if self.routing_service is None:
+            # Imported lazily to keep this module importable/network-free
+            # even if routing.service ever grows heavier dependencies.
+            from nexus.routing.service import AdaptiveRoutingService
+
+            self.routing_service = AdaptiveRoutingService()
+        return self.routing_service
+
+    def _select_route(self, context):
+        route_override = getattr(context, "route_override", None)
+
+        if route_override is not None:
+            # Explicit retry/escalation route: bypass telemetry completely
+            # and validate against the approved v1.9 ladder.
+            return select_route(context.required_capabilities, route_override)
+
+        service = self._resolve_routing_service()
+        decision = service.select_route_for_task(
+            required_capabilities=context.required_capabilities,
+            execution_policy=context.execution_policy,
+        )
+        return decision.model, decision.effort
 
     def run(self, context):
+        model, effort = self._select_route(context)
         command = build_command(
-            context, script_path=self.script_path, shell=self.shell
-        )
-        model, _effort = select_route(
-            context.required_capabilities, getattr(context, "route_override", None)
+            context,
+            script_path=self.script_path,
+            shell=self.shell,
+            route=(model, effort),
         )
 
         try:
