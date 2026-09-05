@@ -1,12 +1,16 @@
 ﻿"""AgentExecutor for the Nexus Agent Execution Loop V1.
 
-Assigns an available agent to a task from the existing Task Registry,
-drives both the task and agent lifecycles, and simulates the agent's work.
-Each execution is wrapped in an AgentSession from the Nexus Agent Workspace
-V1, which tracks the task-to-agent link across the run. No external AI models
-are invoked.
+Assigns an available agent to a task from the existing Task Registry, drives
+both the task and agent lifecycles, and delegates the actual unit of work to
+a pluggable ``ExecutionAdapter`` (see ``nexus.agents.adapters``). Each
+execution is wrapped in an AgentSession from the Nexus Agent Workspace V1,
+which tracks the task-to-agent link across the run. The default adapter is
+the local ``SimulatedAdapter``, so no external AI models are invoked unless a
+different adapter is explicitly passed in.
 """
 
+from nexus.agents.adapters.base import ExecutionContext
+from nexus.agents.adapters.simulated import SimulatedAdapter
 from nexus.agents.models import TaskExecutionResult
 from nexus.agents.registry import NoAvailableAgentError
 from nexus.capabilities.router import select_agent_for_capabilities
@@ -17,9 +21,12 @@ from nexus.workspaces.service import complete_session, fail_session, start_sessi
 class AgentExecutor:
     """Coordinates task execution through the in-memory Agent Registry."""
 
-    def __init__(self, agent_registry):
+    def __init__(self, agent_registry, adapter=None):
         self.agent_registry = agent_registry
         self.last_session = None
+        # Defaults to the simulated adapter so existing/default behavior
+        # never invokes external models unless a real adapter is supplied.
+        self.adapter = adapter if adapter is not None else SimulatedAdapter()
 
     def execute_task(self, task_id, agent_id=None):
         """Execute a task with an explicit or automatically selected agent.
@@ -31,11 +38,11 @@ class AgentExecutor:
         raises an exception on failure paths that prevent execution.
         """
         task = get_task(task_id)
+        required = _required_capabilities(task)
 
         if agent_id is not None:
             agent = self.agent_registry.get_agent(agent_id)
         else:
-            required = _required_capabilities(task)
             agent = select_agent_for_capabilities(
                 required_capabilities=required,
                 agent_registry=self.agent_registry,
@@ -50,9 +57,21 @@ class AgentExecutor:
         self.last_session = session
 
         ok = False
+        adapter_result = None
         try:
-            # 3. Run the existing simulated execution.
+            # 3. Advance the task lifecycle up to RUNNING, then delegate the
+            # actual work to the configured adapter.
             self._run_task_lifecycle(task_id)
+
+            context = self._build_context(task, agent, required)
+            adapter_result = self.adapter.run(context)
+
+            if not adapter_result.success:
+                raise RuntimeError(adapter_result.error or "Adapter execution failed")
+
+            # Advance the remaining chain once the adapter reports success.
+            for target in ("REVIEW", "COMPLETED"):
+                update_task_status(task_id, target)
             ok = True
         except Exception as exc:  # noqa: BLE001 - session must reflect failure
             # 5. Mark the session FAILED on exception.
@@ -71,22 +90,40 @@ class AgentExecutor:
             task_id=task_id,
             agent_id=agent.agent_id,
             status="COMPLETED",
-            output="Task executed successfully by agent",
+            output=adapter_result.output or "Task executed successfully by agent",
             error=None,
         )
 
     @staticmethod
     def _run_task_lifecycle(task_id):
-        """Advance a task through the valid CREATED..COMPLETED chain."""
-        chain = [
-            "READY",
-            "CLAIMED",
-            "RUNNING",
-            "REVIEW",
-            "COMPLETED",
-        ]
-        for target in chain:
+        """Advance a task through the valid CREATED..RUNNING chain.
+
+        Runs before the adapter is invoked. Tests may monkeypatch this
+        staticmethod to simulate a lifecycle failure before real work starts.
+        """
+        for target in ("READY", "CLAIMED", "RUNNING"):
             update_task_status(task_id, target)
+
+    @staticmethod
+    def _build_context(task, agent, required_capabilities):
+        policy = task.execution_policy if isinstance(task.execution_policy, dict) else None
+        mission_context = None
+        if policy is not None:
+            mission_context = policy.get("mission_context")
+        workspace_path = None
+        if policy is not None:
+            workspace_path = policy.get("workspace_path")
+
+        return ExecutionContext(
+            task_id=task.task_id,
+            task_title=task.title,
+            required_capabilities=list(required_capabilities or []),
+            execution_policy=policy,
+            mission_context=mission_context,
+            workspace_path=workspace_path,
+            agent_id=agent.agent_id,
+            agent_model=agent.model,
+        )
 
 
 def _required_capabilities(task):
