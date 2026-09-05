@@ -35,6 +35,8 @@ class AgentExecutor:
         adapter=None,
         workspace_path=None,
         mission_context=None,
+        hold_for_review=False,
+        route_override=None,
     ):
         """Execute a task with an explicit or automatically selected agent.
 
@@ -43,6 +45,18 @@ class AgentExecutor:
         tracked in an AgentSession, which is marked COMPLETED on success and
         FAILED on exception. Returns a TaskExecutionResult on success and
         raises an exception on failure paths that prevent execution.
+
+        When ``hold_for_review`` is True, a successful adapter run stops the
+        Task at REVIEW instead of finalizing it to COMPLETED: the Worker
+        Session still completes successfully, the Agent is still released to
+        AVAILABLE, and the returned TaskExecutionResult reports status
+        REVIEW. Legacy/default behavior (``hold_for_review=False``) is
+        unchanged and finalizes REVIEW -> COMPLETED within this call.
+
+        ``route_override``, when provided, is forwarded to the adapter via
+        the ExecutionContext so a caller-selected route (already validated
+        against the approved escalation policy) can be used for this single
+        attempt without mutating the Task's own ``execution_policy``.
         """
         task = get_task(task_id)
         required = _required_capabilities(task)
@@ -80,16 +94,21 @@ class AgentExecutor:
                 required,
                 workspace_path=workspace_path,
                 mission_context=mission_context,
+                route_override=route_override,
             )
             adapter_result = active_adapter.run(context)
 
             if not adapter_result.success:
                 raise RuntimeError(adapter_result.error or "Adapter execution failed")
 
-            # Advance the remaining chain once the adapter reports success.
-            for target in ("REVIEW", "COMPLETED"):
-                update_task_status(task_id, target)
+            # Advance to REVIEW once the adapter reports success. Legacy
+            # (non-reviewed) callers finalize immediately to COMPLETED;
+            # reviewed callers stop at REVIEW until a verdict is applied.
+            update_task_status(task_id, "REVIEW")
+            if not hold_for_review:
+                update_task_status(task_id, "COMPLETED")
             ok = True
+            final_status = "REVIEW" if hold_for_review else "COMPLETED"
         except Exception as exc:  # noqa: BLE001 - session must reflect failure
             # 5. Mark the session FAILED on exception.
             fail_session(session.session_id, error=str(exc))
@@ -111,7 +130,7 @@ class AgentExecutor:
         return TaskExecutionResult(
             task_id=task_id,
             agent_id=agent.agent_id,
-            status="COMPLETED",
+            status=final_status,
             output=adapter_result.output or "Task executed successfully by agent",
             error=None,
             routed_model=adapter_result.routed_model,
@@ -119,17 +138,31 @@ class AgentExecutor:
 
     @staticmethod
     def _run_task_lifecycle(task_id):
-        """Advance a task through the valid CREATED..RUNNING chain.
+        """Advance a task up to RUNNING from wherever it currently is.
 
         Runs before the adapter is invoked. Tests may monkeypatch this
         staticmethod to simulate a lifecycle failure before real work starts.
+        Handles both a fresh Task (CREATED) and a Task returning for a
+        review-driven retry (already READY from a prior REVIEW verdict) by
+        only advancing through the chain steps still ahead of it.
         """
-        for target in ("READY", "CLAIMED", "RUNNING"):
+        chain = ("READY", "CLAIMED", "RUNNING")
+        task = get_task(task_id)
+        if task.status in chain:
+            remaining = chain[chain.index(task.status) + 1 :]
+        else:
+            remaining = chain
+        for target in remaining:
             update_task_status(task_id, target)
 
     @staticmethod
     def _build_context(
-        task, agent, required_capabilities, workspace_path=None, mission_context=None
+        task,
+        agent,
+        required_capabilities,
+        workspace_path=None,
+        mission_context=None,
+        route_override=None,
     ):
         policy = task.execution_policy if isinstance(task.execution_policy, dict) else None
         resolved_mission_context = mission_context
@@ -155,6 +188,7 @@ class AgentExecutor:
                 if task.acceptance_criteria is not None
                 else None
             ),
+            route_override=route_override,
         )
 
 

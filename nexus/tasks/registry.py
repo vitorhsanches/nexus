@@ -1,9 +1,9 @@
-﻿"""In-memory task registry for Nexus Task Registry V1."""
+"""In-memory task registry for Nexus Task Registry V1."""
 
 from uuid import uuid4
 
 from nexus.tasks.lifecycle import transition
-from nexus.tasks.models import Attempt, Task
+from nexus.tasks.models import ATTEMPT_STATUSES, Attempt, Task
 
 # Internal in-memory stores.
 _tasks = {}
@@ -95,3 +95,58 @@ def list_attempts(task_id=None):
     if task_id is not None:
         return list(_attempts.get(task_id, []))
     return [attempt for attempts in _attempts.values() for attempt in attempts]
+
+
+ATTEMPT_TRANSITIONS = {
+    "PENDING": {
+        "RUNNING",
+        "REVIEW",
+        "COMPLETED",
+        "FAILED",
+    },
+    "RUNNING": {
+        "REVIEW",
+        "COMPLETED",
+        "FAILED",
+    },
+    "REVIEW": {
+        "COMPLETED",
+        "FAILED",
+    },
+    "COMPLETED": set(),
+    "FAILED": set(),
+}
+
+
+class InvalidAttemptTransitionError(ValueError):
+    """Raised when an Attempt lifecycle transition is not allowed."""
+
+
+def update_attempt_status(attempt_id, status, result=None):
+    """Transition an existing Attempt without reopening terminal evidence."""
+    if status not in ATTEMPT_STATUSES:
+        raise ValueError(
+            f"Unknown attempt status: {status!r}"
+        )
+
+    attempt = get_attempt(attempt_id)
+    current = attempt.status
+
+    allowed = ATTEMPT_TRANSITIONS.get(current)
+    if allowed is None:
+        raise InvalidAttemptTransitionError(
+            f"Unknown current Attempt status: {current!r}."
+        )
+
+    if status not in allowed:
+        raise InvalidAttemptTransitionError(
+            f"Invalid Attempt transition: "
+            f"{current!r} -> {status!r}."
+        )
+
+    attempt.status = status
+
+    if result is not None:
+        attempt.result = result
+
+    return attempt

@@ -56,9 +56,9 @@ class DirectTaskExecutionBackwardCompatTestCase(unittest.TestCase):
         captured = {}
         real_build_context = AgentExecutor._build_context
 
-        def spy_build_context(task_obj, agent, required, workspace_path=None, mission_context=None):
+        def spy_build_context(task_obj, agent, required, workspace_path=None, mission_context=None, route_override=None):
             ctx = real_build_context(
-                task_obj, agent, required, workspace_path=workspace_path, mission_context=mission_context
+                task_obj, agent, required, workspace_path=workspace_path, mission_context=mission_context, route_override=route_override
             )
             captured["context"] = ctx
             return ctx
@@ -76,9 +76,9 @@ class DirectTaskExecutionBackwardCompatTestCase(unittest.TestCase):
         captured = {}
         real_build_context = AgentExecutor._build_context
 
-        def spy_build_context(task_obj, agent, required, workspace_path=None, mission_context=None):
+        def spy_build_context(task_obj, agent, required, workspace_path=None, mission_context=None, route_override=None):
             ctx = real_build_context(
-                task_obj, agent, required, workspace_path=workspace_path, mission_context=mission_context
+                task_obj, agent, required, workspace_path=workspace_path, mission_context=mission_context, route_override=route_override
             )
             captured["context"] = ctx
             return ctx

@@ -13,6 +13,7 @@ from typing import Optional
 
 from nexus.agents.policy import ExecutionPolicyError
 from nexus.missions import scheduler
+from nexus.reviews.execution import ReviewedTaskFailedError, execute_reviewed_task
 from nexus.missions.scheduler import MissionDependencyError
 from nexus.missions.service import (
     get_mission as get_engine_mission,
@@ -57,7 +58,7 @@ class MissionExecutionError(RuntimeError):
         )
 
 
-def execute_mission(mission_id):
+def execute_mission(mission_id, review=False, reviewer=None):
     """Execute a Mission end to end, reusing the existing Task pipeline.
 
     Plans the Mission if it has no Tasks yet, validates its dependency
@@ -65,6 +66,15 @@ def execute_mission(mission_id):
     Mission order, passing each Task its relevant predecessor evidence.
     Returns a Mission execution summary dict. Idempotent for COMPLETED
     Missions (no new work is performed).
+
+    When ``review=True``, every eligible Task is executed through the
+    reviewed Task execution flow (``nexus.reviews.execution``): a Task only
+    counts as dependency-COMPLETED once its reviewer returns PASS. RETRY and
+    ESCALATE keep the same Task looping through new Attempts (bounded by the
+    existing same-tier retry + escalation-ladder policy). BLOCKED or
+    escalation-unavailable moves the Task to FAILED, which -- exactly like
+    any other Task failure -- fails the whole Mission closed, so dependent
+    Tasks never start. ``reviewer`` is required when ``review=True``.
     """
     mission = get_engine_mission(mission_id)
 
@@ -114,7 +124,7 @@ def execute_mission(mission_id):
     mission = update_mission_status(mission_id, "RUNNING")
 
     try:
-        _run_eligible_tasks(mission_id, mission_tasks)
+        _run_eligible_tasks(mission_id, mission_tasks, review=review, reviewer=reviewer)
     except MissionDependencyError:
         _fail_mission(mission_id)
         raise
@@ -192,8 +202,11 @@ def _reject_unsafe_pre_existing_task_states(mission_id, mission_tasks):
             )
 
 
-def _run_eligible_tasks(mission_id, mission_tasks):
+def _run_eligible_tasks(mission_id, mission_tasks, review=False, reviewer=None):
     """Sequentially execute every eligible Task until the Mission finishes."""
+    if review and reviewer is None:
+        raise ValueError("reviewer is required when review=True.")
+
     while True:
         tasks_by_id = {task.task_id: task_registry.get_task(task.task_id) for task in mission_tasks}
 
@@ -210,11 +223,21 @@ def _run_eligible_tasks(mission_id, mission_tasks):
         mission_context = _build_mission_context(mission_id, next_task, tasks_by_id)
 
         try:
-            execution_service.execute_task(
-                next_task.task_id, mission_context=mission_context
-            )
+            if review:
+                execute_reviewed_task(
+                    next_task.task_id,
+                    reviewer=reviewer,
+                    mission_context=mission_context,
+                    mission=get_engine_mission(mission_id),
+                )
+            else:
+                execution_service.execute_task(
+                    next_task.task_id, mission_context=mission_context
+                )
         except ExecutionPolicyError:
             raise
+        except ReviewedTaskFailedError as exc:
+            raise MissionExecutionError(mission_id, next_task.task_id, exc) from exc
         except Exception as exc:  # noqa: BLE001 - wrapped below.
             raise MissionExecutionError(mission_id, next_task.task_id, exc) from exc
 

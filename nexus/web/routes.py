@@ -8,6 +8,7 @@ from nexus.manager.agent import ManagerError
 from nexus.missions.scheduler import MissionDependencyError
 from nexus.missions.service import MissionNotFoundError
 from nexus.tasks.registry import TaskNotFoundError
+from nexus.reviews.reviewer import AlwaysPassReviewer
 from nexus.web import execution, mission_execution, services
 from nexus.web.mission_execution import MissionConflictError, MissionExecutionError
 
@@ -138,6 +139,40 @@ def execute_mission(mission_id: str):
     """
     try:
         summary = mission_execution.execute_mission(mission_id)
+    except MissionNotFoundError:
+        raise HTTPException(
+            status_code=404, detail=f"Mission not found: {mission_id}"
+        )
+    except MissionDependencyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ExecutionPolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except MissionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except MissionExecutionError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except ManagerError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"execution": summary}
+
+
+@router.post("/missions/{mission_id}/execute-reviewed")
+def execute_mission_reviewed(mission_id: str):
+    """Execute a Mission through the reviewed Task execution flow (v1.9).
+
+    Identical Mission Execution Orchestrator as ``POST
+    /missions/{mission_id}/execute``, except every eligible Task must pass
+    review before it counts as dependency-COMPLETED. This milestone does not
+    yet wire a live Manager/Luna reviewer: it uses a deterministic
+    always-pass reviewer so the state machine can be exercised safely
+    end-to-end without any external model call. A future milestone replaces
+    this default with the real Manager reviewer.
+    """
+    try:
+        summary = mission_execution.execute_mission(
+            mission_id, review=True, reviewer=AlwaysPassReviewer()
+        )
     except MissionNotFoundError:
         raise HTTPException(
             status_code=404, detail=f"Mission not found: {mission_id}"

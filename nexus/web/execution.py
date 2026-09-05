@@ -1,4 +1,4 @@
-﻿"""Execution orchestration for the Nexus Local Mission Board V1.
+"""Execution orchestration for the Nexus Local Mission Board V1.
 
 Thin orchestration over the existing Agent Execution Loop and Agent Workspace.
 For a given task it drives the whole execution flow by reusing the current
@@ -12,11 +12,18 @@ default (SimulatedAdapter) is always used unless a task explicitly opts in.
 
 from nexus.agents.executor import AgentExecutor
 from nexus.agents.policy import resolve_execution_policy
+from nexus.policies.escalation import validate_route_override
 from nexus.tasks import registry as task_registry
 from nexus.web.agents import agent_registry
 
 
-def execute_task(task_id, mission_context=None):
+def execute_task(
+    task_id,
+    mission_context=None,
+    hold_for_review=False,
+    route_override=None,
+    adapter=None,
+):
     """Execute a task through the existing pipeline and return a summary.
 
     Retrieves the task from the Task Registry, resolves its execution policy
@@ -30,15 +37,24 @@ def execute_task(task_id, mission_context=None):
     """
     task = task_registry.get_task(task_id)
 
+    validated_route_override = validate_route_override(
+        task.execution_policy,
+        route_override,
+    )
+
     resolved = resolve_execution_policy(task.execution_policy)
 
-    executor = AgentExecutor(agent_registry, adapter=resolved.adapter)
+    executor = AgentExecutor(
+        agent_registry, adapter=adapter if adapter is not None else resolved.adapter
+    )
 
     try:
         result = executor.execute_task(
             task_id,
             workspace_path=resolved.workspace_path,
             mission_context=mission_context,
+            hold_for_review=hold_for_review,
+            route_override=validated_route_override,
         )
     except Exception:
         task = task_registry.get_task(task_id)

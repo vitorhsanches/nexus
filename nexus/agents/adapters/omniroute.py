@@ -1,4 +1,4 @@
-﻿"""OmniRoute execution adapter for the Real Agent Adapter Layer V1.
+"""OmniRoute execution adapter for the Real Agent Adapter Layer V1.
 
 Delegates real work to the existing external worker wrapper
 (``omniroute-worker.ps1``). OmniRoute is only provider/model/auth/quota/
@@ -22,6 +22,10 @@ import shutil
 import subprocess
 
 from nexus.agents.adapters.base import AdapterResult, ExecutionAdapter
+from nexus.policies.escalation import (
+    MECHANICAL_CAPABILITIES,
+    validate_route_for_class,
+)
 
 # Fixed V1 route policy.
 # mechanical work -> oc/big-pickle, standard coding -> cc/claude-sonnet-5-low.
@@ -30,22 +34,37 @@ MECHANICAL_MODEL = "oc/big-pickle"
 STANDARD_CODING_MODEL = "cc/claude-sonnet-5-low"
 DEFAULT_EFFORT = "low"
 
-MECHANICAL_CAPABILITIES = {"mechanical", "formatting", "cleanup"}
-
 DEFAULT_WORKER_SCRIPT = (
     r"C:\Users\Vitor Sanches\.codex\skills\multi-agent-development-manager"
     r"\scripts\omniroute-worker.ps1"
 )
 
 
-def select_route(required_capabilities):
+def select_route(required_capabilities, route_override=None):
     """Return the (model, effort) pair for a task's required capabilities.
 
     Mechanical capabilities route to ``oc/big-pickle``; everything else is
     treated as standard coding work and routes to ``cc/claude-sonnet-5-low``.
     Both routes use ``low`` effort in V1. This is the single hook that a
     future Sol escalation policy could extend.
+
+    When ``route_override`` is provided (a dict with ``model`` and optional
+    ``effort``), it is used verbatim instead of deriving the route from
+    capabilities. Callers (the review/retry service) are responsible for
+    validating the override against the approved escalation policy before it
+    reaches this adapter; this function does not itself re-validate it.
     """
+    if route_override is not None:
+        route_class = (
+            route_override.get("route_class")
+            if isinstance(route_override, dict)
+            else None
+        )
+        validated = validate_route_for_class(
+            route_class,
+            route_override,
+        )
+        return validated["model"], validated["effort"]
     capabilities = set(required_capabilities or [])
     if capabilities and capabilities.issubset(MECHANICAL_CAPABILITIES):
         return MECHANICAL_MODEL, DEFAULT_EFFORT
@@ -93,7 +112,9 @@ def build_command(context, script_path=DEFAULT_WORKER_SCRIPT, shell=None):
     never talks to Codex directly and never pipes anything to the wrapper's
     own stdin.
     """
-    model, effort = select_route(context.required_capabilities)
+    model, effort = select_route(
+        context.required_capabilities, getattr(context, "route_override", None)
+    )
     repo = context.workspace_path or "."
     prompt = build_prompt(context)
     shell = shell or resolve_shell()
@@ -130,7 +151,9 @@ class OmniRouteAdapter(ExecutionAdapter):
         command = build_command(
             context, script_path=self.script_path, shell=self.shell
         )
-        model, _effort = select_route(context.required_capabilities)
+        model, _effort = select_route(
+            context.required_capabilities, getattr(context, "route_override", None)
+        )
 
         try:
             completed = self._runner(command)

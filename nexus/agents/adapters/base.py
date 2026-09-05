@@ -26,6 +26,7 @@ class ExecutionContext:
     agent_model: Optional[str] = None
     task_description: Optional[str] = None
     acceptance_criteria: Optional[list] = None
+    route_override: Optional[dict] = None
 
 
 @dataclass(slots=True)

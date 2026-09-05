@@ -8,7 +8,7 @@ TRANSITIONS = {
     "READY": {"CLAIMED"},
     "CLAIMED": {"RUNNING"},
     "RUNNING": {"REVIEW", "FAILED"},
-    "REVIEW": {"COMPLETED"},
+    "REVIEW": {"COMPLETED", "READY", "FAILED"},
     "COMPLETED": set(),
     "FAILED": set(),
 }
