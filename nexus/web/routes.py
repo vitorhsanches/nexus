@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from nexus.agents.policy import ExecutionPolicyError
+from nexus.manager.agent import ManagerError
+from nexus.missions.service import MissionNotFoundError
 from nexus.tasks.registry import TaskNotFoundError
 from nexus.web import execution, services
 
@@ -92,6 +94,35 @@ def create_mission(request: MissionCreateRequest):
         execution_path=request.execution_path,
     )
     return {"mission": services._to_dict(mission)}
+
+
+@router.post("/missions/{mission_id}/plan")
+def plan_mission(mission_id: str):
+    """Run the existing ManagerAgent against a Mission and seed the Board.
+
+    Loads the Mission from the Mission Engine, plans it through the
+    deterministic ManagerAgent, and materializes its Tasks through the
+    existing Mission Engine + Task Registry so they appear on the existing
+    Mission Board. Never executes any Task. Calling this endpoint more than
+    once for the same mission is a no-op beyond the first call: it returns
+    the already-materialized Mission/Tasks instead of planning again.
+    """
+    try:
+        result = services.plan_mission(mission_id)
+    except MissionNotFoundError:
+        raise HTTPException(
+            status_code=404, detail=f"Mission not found: {mission_id}"
+        )
+    except ManagerError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {
+        "mission": services._to_dict(result["mission"]),
+        "tasks": [services._to_dict(task) for task in result["tasks"]],
+        "intent": result["intent"],
+        "manager_id": result["manager_id"],
+        "board_seeded": result["board_seeded"],
+    }
 
 
 @router.post("/demo/mission")

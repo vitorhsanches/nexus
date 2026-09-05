@@ -70,7 +70,7 @@ class ManagerAgent:
             project_id = getattr(mission, "project_id", None)
             execution_path = getattr(mission, "execution_path", None)
 
-        materialized_mission = self._materialize(
+        materialized_mission, board_seeded = self._materialize(
             plan, run_id, project_id=project_id, execution_path=execution_path
         )
 
@@ -79,6 +79,7 @@ class ManagerAgent:
             mission=materialized_mission,
             tasks=list(materialized_mission.tasks),
             intent=plan.intent,
+            board_seeded=board_seeded,
         )
 
     def plan_and_create(self, mission) -> "Mission":
@@ -87,7 +88,7 @@ class ManagerAgent:
 
     def _materialize(
         self, plan, run_id: str, project_id=None, execution_path=None
-    ) -> Mission:
+    ) -> tuple[Mission, bool]:
         """Create a Mission and its tasks through the Mission Engine.
 
         The planner only decides *what* work is needed; orchestration
@@ -118,7 +119,7 @@ class ManagerAgent:
             except Exception:  # noqa: BLE001 - board seeding must not break planning.
                 seeded = False
 
-        return mission
+        return mission, seeded
 
     def select_agent_for_task(self, task: Task, agent_registry=None):
         """Route a task to its required agent via the Capability Router.

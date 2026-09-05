@@ -14,10 +14,14 @@ and never writes).
 from dataclasses import asdict, is_dataclass
 from uuid import uuid4
 
+from nexus.board import service as board_service
+from nexus.manager.agent import ManagerAgent, ManagerError
 from nexus.missions.service import (
     create_mission as create_engine_mission,
     create_mission_from_plan,
+    get_mission as get_engine_mission,
     list_missions,
+    MissionNotFoundError,
 )
 from nexus.tasks import registry as task_registry
 from nexus.web.agents import agent_registry
@@ -228,4 +232,51 @@ def _mission_board(mission_id):
             {"name": name, "task_ids": columns.get(name, [])} for name in COLUMNS
         ],
         "task_ids": task_ids,
+    }
+
+
+def plan_mission(mission_id):
+    """Plan an existing Mission through the Manager Agent (idempotent).
+
+    Loads the Mission from the Mission Engine, then runs the existing
+    deterministic ManagerAgent against it so generated Tasks inherit the
+    Mission's project_id/execution_path and are immediately visible on the
+    existing Mission Board. Never executes any Task.
+
+    If the Mission already owns Tasks (i.e. it was already planned), the
+    Manager is not invoked again and the existing Mission/Tasks are
+    returned as-is, so calling this twice never creates duplicate Tasks or
+    duplicate Board entries.
+
+    Raises MissionNotFoundError when mission_id is unknown, and
+    ManagerError when the Manager fails to materialize a plan.
+    """
+    mission = get_engine_mission(mission_id)
+
+    existing_tasks = [
+        task for task in task_registry.list_tasks()
+        if task.mission_id == mission_id
+    ]
+    if existing_tasks:
+        try:
+            board = board_service.get_board(mission_id)
+        except board_service.BoardNotFoundError:
+            board = board_service.create_board(mission)
+        return {
+            "mission": mission,
+            "tasks": existing_tasks,
+            "intent": None,
+            "manager_id": None,
+            "board_seeded": any(board.columns.values()),
+        }
+
+    manager = ManagerAgent()
+    result = manager.execute(mission)
+
+    return {
+        "mission": result.mission,
+        "tasks": result.tasks,
+        "intent": result.intent,
+        "manager_id": result.manager_id,
+        "board_seeded": result.board_seeded,
     }
