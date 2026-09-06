@@ -1,4 +1,4 @@
-"""Focused tests for Nexus v2.0-D plan risk propagation and reviewer
+﻿"""Focused tests for Nexus v2.0-D plan risk propagation and reviewer
 routing metadata recorded in progressive execution history.
 
 Test Gap 3: proves the operational chain
@@ -115,7 +115,31 @@ class ProgressiveHistoryReviewRoutingMetadataTests(unittest.TestCase):
             },
         }
 
+        resolved_worker = {
+            "route_class": "standard-coding",
+            "execution_path": "OMNIROUTE",
+            "provider": "claude",
+            "model": "cc/claude-sonnet-5-low",
+            "effort": "low",
+            "scope": "fix things",
+            "reason": "test initial adaptive route",
+        }
+
+        initial_routing = {
+            "capability": "standard-coding",
+            "risk": "MEDIUM",
+            "model": "cc/claude-sonnet-5-low",
+            "provider": "claude",
+            "effort": "low",
+            "execution_path": "OMNIROUTE",
+            "reason": "adaptive initial routing",
+            "degraded": False,
+        }
+
         with patch(
+            "nexus.orchestration.progressive.resolve_initial_worker_route",
+            return_value=(resolved_worker, initial_routing),
+        ), patch(
             "nexus.orchestration.progressive.execute_worker",
             return_value=worker_result,
         ), patch(
