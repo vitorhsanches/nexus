@@ -5,6 +5,7 @@ from nexus.orchestration.progressive import execute_progressively
 from nexus.registry.runs import (
     create_run,
     update_run_result,
+    update_run_risk,
     update_run_status,
 )
 from nexus.router import (
@@ -114,6 +115,8 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
         )
 
     plan = manager["plan"]
+
+    update_run_risk(run_id, plan.get("risk"))
 
     print()
     print("APPROVED PLAN")

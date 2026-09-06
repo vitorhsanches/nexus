@@ -9,11 +9,53 @@ from nexus.missions.scheduler import MissionDependencyError
 from nexus.missions.service import MissionNotFoundError
 from nexus.tasks.registry import TaskNotFoundError
 from nexus.reviews.reviewer import AlwaysPassReviewer
-from nexus.web import execution, mission_execution, services
+from nexus.web import execution, mission_execution, operational, services
 from nexus.web.mission_execution import MissionConflictError, MissionExecutionError
 
 
 router = APIRouter(prefix="/api")
+
+
+@router.get("/operational/runs")
+def operational_runs():
+    """Return every real Run recorded in the SQLite runs/agents registry.
+
+    Read-only projection over nexus.registry.runs/nexus.registry.agents.
+    Never reads or writes nexus.tasks.registry (the in-memory Mission/Task
+    Board projection), so Board behavior is unaffected.
+    """
+    return {"runs": operational.get_operational_runs()}
+
+
+@router.get("/operational/runs/{run_id}")
+def operational_run_detail(run_id: str):
+    """Return a single real Run with its full real Agent lineage."""
+    run = operational.get_operational_run_detail(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    return {"run": run}
+
+
+@router.get("/operational/agents")
+def operational_agents(run_id: str | None = None):
+    """Return real Agents (Manager/Worker/ManagerReview) from the registry.
+
+    Optionally scoped to a single Run via the ``run_id`` query parameter.
+    """
+    return {"agents": operational.get_operational_agents(run_id=run_id)}
+
+
+@router.get("/operational/reviewer-routing")
+def operational_reviewer_routing(run_id: str | None = None):
+    """Return the real ManagerReview routing history from the registry.
+
+    Optionally scoped to a single Run via the ``run_id`` query parameter.
+    """
+    return {
+        "reviewer_routing_history": operational.get_reviewer_routing_history(
+            run_id=run_id
+        )
+    }
 
 
 @router.get("/missions")

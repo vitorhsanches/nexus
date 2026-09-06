@@ -371,6 +371,11 @@ def review_worker(
         parent_agent_id=worker_id,
     )
 
+    update_agent_execution(
+        reviewer_id,
+        branch=json.dumps(routing_metadata),
+    )
+
     try:
         codex = _find_codex()
     except (RuntimeError, FileNotFoundError) as error:

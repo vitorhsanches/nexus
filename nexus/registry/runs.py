@@ -91,6 +91,18 @@ def count_active_runs() -> int:
     return int(row["total"])
 
 
+def update_run_risk(run_id: str, risk: str | None) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE runs
+            SET risk = ?
+            WHERE id = ?
+            """,
+            (risk, run_id),
+        )
+
+
 def update_run_status(run_id: str, status: str) -> None:
     fields = ["status = ?"]
     params = [status]
