@@ -162,9 +162,9 @@ def demo_command() -> None:
     print()
 
 
-def go_command(request: str) -> None:
+def go_command(request: str, project: str | None = None) -> None:
     try:
-        result = run_go(request)
+        result = run_go(request, project_query=project)
 
     except GoError as error:
         print()
@@ -222,6 +222,12 @@ def main() -> None:
         "request",
         help="Complete natural-language request, e.g. 'No Norte corrija o problema X'.",
     )
+    go_parser.add_argument(
+        "--project",
+        dest="project",
+        default=None,
+        help="Explicit project id, name, or alias to route this request to.",
+    )
 
     show_parser = subparsers.add_parser(
         "show",
@@ -239,7 +245,7 @@ def main() -> None:
     _bootstrap()
 
     if command == "go":
-        go_command(args.request)
+        go_command(args.request, project=args.project)
         return
 
     if command == "show":

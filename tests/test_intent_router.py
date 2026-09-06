@@ -180,6 +180,28 @@ class PlanValidationRulesTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             _validate_plan(plan)
 
+    def test_missing_intent_is_rejected(self):
+        plan = json.loads(json.dumps(EXECUTION_PLAN))
+        del plan["intent"]
+
+        with self.assertRaisesRegex(ValueError, "Invalid intent"):
+            _validate_plan(plan)
+
+
+class ManagerPromptContractTestCase(unittest.TestCase):
+    """Guards against the prompt and validator drifting apart again."""
+
+    def test_manager_prompt_declares_required_intent_field(self):
+        import inspect
+
+        from nexus.dispatchers import manager
+
+        source = inspect.getsource(manager.run_manager)
+        self.assertIn(
+            '"intent": "EXECUTION|ANALYSIS|QUESTION|PLANNING"',
+            source,
+        )
+
 
 class GoIntentRoutingTestCase(unittest.TestCase):
     def setUp(self) -> None:

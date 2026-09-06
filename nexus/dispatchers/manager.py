@@ -261,6 +261,7 @@ NEXUS_PLAN_BEGIN
   "risk": "LOW|MEDIUM|HIGH|CRITICAL",
   "parallelism": 1,
   "summary": "short summary",
+  "intent": "EXECUTION|ANALYSIS|QUESTION|PLANNING",
   "workers": [
     {{
       "route_class": "mechanical|standard-coding|complex-coding|review-critical|security-critical",

@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import nexus.registry.database as database
 import nexus.registry.projects as projects
@@ -84,6 +85,58 @@ class NexusCliHelpersTestCase(unittest.TestCase):
     def test_show_unknown_run(self):
         with self.assertRaises(RunNotFoundError):
             format_run_report("RUN-DOESNOTEXIST")
+
+
+
+
+class NexusCliGoArgumentTestCase(unittest.TestCase):
+    """Verifies CLI --project wiring forwards to run_go without duplicating routing."""
+
+    def test_cli_parses_project_before_request(self):
+        from nexus.cli.app import main
+
+        with patch(
+            "sys.argv",
+            ["nexus", "go", "--project", "Nexus", "request text"],
+        ), patch("nexus.cli.app._bootstrap"), patch(
+            "nexus.cli.app.run_go",
+            return_value={"run_id": "RUN-X", "status": "COMPLETED"},
+        ) as mock_run_go:
+            main()
+
+        mock_run_go.assert_called_once_with(
+            "request text", project_query="Nexus"
+        )
+
+    def test_cli_parses_project_after_request(self):
+        from nexus.cli.app import main
+
+        with patch(
+            "sys.argv",
+            ["nexus", "go", "request text", "--project", "Nexus"],
+        ), patch("nexus.cli.app._bootstrap"), patch(
+            "nexus.cli.app.run_go",
+            return_value={"run_id": "RUN-X", "status": "COMPLETED"},
+        ) as mock_run_go:
+            main()
+
+        mock_run_go.assert_called_once_with(
+            "request text", project_query="Nexus"
+        )
+
+    def test_cli_without_project_remains_backward_compatible(self):
+        from nexus.cli.app import main
+
+        with patch(
+            "sys.argv",
+            ["nexus", "go", "request text"],
+        ), patch("nexus.cli.app._bootstrap"), patch(
+            "nexus.cli.app.run_go",
+            return_value={"run_id": "RUN-X", "status": "COMPLETED"},
+        ) as mock_run_go:
+            main()
+
+        mock_run_go.assert_called_once_with("request text", project_query=None)
 
 
 if __name__ == "__main__":

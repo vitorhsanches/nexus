@@ -1,4 +1,4 @@
-﻿{
+{
   "projects": [
     {
       "id": "norte",
@@ -25,6 +25,15 @@
         "poc",
         "orchestrator poc",
         "codex poc"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "nexus",
+      "name": "Nexus",
+      "path": "C:\\Users\\Vitor Sanches\\Desktop\\Devops\\nexus",
+      "aliases": [
+        "nexus"
       ],
       "enabled": true
     }
