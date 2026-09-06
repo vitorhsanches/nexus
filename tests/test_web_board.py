@@ -159,7 +159,7 @@ class WebAppTestCase(unittest.TestCase):
         with client:
             response = client.get("/")
             self.assertEqual(response.status_code, 200)
-            self.assertIn("Nexus Mission Board", response.text)
+            self.assertIn("Nexus Control Board", response.text)
 
     def test_create_mission_flow(self):
         try:

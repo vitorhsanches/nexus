@@ -437,3 +437,192 @@ html, body {
   color: var(--text);
 }
 .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- Operational runs panel ---------- */
+.panel-operational {
+  grid-column: 1 / -1;
+}
+.operational-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+  gap: var(--gap);
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .operational-layout { grid-template-columns: 1fr; }
+}
+.operational-run-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.operational-run-card {
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-elev-2);
+  cursor: pointer;
+}
+.operational-run-card:hover { border-color: var(--accent); }
+.operational-run-card.selected { border-color: var(--accent); background: var(--accent-soft); }
+.operational-run-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.operational-run-id {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.operational-run-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.operational-run-detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: var(--bg-elev-2);
+  min-height: 120px;
+}
+.operational-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.operational-detail-title {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.operational-detail-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.operational-detail-input {
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.operational-agent-lineage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+.operational-agent-card {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+.operational-agent-running { border-left-color: var(--accent); }
+.operational-agent-completed { border-left-color: var(--ok); }
+.operational-agent-failed { border-left-color: var(--danger); }
+.operational-agent-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.operational-agent-role {
+  font-weight: 600;
+  font-size: 12px;
+}
+.operational-agent-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.operational-routing {
+  margin-top: 6px;
+  color: var(--purple);
+  font-size: 11px;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+
+/* ---------- E.1 Operational Control Center refinements ---------- */
+.panel-operational {
+  grid-column: 1 / -1;
+}
+
+.operational-layout {
+  grid-template-columns: minmax(280px, 0.8fr) minmax(0, 2.2fr);
+  align-items: start;
+}
+
+.operational-run-list {
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.operational-run-detail {
+  min-height: 280px;
+}
+
+.operational-lineage-arrow {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 3px 0;
+}
+
+.operational-role-manager {
+  border-left-color: var(--accent);
+}
+
+.operational-role-worker {
+  border-left-color: var(--warn);
+}
+
+.operational-role-managerreview {
+  border-left-color: var(--purple);
+}
+
+.operational-detail-result {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .operational-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .operational-run-list {
+    max-height: 320px;
+  }
+}

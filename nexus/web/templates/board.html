@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Nexus Mission Board</title>
+  <title>Nexus Control Board</title>
   <link rel="stylesheet" href="/static/css/board.css">
 </head>
 <body>
@@ -11,8 +11,8 @@
     <div class="brand">
       <span class="brand-mark">N</span>
       <div>
-        <h1 class="brand-title">Nexus Mission Board</h1>
-        <span class="brand-sub">Local Mission Board UI &middot; v{{ app_version }}</span>
+        <h1 class="brand-title">Nexus Control Board</h1>
+        <span class="brand-sub">Operational Control Board &middot; {{ app_version }}</span>
       </div>
     </div>
     <div class="summary" id="summary">
@@ -44,6 +44,16 @@
   </header>
 
   <main class="layout">
+    <section class="panel panel-operational" id="panel-operational">
+      <h2 class="panel-title">Operational Runs <span class="muted" id="operational-run-count"></span></h2>
+      <div class="operational-layout">
+        <div class="operational-run-list" id="operational-run-list"></div>
+        <div class="operational-run-detail" id="operational-run-detail">
+          <div class="empty">Select a run to view details.</div>
+        </div>
+      </div>
+    </section>
+
     <section class="panel panel-missions" id="panel-missions">
       <h2 class="panel-title">Missions <span class="muted" id="mission-count"></span></h2>
       <div class="mission-list" id="mission-list"></div>
@@ -68,6 +78,8 @@
       <h2 class="panel-title panel-title-spaced">Execution Sessions <span class="muted" id="session-count"></span></h2>
       <div class="session-list" id="session-list"></div>
     </aside>
+
+
   </main>
 
   <div class="modal-overlay" id="mission-modal" hidden>
@@ -90,7 +102,7 @@
   </div>
 
   <footer class="footer">
-    <span>Nexus Local Mission Board &middot; read-only local view</span>
+    <span>Nexus Control Board &middot; operational local view</span>
     <span class="updated" id="updated-at"></span>
   </footer>
 
