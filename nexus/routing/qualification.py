@@ -103,3 +103,72 @@ def promoted_route_for_qualified_high_review() -> ModelRoute:
         cost_class=reference.cost_class,
         quality_tier=reference.quality_tier,
     )
+
+# ---------------------------------------------------------------------------
+# Nexus v2.0-D.3 HIGH advanced-coding qualification
+# ---------------------------------------------------------------------------
+#
+# Independently qualified on 2026-09-06.
+#
+# Exact identity:
+#   model_id        = cc/claude-sonnet-5-high
+#   provider        = claude
+#   execution_path  = OMNIROUTE
+#   effort          = low
+#   capability      = advanced-coding
+#   max_risk_level  = high
+#
+# This qualification is independent from the D.2 review+HIGH qualification.
+# It grants no review capability and never grants CRITICAL risk.
+
+CANDIDATE_HIGH_CODING_ROUTE = ModelRoute(
+    model_id="cc/claude-sonnet-5-high",
+    provider="claude",
+    execution_path="OMNIROUTE",
+    effort="low",
+    capabilities=frozenset({"advanced-coding"}),
+    max_risk_level=RiskLevel.HIGH.value,
+    approved=False,
+    enabled=True,
+    experimental=True,
+    cost_class="standard",
+    quality_tier="high",
+)
+
+
+def is_exact_high_coding_candidate_identity(
+    model_id: str,
+    provider: str,
+    execution_path: str,
+    effort: str,
+) -> bool:
+    """Match only the exact D.3 HIGH advanced-coding candidate."""
+
+    reference = CANDIDATE_HIGH_CODING_ROUTE
+
+    return (
+        model_id == reference.model_id
+        and provider == reference.provider
+        and execution_path == reference.execution_path
+        and effort == reference.effort
+    )
+
+
+def promoted_route_for_qualified_high_coding() -> ModelRoute:
+    """Build the exact production route after successful D.3 qualification."""
+
+    reference = CANDIDATE_HIGH_CODING_ROUTE
+
+    return ModelRoute(
+        model_id=reference.model_id,
+        provider=reference.provider,
+        execution_path=reference.execution_path,
+        effort=reference.effort,
+        capabilities=reference.capabilities,
+        max_risk_level=reference.max_risk_level,
+        approved=True,
+        enabled=True,
+        experimental=False,
+        cost_class=reference.cost_class,
+        quality_tier=reference.quality_tier,
+    )

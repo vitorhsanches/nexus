@@ -1,4 +1,15 @@
-﻿from nexus.dispatchers.omniroute import run_omniroute_worker
+from nexus.dispatchers.omniroute import run_omniroute_worker
+
+
+# Single source of truth for execution paths the runtime executor can
+# actually run. The Manager must not approve any execution_path that is
+# not present here.
+SUPPORTED_EXECUTION_PATHS = frozenset({"OMNIROUTE"})
+
+# Execution paths that are recognized by the schema/prompt but are not
+# yet implemented by the executor. Plan validation rejects these with an
+# explicit reason instead of an "unknown execution path" error.
+KNOWN_UNIMPLEMENTED_EXECUTION_PATHS = frozenset({"NATIVE_CODEX"})
 
 
 class PlanExecutionError(RuntimeError):
@@ -85,10 +96,9 @@ def execute_worker(
 
         return result
 
-    if execution_path == "NATIVE_CODEX":
+    if execution_path in KNOWN_UNIMPLEMENTED_EXECUTION_PATHS:
         raise PlanExecutionError(
-            "BLOCKED_EXECUTION_PATH_NOT_IMPLEMENTED: "
-            "NATIVE_CODEX"
+            f"BLOCKED_EXECUTION_PATH_NOT_IMPLEMENTED: {execution_path}"
         )
 
     raise PlanExecutionError(

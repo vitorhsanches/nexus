@@ -4,6 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from nexus.orchestration.executor import SUPPORTED_EXECUTION_PATHS
 from nexus.registry.agents import (
     create_agent,
     update_agent_execution,
@@ -50,10 +51,7 @@ def _validate_plan(plan: dict) -> dict:
         "security-critical",
     }
 
-    allowed_paths = {
-        "OMNIROUTE",
-        "NATIVE_CODEX",
-    }
+    allowed_paths = SUPPORTED_EXECUTION_PATHS
 
     allowed_efforts = {
         "low",
@@ -223,6 +221,8 @@ def run_manager(
             "error": str(error),
         }
 
+    execution_paths = "|".join(sorted(SUPPORTED_EXECUTION_PATHS))
+
     prompt = f"""
 Use $multi-agent-development-manager.
 
@@ -265,7 +265,7 @@ NEXUS_PLAN_BEGIN
   "workers": [
     {{
       "route_class": "mechanical|standard-coding|complex-coding|review-critical|security-critical",
-      "execution_path": "OMNIROUTE|NATIVE_CODEX",
+      "execution_path": "{execution_paths}",
       "provider": "provider name",
       "model": "exact model",
       "effort": "low|medium|high",

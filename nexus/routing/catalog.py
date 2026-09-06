@@ -127,6 +127,43 @@ APPROVED_CATALOG: tuple[ModelRoute, ...] = (
         cost_class="standard",
         quality_tier="high",
     ),
+
+    # Explicitly qualified for HIGH-risk advanced coding on 2026-09-06.
+    #
+    # Exact qualified identity:
+    #   model_id       = cc/claude-sonnet-5-high
+    #   provider       = claude
+    #   execution_path = OMNIROUTE
+    #   effort         = low
+    #   capability     = advanced-coding
+    #
+    # Qualification used a real cross-file Nexus architecture task.
+    # Host validation passed, and the already-qualified HIGH reviewer
+    # returned PASS while preserving the qualification worktree.
+    #
+    # Approval is intentionally advanced-coding-only and capped at HIGH.
+    # It does not grant review capability. CRITICAL remains fail-closed.
+    ModelRoute(
+        model_id="cc/claude-sonnet-5-high",
+        provider="claude",
+        execution_path="OMNIROUTE",
+        effort="low",
+
+        capabilities=frozenset(
+            {
+                "advanced-coding",
+            }
+        ),
+
+        max_risk_level="high",
+
+        approved=True,
+        enabled=True,
+        experimental=False,
+
+        cost_class="standard",
+        quality_tier="high",
+    ),
 )
 
 
