@@ -81,6 +81,12 @@ class PlanRiskPropagationThroughRunGoTests(unittest.TestCase):
             go_module,
             "execute_progressively",
             side_effect=_fake_execute_progressively,
+        ), patch.object(
+            go_module,
+            "record_approved_plan",
+        ), patch.object(
+            go_module,
+            "record_checkpoint",
         ):
             result = go_module.run_go("do the thing")
 
@@ -147,6 +153,8 @@ class ProgressiveHistoryReviewRoutingMetadataTests(unittest.TestCase):
             return_value=review_result,
         ), patch(
             "nexus.orchestration.progressive.update_run_status",
+        ), patch(
+            "nexus.orchestration.progressive.record_checkpoint",
         ):
             outcome = execute_progressively(
                 run_id="RUN-1",

@@ -2,6 +2,11 @@ import json
 
 from nexus.dispatchers.manager import run_manager
 from nexus.orchestration.progressive import execute_progressively
+from nexus.registry.checkpoints import (
+    CheckpointWriteError,
+    record_approved_plan,
+    record_checkpoint,
+)
 from nexus.registry.runs import (
     create_run,
     update_run_result,
@@ -118,6 +123,27 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
 
     update_run_risk(run_id, plan.get("risk"))
 
+    try:
+        record_approved_plan(run_id, plan)
+        record_checkpoint(
+            run_id=run_id,
+            boundary="PLAN_APPROVED",
+            payload={
+                "manager_id": manager["manager_id"],
+                "risk": plan.get("risk"),
+                "complexity": plan.get("complexity"),
+                "parallelism": plan.get("parallelism"),
+                "worker_count": len(plan.get("workers", [])),
+            },
+        )
+    except CheckpointWriteError as error:
+        update_run_status(run_id, "BLOCKED")
+        raise GoError(
+            "CHECKPOINT_PERSISTENCE_FAILED",
+            f"Could not persist approved orchestration state: {error}",
+            run_id=run_id,
+        ) from error
+
     print()
     print("APPROVED PLAN")
     print("=" * 70)
@@ -127,7 +153,7 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
 
     worker_results = []
 
-    for planned_worker in plan["workers"]:
+    for worker_ordinal, planned_worker in enumerate(plan["workers"], start=1):
         try:
             outcome = execute_progressively(
                 run_id=run_id,
@@ -136,7 +162,16 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
                 original_task=request_text,
                 planned_worker=planned_worker,
                 plan_risk=plan.get("risk"),
+                worker_ordinal=worker_ordinal,
             )
+        except CheckpointWriteError as error:
+            update_run_status(run_id, "BLOCKED")
+            raise GoError(
+                "CHECKPOINT_PERSISTENCE_FAILED",
+                f"Could not persist execution checkpoint: {error}",
+                run_id=run_id,
+            ) from error
+
         except OSError as error:
             update_run_status(run_id, "BLOCKED")
             raise GoError(
@@ -152,6 +187,15 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
 
             if reason == "WORKER_EXECUTION_FAILED":
                 update_run_status(run_id, "FAILED")
+                record_checkpoint(
+                    run_id=run_id,
+                    boundary="RUN_TERMINAL",
+                    payload={
+                        "status": "FAILED",
+                        "reason": "WORKER_EXECUTION_FAILED",
+                    },
+                    worker_ordinal=worker_ordinal,
+                )
                 raise GoError(
                     "WORKER_EXECUTION_FAILED",
                     "A Worker failed to execute successfully.",
@@ -160,6 +204,15 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
 
             if reason == "ESCALATION_UNAVAILABLE":
                 update_run_status(run_id, "BLOCKED")
+                record_checkpoint(
+                    run_id=run_id,
+                    boundary="RUN_TERMINAL",
+                    payload={
+                        "status": "BLOCKED",
+                        "reason": "ESCALATION_UNAVAILABLE",
+                    },
+                    worker_ordinal=worker_ordinal,
+                )
                 raise GoError(
                     "ESCALATION_UNAVAILABLE",
                     outcome.get(
@@ -170,6 +223,15 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
                 )
 
             update_run_status(run_id, "BLOCKED")
+            record_checkpoint(
+                run_id=run_id,
+                boundary="RUN_TERMINAL",
+                payload={
+                    "status": "BLOCKED",
+                    "reason": outcome.get("reason", outcome.get("verdict")),
+                },
+                worker_ordinal=worker_ordinal,
+            )
             raise GoError(
                 "REVIEW_BLOCKED",
                 "Manager Review blocked the run: "
@@ -188,6 +250,16 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
     )
 
     update_run_status(run_id, "COMPLETED")
+
+    record_checkpoint(
+        run_id=run_id,
+        boundary="RUN_TERMINAL",
+        payload={
+            "status": "COMPLETED",
+            "worker_count": len(worker_results),
+        },
+        worker_ordinal=len(plan["workers"]) if plan["workers"] else None,
+    )
 
     print()
     print("NEXUS GO RESULT")

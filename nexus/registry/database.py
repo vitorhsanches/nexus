@@ -1,4 +1,4 @@
-﻿import sqlite3
+import sqlite3
 from pathlib import Path
 
 
@@ -75,5 +75,29 @@ def initialize_database() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_agents_status
                 ON agents(status);
+
+            CREATE TABLE IF NOT EXISTS approved_plans (
+                run_id TEXT PRIMARY KEY,
+                plan_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                boundary TEXT NOT NULL,
+                worker_ordinal INTEGER,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_checkpoints_run
+                ON checkpoints(run_id);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_run_sequence
+                ON checkpoints(run_id, sequence);
             """
         )

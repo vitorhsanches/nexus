@@ -155,6 +155,9 @@ class InitialAdaptiveBindingTests(unittest.TestCase):
             )
 
     @patch(
+        "nexus.orchestration.progressive.record_checkpoint"
+    )
+    @patch(
         "nexus.orchestration.progressive.update_run_status"
     )
     @patch(
@@ -168,6 +171,7 @@ class InitialAdaptiveBindingTests(unittest.TestCase):
         execute_worker_mock,
         review_worker_mock,
         _update_run_status_mock,
+        _record_checkpoint_mock,
     ):
         decision = RoutingDecision(
             model="cc/claude-sonnet-5-low",
@@ -235,6 +239,9 @@ class InitialAdaptiveBindingTests(unittest.TestCase):
         self.assertEqual(second["effort"], first["effort"])
 
     @patch(
+        "nexus.orchestration.progressive.record_checkpoint"
+    )
+    @patch(
         "nexus.orchestration.progressive.update_run_status"
     )
     @patch(
@@ -248,6 +255,7 @@ class InitialAdaptiveBindingTests(unittest.TestCase):
         execute_worker_mock,
         review_worker_mock,
         _update_run_status_mock,
+        _record_checkpoint_mock,
     ):
         decision = RoutingDecision(
             model="oc/big-pickle",
