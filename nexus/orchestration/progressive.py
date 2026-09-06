@@ -17,6 +17,7 @@ def execute_progressively(
     manager_id: str,
     original_task: str,
     planned_worker: dict,
+    plan_risk=None,
 ) -> dict:
     current_worker = deepcopy(planned_worker)
 
@@ -67,8 +68,7 @@ def execute_progressively(
             worktree=worker_result["worktree"],
             original_task=original_task,
             worker_scope=current_worker["scope"],
-            model="gpt-5.6-luna",
-            effort="low",
+            risk_level=plan_risk,
         )
 
         if review_result["status"] != "COMPLETED":
@@ -81,6 +81,8 @@ def execute_progressively(
 
         review = review_result["review"]
 
+        review_routing = review_result.get("routing") or {}
+
         history.append(
             {
                 "attempt": attempt,
@@ -88,6 +90,14 @@ def execute_progressively(
                 "model": current_worker["model"],
                 "worktree": worker_result["worktree"],
                 "reviewer_id": review_result["reviewer_id"],
+                "reviewer_model": review_routing.get("model"),
+                "reviewer_provider": review_routing.get("provider"),
+                "reviewer_effort": review_routing.get("effort"),
+                "reviewer_execution_path": review_routing.get(
+                    "execution_path"
+                ),
+                "reviewer_routing_reason": review_routing.get("reason"),
+                "reviewer_degraded": review_routing.get("degraded"),
                 "verdict": review["verdict"],
                 "failure_class": review.get(
                     "failure_class"

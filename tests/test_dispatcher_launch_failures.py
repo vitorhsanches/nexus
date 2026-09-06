@@ -7,6 +7,14 @@ import nexus.registry.database as database
 from nexus.registry.agents import create_agent
 
 
+class _FakeRoutingService:
+    def __init__(self, decision):
+        self._decision = decision
+
+    def select_route_for_capability(self, capability, risk_level=None):
+        return self._decision
+
+
 class DispatcherLaunchFailureTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -68,6 +76,18 @@ class DispatcherLaunchFailureTestCase(unittest.TestCase):
 
     def test_review_missing_codex_returns_launch_failed(self):
         from nexus.dispatchers.review import review_worker
+        from nexus.routing.service import RoutingDecision
+
+        fake_routing_service = _FakeRoutingService(
+            RoutingDecision(
+                model="cc/claude-sonnet-5-low",
+                provider="claude",
+                effort="low",
+                execution_path="OMNIROUTE",
+                reason="test double",
+                degraded=False,
+            )
+        )
 
         with patch(
             "nexus.dispatchers.review._find_codex",
@@ -79,6 +99,7 @@ class DispatcherLaunchFailureTestCase(unittest.TestCase):
                 worktree=r"C:\fake\worktree",
                 original_task="do something",
                 worker_scope="fix things",
+                routing_service=fake_routing_service,
             )
 
         self.assertEqual(result["status"], "LAUNCH_FAILED")

@@ -262,6 +262,12 @@ class AdaptiveRoutingService:
                 "low",
                 "OMNIROUTE",
             ),
+            CapabilityClass.REVIEW.value: (
+                "cc/claude-sonnet-5-low",
+                "claude",
+                "low",
+                "OMNIROUTE",
+            ),
         }
 
     def _collect_telemetry(self) -> OmniRouteTelemetrySnapshot:
@@ -397,6 +403,48 @@ class AdaptiveRoutingService:
         risk_level = risk_level_for_policy(
             execution_policy
         )
+
+        return self._select_route(capability, risk_level)
+
+    def select_route_for_capability(
+        self,
+        capability: str,
+        risk_level=None,
+    ) -> RoutingDecision:
+        """Select the best route for an explicit router capability class.
+
+        Unlike select_route_for_task, this never maps operational Task
+        capabilities through capability_class_for: the caller supplies the
+        router CapabilityClass value directly (for example
+        CapabilityClass.REVIEW.value). This is the safe primitive
+        introduced for the operational reviewer bridge (Nexus v2.0-D) so
+        review requests are never misclassified as standard-coding.
+
+        Reuses the exact same telemetry collection, runtime catalog
+        overlay, resource normalization, health/credential hard blockers,
+        ProviderOverrides, capability gate, risk gate, approval/enabled
+        gate, Terra deny-list and deterministic scoring as
+        select_route_for_task. No router policy is duplicated.
+
+        risk_level is an explicit risk string (or None, defaulting to LOW
+        for backward compatibility) normalized through the same central
+        normalize_risk_level used elsewhere; unknown explicit risk fails
+        closed with InvalidRiskLevelError.
+        """
+
+        normalized_risk = normalize_risk_level(risk_level)
+
+        return self._select_route(capability, normalized_risk)
+
+    def _select_route(
+        self,
+        capability: str,
+        risk_level: str,
+    ) -> RoutingDecision:
+        """Shared routing pipeline for both explicit and Task-derived
+        capability selection. Contains no policy duplication: all hard
+        gates and scoring live in nexus.routing.router/scoring/telemetry.
+        """
 
         snapshot = self._collect_telemetry()
 

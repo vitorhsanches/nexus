@@ -132,6 +132,7 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
                 manager_id=manager["manager_id"],
                 original_task=request_text,
                 planned_worker=planned_worker,
+                plan_risk=plan.get("risk"),
             )
         except OSError as error:
             update_run_status(run_id, "BLOCKED")
