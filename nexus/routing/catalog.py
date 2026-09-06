@@ -96,6 +96,37 @@ APPROVED_CATALOG: tuple[ModelRoute, ...] = (
         cost_class="standard",
         quality_tier="high",
     ),
+
+    # Explicitly qualified for HIGH-risk Manager Review on 2026-09-06.
+    #
+    # Qualification was performed against the real v2.0-E Worker diff using
+    # the exact route below through OmniRoute. The semantic reviewer returned
+    # PASS with concrete architecture/lifecycle evidence and the target
+    # worktree remained unchanged.
+    #
+    # Approval is intentionally REVIEW-only and capped at HIGH.
+    # CRITICAL remains fail-closed.
+    ModelRoute(
+        model_id="cc/claude-sonnet-5-high",
+        provider="claude",
+        execution_path="OMNIROUTE",
+        effort="high",
+
+        capabilities=frozenset(
+            {
+                "review",
+            }
+        ),
+
+        max_risk_level="high",
+
+        approved=True,
+        enabled=True,
+        experimental=False,
+
+        cost_class="standard",
+        quality_tier="high",
+    ),
 )
 
 

@@ -99,15 +99,19 @@ class AdaptiveRoutingServiceCapabilitySelectionTestCase(unittest.TestCase):
         )
         self.assertEqual(decision.model, "cc/claude-sonnet-5-low")
 
-    def test_high_review_fails_no_eligible_route(self):
+    def test_high_review_selects_qualified_high_route(self):
         snapshot = OmniRouteTelemetrySnapshot()
         service = AdaptiveRoutingService(telemetry_client=snapshot)
 
-        with self.assertRaises(NoEligibleRouteError):
-            service.select_route_for_capability(
-                CapabilityClass.REVIEW.value,
-                risk_level="high",
-            )
+        decision = service.select_route_for_capability(
+            CapabilityClass.REVIEW.value,
+            risk_level="high",
+        )
+
+        self.assertEqual(decision.model, "cc/claude-sonnet-5-high")
+        self.assertEqual(decision.provider, "claude")
+        self.assertEqual(decision.execution_path, "OMNIROUTE")
+        self.assertEqual(decision.effort, "high")
 
     def test_critical_review_fails_no_eligible_route(self):
         snapshot = OmniRouteTelemetrySnapshot()

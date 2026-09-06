@@ -105,12 +105,39 @@ def score_route(
     )
 
 
+_EFFORT_RANK = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+    "xhigh": 3,
+    "max": 4,
+    "ultra": 5,
+}
+
+
+def effort_rank(
+    route: ModelRoute,
+) -> int:
+    """Prefer the lowest reasoning effort when scored routes are equivalent.
+
+    Capability/risk and resource scoring remain dominant. Effort is only a
+    deterministic tie-breaker so Nexus avoids spending more reasoning budget
+    than necessary.
+    """
+
+    return _EFFORT_RANK.get(
+        (route.effort or "").strip().lower(),
+        99,
+    )
+
+
 def sort_key(
     route: ModelRoute,
     score: float,
 ):
     return (
         -score,
+        effort_rank(route),
         route.model_id,
     )
 

@@ -223,6 +223,7 @@ class RuntimeCatalogOverlayTests(unittest.TestCase):
         snapshot = OmniRouteTelemetrySnapshot(
             discovered_models=(
                 DiscoveredModel(model_id="cc/claude-sonnet-5-low", provider="claude"),
+                DiscoveredModel(model_id="cc/claude-sonnet-5-high", provider="claude"),
                 DiscoveredModel(model_id="oc/big-pickle", provider="opencode"),
             )
         )
