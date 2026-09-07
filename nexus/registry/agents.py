@@ -213,3 +213,28 @@ def list_agents_for_run(run_id: str):
             """,
             (run_id,),
         ).fetchall()
+
+
+def get_agent(agent_id: str):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT
+                id,
+                run_id,
+                role,
+                provider,
+                model,
+                effort,
+                status,
+                branch,
+                worktree,
+                parent_agent_id,
+                started_at,
+                finished_at,
+                result
+            FROM agents
+            WHERE id = ?
+            """,
+            (agent_id,),
+        ).fetchone()

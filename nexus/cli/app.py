@@ -7,6 +7,7 @@ from nexus.registry.runs import count_active_runs, list_runs
 from nexus.registry.agents import count_active_agents, list_agents
 from nexus.orchestration.demo import create_demo_run
 from nexus.orchestration.go import GoError, run_go
+from nexus.orchestration.resume import ResumeError, resume_run
 from nexus.orchestration.show import RunNotFoundError, show_run
 
 
@@ -200,6 +201,31 @@ def show_command(run_id: str) -> None:
         sys.exit(1)
 
 
+def resume_command(run_id: str) -> None:
+    try:
+        result = resume_run(run_id)
+
+    except ResumeError as error:
+        print()
+        print(f"NEXUS RESUME FAILED: {error.code}")
+        print("=" * 60)
+        print(str(error))
+
+        if error.run_id:
+            print(f"Run : {error.run_id}")
+
+        print()
+        sys.exit(1)
+        return
+
+    print()
+    print("NEXUS RESUME COMPLETE")
+    print("=" * 60)
+    print(f"Run    : {result['run_id']}")
+    print(f"Status : {result['status']}")
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="nexus",
@@ -238,6 +264,15 @@ def main() -> None:
         help="Run id, e.g. RUN-XXXXXXXX.",
     )
 
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="Resume an existing Run from its durable checkpoint history.",
+    )
+    resume_parser.add_argument(
+        "run_id",
+        help="Run id to resume, e.g. RUN-XXXXXXXX.",
+    )
+
     args = parser.parse_args()
 
     command = args.command or "status"
@@ -250,6 +285,10 @@ def main() -> None:
 
     if command == "show":
         show_command(args.run_id)
+        return
+
+    if command == "resume":
+        resume_command(args.run_id)
         return
 
     commands = {
