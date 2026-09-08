@@ -10,7 +10,7 @@ def _new_mission_id() -> str:
     return f"MISSION-{uuid4().hex[:8].upper()}"
 
 
-def generate_mission_from_plan(plan: dict, run_id: str) -> Mission:
+def generate_mission_from_plan(plan: dict, run_id: str, persist: bool = True) -> Mission:
     """Build a Mission from a Manager plan, creating one Task per worker.
 
     If the plan has no workers, a Mission with no tasks is returned.
@@ -59,6 +59,7 @@ def generate_mission_from_plan(plan: dict, run_id: str) -> Mission:
             execution_policy=_execution_policy(
                 worker, plan_project_id, plan_execution_path
             ),
+            persist=persist,
         )
         mission.tasks.append(task)
         previous_task_id = task.task_id

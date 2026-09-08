@@ -1,4 +1,4 @@
-﻿"""Service layer for Nexus Mission Board Core V1.
+"""Service layer for Nexus Mission Board Core V1.
 
 This is the internal, functional board core only. It keeps an in-memory board
 per mission and reuses the existing Mission Engine and Task Registry as the
@@ -30,7 +30,9 @@ class BoardNotFoundError(KeyError):
 
 
 def _column_for_status(status: str) -> BoardColumn:
-    return _STATUS_TO_COLUMN.get(status, BoardColumn.TODO)
+    if status not in _STATUS_TO_COLUMN:
+        raise ValueError(f"Corrupt task status for board mapping: {status!r}")
+    return _STATUS_TO_COLUMN[status]
 
 
 def _validate_column(column) -> BoardColumn:
@@ -65,11 +67,25 @@ def assign_task(task_id, agent) -> TaskAssignment:
     task = task_registry.get_task(task_id)
     board = get_board(task.mission_id)
 
-    if task.task_id not in board.columns[BoardColumn.TODO]:
-        # Ensure the task card is present on the board before assignment.
-        _place(board, task.task_id, BoardColumn.TODO)
-
+    # Snapshot board columns and assigned_agent for full rollback on persistence failure
+    original_columns = {col: list(board.columns[col]) for col in BoardColumn}
+    old = task.assigned_agent
+    # Durable-first: attempt persistence before committing in-memory mutation
+    # Build a temporary copy value to persist without relying on mutated state if preferred,
+    # but we mutate then persist and rollback on failure; snapshot ensures Board also rolls back.
     task.assigned_agent = agent
+    needs_place = task.task_id not in board.columns[BoardColumn.TODO]
+    if needs_place:
+        _place(board, task.task_id, BoardColumn.TODO)
+    try:
+        from nexus.tasks.persistence import persist_task
+        persist_task(task)
+    except Exception:
+        task.assigned_agent = old
+        # restore board columns exactly
+        for col in BoardColumn:
+            board.columns[col] = list(original_columns[col])
+        raise
     assignment = TaskAssignment(
         task_id=task.task_id,
         agent=agent,
@@ -90,14 +106,17 @@ def assign_task(task_id, agent) -> TaskAssignment:
 
 
 def move_task(task_id, column) -> TaskAssignment:
-    """Move a task card to another board column."""
+    """Move a task card to another board column.
+
+    Board movement is a derived projection; durable authority is Task.status.
+    Recovery rebuilds columns from Task.status, not from board placement.
+    """
     column = _validate_column(column)
     task = task_registry.get_task(task_id)
     board = get_board(task.mission_id)
 
     _place(board, task.task_id, column)
 
-    # Keep the assignment view in sync with the latest column.
     assignment = TaskAssignment(
         task_id=task.task_id,
         agent=task.assigned_agent,
@@ -109,7 +128,7 @@ def move_task(task_id, column) -> TaskAssignment:
 
 
 def record_event(event: BoardEvent) -> BoardEvent:
-    """Record a task board event on the owning mission's board ledger."""
+    """Record a task board event on the owning mission''s board ledger."""
     board = get_board(event.mission_id)
     board.events.append(event)
     return event

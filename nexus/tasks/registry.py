@@ -29,6 +29,7 @@ def create_task(
     assigned_agent=None,
     execution_policy=None,
     acceptance_criteria=None,
+    persist=True,
 ):
     task_id = _new_id("TASK")
     task = Task(
@@ -46,6 +47,14 @@ def create_task(
         ),
     )
     _tasks[task_id] = task
+    if not persist:
+        return task
+    try:
+        from nexus.tasks.persistence import persist_task
+        persist_task(task)
+    except Exception:
+        _tasks.pop(task_id, None)
+        raise
     return task
 
 
@@ -62,7 +71,14 @@ def list_tasks():
 
 def update_task_status(task_id, status):
     task = get_task(task_id)
+    old_status = task.status
     task.status = transition(task.status, status)
+    try:
+        from nexus.tasks.persistence import persist_task
+        persist_task(task)
+    except Exception:
+        task.status = old_status
+        raise
     return task
 
 
@@ -80,6 +96,17 @@ def create_attempt(task_id, agent_id, model, status="PENDING", result=None):
         result=result,
     )
     _attempts.setdefault(task_id, []).append(attempt)
+    try:
+        from nexus.tasks.persistence import persist_attempt
+        persist_attempt(attempt)
+    except Exception:
+        lst = _attempts.get(task_id, [])
+        if attempt in lst:
+            lst.remove(attempt)
+        _next_attempt[task_id] = sequence - 1
+        if _next_attempt[task_id] <= 0:
+            _next_attempt.pop(task_id, None)
+        raise
     return attempt
 
 
@@ -131,6 +158,8 @@ def update_attempt_status(attempt_id, status, result=None):
 
     attempt = get_attempt(attempt_id)
     current = attempt.status
+    old_status = current
+    old_result = attempt.result
 
     allowed = ATTEMPT_TRANSITIONS.get(current)
     if allowed is None:
@@ -149,4 +178,23 @@ def update_attempt_status(attempt_id, status, result=None):
     if result is not None:
         attempt.result = result
 
+    try:
+        from nexus.tasks.persistence import persist_attempt
+        persist_attempt(attempt)
+    except Exception:
+        attempt.status = old_status
+        attempt.result = old_result
+        raise
     return attempt
+
+def assign_task_agent(task_id, agent):
+    task = get_task(task_id)
+    old = task.assigned_agent
+    task.assigned_agent = agent
+    try:
+        from nexus.tasks.persistence import persist_task
+        persist_task(task)
+    except Exception:
+        task.assigned_agent = old
+        raise
+    return task
