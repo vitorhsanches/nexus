@@ -7,6 +7,7 @@ from nexus.registry.checkpoints import (
     record_approved_plan,
     record_checkpoint,
 )
+from nexus.orchestration.ownership import establish_ownership
 from nexus.registry.runs import (
     create_run,
     update_run_result,
@@ -68,6 +69,7 @@ def run_go(request_text: str, project_query: str | None = None) -> dict:
         intent="GO",
         status="ROUTING",
     )
+    establish_ownership(run_id)
 
     print()
     print("NEXUS GO")

@@ -7,6 +7,7 @@ from nexus.registry.runs import count_active_runs, list_runs
 from nexus.registry.agents import count_active_agents, list_agents
 from nexus.orchestration.demo import create_demo_run
 from nexus.orchestration.go import GoError, run_go
+from nexus.orchestration.recovery import recover_all
 from nexus.orchestration.resume import ResumeError, resume_run
 from nexus.orchestration.show import RunNotFoundError, show_run
 
@@ -273,6 +274,16 @@ def main() -> None:
         help="Run id to resume, e.g. RUN-XXXXXXXX.",
     )
 
+    recover_parser = subparsers.add_parser(
+        "recover",
+        help="Recover crashed runs with dead same-host ownership.",
+    )
+    recover_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List recoverable runs without executing.",
+    )
+
     args = parser.parse_args()
 
     command = args.command or "status"
@@ -289,6 +300,17 @@ def main() -> None:
 
     if command == "resume":
         resume_command(args.run_id)
+        return
+
+    if command == "recover":
+        result = recover_all(dry_run=args.dry_run)
+        print()
+        print("NEXUS RECOVER")
+        print("=" * 60)
+        print(f"Recovered: {result['recovered']}")
+        print(f"Skipped: {result['skipped']}")
+        print(f"Failed: {result['failed']}")
+        print()
         return
 
     commands = {

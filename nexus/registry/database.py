@@ -101,3 +101,10 @@ def initialize_database() -> None:
                 ON checkpoints(run_id, sequence);
             """
         )
+        cols = [r[1] for r in connection.execute("PRAGMA table_info(runs)").fetchall()]
+        if "owner_host" not in cols:
+            connection.execute("ALTER TABLE runs ADD COLUMN owner_host TEXT")
+        if "owner_pid" not in cols:
+            connection.execute("ALTER TABLE runs ADD COLUMN owner_pid INTEGER")
+        if "owner_acquired_at" not in cols:
+            connection.execute("ALTER TABLE runs ADD COLUMN owner_acquired_at TEXT")

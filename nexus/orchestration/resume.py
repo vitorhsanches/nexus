@@ -29,6 +29,7 @@ from nexus.registry.checkpoints import (
     record_checkpoint,
 )
 from nexus.registry.projects import get_project
+from nexus.orchestration.ownership import try_acquire_for_resume
 from nexus.registry.runs import (
     get_run,
     update_run_result,
@@ -766,6 +767,8 @@ def resume_run(run_id: str) -> dict:
             "must never do.",
             run_id=run_id,
         )
+
+    try_acquire_for_resume(run_id)
 
     project = get_project(run["project_id"])
 
