@@ -41,10 +41,7 @@ def persist_mission_bundle(mission):
                 c.execute("INSERT INTO tasks(task_id,mission_id,title,description,status,priority,dependencies,assigned_agent,execution_policy,acceptance_criteria) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET mission_id=excluded.mission_id,title=excluded.title,description=excluded.description,status=excluded.status,priority=excluded.priority,dependencies=excluded.dependencies,assigned_agent=excluded.assigned_agent,execution_policy=excluded.execution_policy,acceptance_criteria=excluded.acceptance_criteria", (t.task_id,t.mission_id,t.title,t.description,t.status,t.priority,_enc(t.dependencies),t.assigned_agent,_enc(t.execution_policy),_enc(t.acceptance_criteria)))
             c.commit()
         except Exception:
-            try:
-                c.rollback()
-            except Exception:
-                pass
+            c.rollback()
             raise
 
 def load_missions():
