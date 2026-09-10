@@ -27,13 +27,15 @@ def create_mission(
     status: str = "CREATED",
     project_id: str | None = None,
     execution_path: str | None = None,
+    mission_id: str | None = None,
+    persist: bool = True,
 ) -> Mission:
     """Create an empty Mission with no tasks."""
     if status not in MISSION_STATUSES:
         raise ValueError(f"Invalid mission status: {status!r}")
 
     mission = Mission(
-        mission_id=_new_mission_id(),
+        mission_id=mission_id or _new_mission_id(),
         run_id=run_id,
         title=title,
         description=description,
@@ -43,7 +45,11 @@ def create_mission(
         project_id=project_id,
         execution_path=execution_path,
     )
+    if mission.mission_id in _missions:
+        raise ValueError(f"Mission already exists: {mission.mission_id!r}")
     _missions[mission.mission_id] = mission
+    if not persist:
+        return mission
     try:
         from nexus.missions.persistence import persist_mission
         persist_mission(mission)

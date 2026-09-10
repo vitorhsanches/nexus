@@ -30,8 +30,11 @@ def create_task(
     execution_policy=None,
     acceptance_criteria=None,
     persist=True,
+    task_id=None,
 ):
-    task_id = _new_id("TASK")
+    task_id = task_id or _new_id("TASK")
+    if task_id in _tasks:
+        raise ValueError(f"Task already exists: {task_id!r}")
     task = Task(
         task_id=task_id,
         mission_id=mission_id,

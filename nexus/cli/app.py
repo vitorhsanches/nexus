@@ -1,5 +1,6 @@
 import argparse
 import sys
+from uuid import uuid4
 
 from nexus.registry.database import initialize_database
 from nexus.registry.projects import list_projects, sync_projects
@@ -10,6 +11,8 @@ from nexus.orchestration.go import GoError, run_go
 from nexus.orchestration.recovery import recover_all
 from nexus.orchestration.resume import ResumeError, resume_run
 from nexus.orchestration.show import RunNotFoundError, show_run
+from nexus.intelligence.errors import IntelligenceValidationError
+from nexus.intelligence.orchestrator import IntelligenceOrchestrator
 
 
 def _bootstrap() -> None:
@@ -227,6 +230,34 @@ def resume_command(run_id: str) -> None:
     print()
 
 
+def intelligence_analyze_command(repository_path: str, create_mission: bool = False) -> None:
+    try:
+        orchestrator = IntelligenceOrchestrator()
+        report, proposals = orchestrator.analyze(repository_path)
+        mission = None
+        if create_mission:
+            if len(proposals) != 1:
+                raise IntelligenceValidationError("exactly one recommendation is required to create a mission")
+            mission = orchestrator.mission_bridge.materialize_intelligence_mission(
+                proposals[0], f"RUN-INTEL-{uuid4().hex[:8].upper()}", approved=True
+            )
+    except IntelligenceValidationError as error:
+        print(f"NEXUS INTELLIGENCE FAILED: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+    print("NEXUS INTELLIGENCE ANALYSIS")
+    print("=" * 60)
+    print(f"Repository     : {repository_path}")
+    print(f"Findings       : {len(report.findings)}")
+    print(f"Risk summary   : {len(report.risks)} risk(s)")
+    print("Recommendations:")
+    for recommendation in report.recommendations:
+        print(f"  - [{recommendation.severity.value}] {recommendation.title or recommendation.summary}")
+    if mission is not None:
+        print(f"Created mission: {mission.mission_id}")
+        print("Execution      : NOT STARTED")
+    else:
+        print("Mission        : not created (use --create-mission to materialize)")
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="nexus",
@@ -284,11 +315,22 @@ def main() -> None:
         help="List recoverable runs without executing.",
     )
 
+    intelligence_parser = subparsers.add_parser("intelligence", help="Run repository intelligence analysis.")
+    intelligence_subparsers = intelligence_parser.add_subparsers(dest="intelligence_command", required=True)
+    analyze_parser = intelligence_subparsers.add_parser("analyze", help="Analyze a repository without executing work.")
+    analyze_parser.add_argument("repository_path")
+    analyze_parser.add_argument("--create-mission", action="store_true", help="Explicitly materialize the proposed Mission/Tasks.")
+
     args = parser.parse_args()
 
     command = args.command or "status"
 
-    _bootstrap()
+    if command != "intelligence":
+        _bootstrap()
+
+    if command == "intelligence":
+        intelligence_analyze_command(args.repository_path, args.create_mission)
+        return
 
     if command == "go":
         go_command(args.request, project=args.project)
