@@ -43,6 +43,7 @@ function setup(options = {}) {
     "dev-integration-gate", "dev-create-review", "dev-integration-preflight", "dev-reject-review", "dev-apply-confirm", "dev-apply-review", "dev-integration-summary", "dev-integration-message", "dev-integration-history-list",
     "dev-model-search", "dev-model-result-count", "dev-model-select", "dev-effort-select",
     "dev-prompt-input", "dev-run-button", "dev-stop-button",
+    "dev-mission-description", "dev-mission-test-profile", "dev-mission-start", "dev-mission-stop", "dev-mission-progress",
     "dev-activity-status", "dev-activity-elapsed", "dev-activity-events",
     "view-mode-badge",
   ];
@@ -68,6 +69,7 @@ function setup(options = {}) {
     executionEnabled: Boolean(options.executionEnabled),
     executionStatusFails: Boolean(options.executionStatusFails),
     sessions: options.sessions || [], turns: new Map(), nextSession: 1, nextTurn: 1,
+    missions: options.missions || [],
     createError: null, createStatus: 400,
     changedFiles: options.changedFiles || [],
     review: options.review || { base_sha: "a", head_sha: "a", review_id: "review-1", files: [] },
@@ -152,6 +154,18 @@ function setup(options = {}) {
       backend.turns.get(id).push(turn);
       return response(turn);
     }
+    const missionsMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/missions$/);
+    if (missionsMatch && method === "GET") return response({ missions: backend.missions });
+    if (missionsMatch && method === "POST") {
+      const body = JSON.parse(opts.body);
+      const mission = {
+        mission_id: "DEVMISSION-1", dev_session_id: decodeURIComponent(missionsMatch[1]),
+        description: body.description, requested_model: body.model, test_profile: body.test_profile,
+        status: "READY_FOR_REVIEW", attempt_count: 1, tests: [{ attempt_number: 1, status: "PASSED" }],
+        result: { human_approval_required: true, integration_applied: false }, error_code: null, error_message: null,
+      };
+      backend.missions.unshift(mission); return response(mission);
+    }
     if (parsed.pathname.endsWith("/interrupt") && method === "POST") return response({ status: "INTERRUPT_REQUESTED" });
     return response({ detail: { message: "Unexpected test route: " + parsed.pathname } }, 404);
   };
@@ -188,6 +202,27 @@ function allText(node) {
 test("nav entry and ws-dev section exist in the template", () => {
   assert.match(nexusTemplateSource, /id="nav-dev"[^>]*data-target="dev-view"/);
   assert.match(nexusTemplateSource, /id="ws-dev"/);
+  assert.match(nexusTemplateSource, /id="dev-mission-start"/);
+});
+
+test("autonomous mission posts bounded model and trusted profile then stops for review", async () => {
+  const ui = setup({ executionEnabled: true, sessions: [{ session_id: "DEV-1", project_id: "demo", status: "ACTIVE", branch: "nexus/dev/DEV-1", base_sha: "x", worktree_path: "/wt" }] });
+  await ui.window.NexusDev.enter();
+  ui.elements["dev-project-select"].value = "demo"; ui.elements["dev-project-select"].dispatch("change");
+  await flush();
+  ui.elements["dev-session-list"].children[0].dispatch("click");
+  await flush();
+  ui.elements["dev-mission-description"].value = "implement bounded feature";
+  ui.elements["dev-mission-test-profile"].value = "nexus-f36b";
+  ui.elements["dev-mission-start"].dispatch("click");
+  await flush();
+  const call = ui.calls.find((item) => item.method === "POST" && item.path === "/api/dev/sessions/DEV-1/missions");
+  assert.equal(call.body.description, "implement bounded feature");
+  assert.deepEqual(call.body.allowed_models, ["cx/gpt-5.6-sol"]);
+  assert.equal(call.body.test_profile, "nexus-f36b");
+  assert.match(ui.elements["dev-mission-progress"].textContent, /READY_FOR_REVIEW/);
+  assert.match(ui.elements["dev-mission-progress"].textContent, /human review/i);
+  assert.equal(ui.elements["dev-mission-stop"].disabled, true);
 });
 
 test("entering Development Mode loads only dev_enabled projects and checks the execution gate", async () => {

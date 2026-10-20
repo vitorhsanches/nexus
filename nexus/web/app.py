@@ -43,8 +43,10 @@ async def lifespan(app: FastAPI):
     """
     initialize_database()
     from nexus.chat.service import recover_orphaned_turns
+    from nexus.dev.mission_runner import recover_orphaned_missions
 
     recover_orphaned_turns()
+    recover_orphaned_missions()
     sync_projects()
     initialize_default_agents()
     yield

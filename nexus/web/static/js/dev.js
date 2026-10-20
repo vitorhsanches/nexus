@@ -32,6 +32,7 @@
     integrationEnabled: false, integrationReview: null, integrationPreflight: null, integrationBusy: false,
     integrationReviewOutdated: false, integrationReviewUncertain: false, integrationHistoryIds: [],
     activeTurnId: null, source: null, sending: false,
+    mission: null, missionPollTimer: null,
     activityStartedAt: null, elapsedTimer: null,
     // Connection state is deliberately tracked separately from execution
     // state (Running/Completed/Failed/...): a dropped SSE stream must
@@ -166,6 +167,7 @@
       state.executionStatusChecked = true;
       renderExecutionGateBanner();
       setComposerState();
+      updateMissionControls();
       return state.executionEnabled;
     }).catch(function (error) {
       // Unknown gate state is treated exactly like "disabled" for the
@@ -174,6 +176,7 @@
       state.executionStatusChecked = true;
       renderExecutionGateBanner("Could not confirm the server's execution gate: " + error.message);
       setComposerState();
+      updateMissionControls();
       return false;
     });
   }
@@ -241,6 +244,7 @@
       state.selectedModel = state.modelOptions.some(function (item) { return item.id === models.default_model; }) ? models.default_model : null;
       populateModelSelect();
       populateEffortSelect();
+      updateMissionControls();
       showStatus("Ready.", "ready");
     }).catch(function (error) {
       showStatus("Could not load Development Mode data: " + error.message, "error");
@@ -327,6 +331,7 @@
 
   function chooseProject(projectId) {
     state.session = null;
+    renderMission(null);
     resetTurnView();
     var createButton = $("dev-create-session");
     if (createButton) createButton.disabled = !projectId;
@@ -351,6 +356,7 @@
   }
 
   function selectSession(sessionId) {
+    renderMission(null);
     if (!state.session || state.session.session_id !== sessionId) {
       state.review = null; state.selectedReviewPath = null;
       var summary = $("dev-review-summary"); if (summary) summary.textContent = "Loading read-only diff review…";
@@ -385,8 +391,90 @@
       loadChangedFiles();
       loadReview();
       loadIntegrationHistory();
+      loadAutonomousMissions();
       setComposerState();
     }).catch(function (error) { showStatus("Could not load this Development session: " + error.message, "error"); });
+  }
+
+  function missionIsActive(mission) {
+    return Boolean(mission && ["PENDING", "RUNNING", "TESTING", "REPAIRING"].indexOf(mission.status) !== -1);
+  }
+
+  function updateMissionControls() {
+    var hasSession = Boolean(state.session && state.session.status === "ACTIVE");
+    var active = missionIsActive(state.mission);
+    var description = $("dev-mission-description");
+    var profile = $("dev-mission-test-profile");
+    var start = $("dev-mission-start");
+    var stop = $("dev-mission-stop");
+    if (description) description.disabled = !hasSession || active || !state.executionEnabled;
+    if (profile) profile.disabled = !hasSession || active || !state.executionEnabled;
+    if (start) start.disabled = !hasSession || active || !state.executionEnabled || !state.selectedModel;
+    if (stop) stop.disabled = !active;
+  }
+
+  function renderMission(mission) {
+    state.mission = mission || null;
+    var output = $("dev-mission-progress");
+    if (output) {
+      if (!mission) output.textContent = state.session ? "No autonomous mission has run in this session." : "Select an active Development session.";
+      else {
+        var lines = [
+          mission.mission_id + " · " + mission.status,
+          "Attempts: " + mission.attempt_count + " / 2",
+          "Test profile: " + mission.test_profile,
+          "Tests: " + ((mission.tests || []).map(function (test) { return "#" + test.attempt_number + " " + test.status; }).join(" · ") || "not started")
+        ];
+        if (mission.error_code) lines.push("Error: " + mission.error_code + " · " + (mission.error_message || ""));
+        if (mission.status === "READY_FOR_REVIEW") lines.push("Ready for human review. Integration was not applied.");
+        output.textContent = redacted(lines.join("\n"));
+      }
+    }
+    updateMissionControls();
+    if (missionIsActive(mission)) scheduleMissionPoll();
+    else if (state.missionPollTimer) { clearTimeout(state.missionPollTimer); state.missionPollTimer = null; }
+  }
+
+  function loadAutonomousMissions() {
+    if (!state.session) { renderMission(null); return Promise.resolve(); }
+    return request("/dev/sessions/" + encodeURIComponent(state.session.session_id) + "/missions")
+      .then(function (payload) { renderMission(payload && payload.missions && payload.missions.length ? payload.missions[0] : null); })
+      .catch(function (error) { renderMission(null); showStatus("Could not load autonomous missions: " + error.message, "error"); });
+  }
+
+  function scheduleMissionPoll() {
+    if (state.missionPollTimer) clearTimeout(state.missionPollTimer);
+    state.missionPollTimer = setTimeout(function () {
+      if (!state.session || !state.mission) return;
+      request("/dev/sessions/" + encodeURIComponent(state.session.session_id) + "/missions/" + encodeURIComponent(state.mission.mission_id))
+        .then(function (mission) {
+          var wasActive = missionIsActive(state.mission);
+          renderMission(mission);
+          if (wasActive && !missionIsActive(mission)) { loadChangedFiles(); loadReview(); }
+        })
+        .catch(function (error) { showStatus("Could not refresh autonomous mission: " + error.message, "error"); });
+    }, 1000);
+  }
+
+  function startAutonomousMission() {
+    if (!state.session || !state.selectedModel || missionIsActive(state.mission)) return;
+    var description = $("dev-mission-description");
+    var profile = $("dev-mission-test-profile");
+    var value = description ? description.value.trim() : "";
+    if (!value) { showStatus("Describe the autonomous mission before starting it.", "error"); return; }
+    request("/dev/sessions/" + encodeURIComponent(state.session.session_id) + "/missions", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description: value, model: state.selectedModel, allowed_models: [state.selectedModel], test_profile: profile.value })
+    }).then(function (mission) {
+      renderMission(mission); showStatus("Autonomous mission started.", "loading");
+    }).catch(function (error) { showStatus("Could not start autonomous mission: " + error.message, "error"); });
+  }
+
+  function interruptAutonomousMission() {
+    if (!state.session || !state.mission || !missionIsActive(state.mission)) return;
+    request("/dev/sessions/" + encodeURIComponent(state.session.session_id) + "/missions/" + encodeURIComponent(state.mission.mission_id) + "/interrupt", { method: "POST" })
+      .then(function () { showStatus("Mission interruption requested.", "loading"); scheduleMissionPoll(); })
+      .catch(function (error) { showStatus("Could not interrupt mission: " + error.message, "error"); });
   }
 
   function renderSessionDetail() {
@@ -1026,12 +1114,14 @@
     var applyReview = $("dev-apply-review"); if (applyReview) applyReview.addEventListener("click", applyIntegrationReview);
     var applyConfirm = $("dev-apply-confirm"); if (applyConfirm) applyConfirm.addEventListener("change", updateIntegrationControls);
     var modelSelect = $("dev-model-select"); if (modelSelect) modelSelect.addEventListener("change", function () {
-      state.selectedModel = modelSelect.value || null; populateEffortSelect();
+      state.selectedModel = modelSelect.value || null; populateEffortSelect(); updateMissionControls();
     });
     var effortSelect = $("dev-effort-select"); if (effortSelect) effortSelect.addEventListener("change", function () { state.selectedEffort = effortSelect.value || null; });
     var modelSearch = $("dev-model-search"); if (modelSearch) modelSearch.addEventListener("input", populateModelSelect);
     var runButton = $("dev-run-button"); if (runButton) runButton.addEventListener("click", runTurn);
     var stopButton = $("dev-stop-button"); if (stopButton) stopButton.addEventListener("click", interruptTurn);
+    var missionStart = $("dev-mission-start"); if (missionStart) missionStart.addEventListener("click", startAutonomousMission);
+    var missionStop = $("dev-mission-stop"); if (missionStop) missionStop.addEventListener("click", interruptAutonomousMission);
     setComposerState(); updateReviewControls(); renderIntegrationSummary();
   });
 

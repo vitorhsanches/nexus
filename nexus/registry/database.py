@@ -367,5 +367,56 @@ def initialize_database() -> None:
                 FOREIGN KEY (project_id) REFERENCES projects(id),
                 FOREIGN KEY (review_id) REFERENCES dev_integration_reviews(review_id)
             );
+
+            -- Development Mode autonomous mission loop (F3.6B). A mission
+            -- owns at most one active execution for a development session;
+            -- turns remain in dev_turns and verification evidence is kept
+            -- separately so model claims can never stand in for test results.
+            CREATE TABLE IF NOT EXISTS dev_autonomous_missions (
+                id TEXT PRIMARY KEY,
+                dev_session_id TEXT NOT NULL,
+                description TEXT NOT NULL,
+                requested_model TEXT,
+                allowed_models_json TEXT NOT NULL,
+                test_profile TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                current_turn_id TEXT,
+                interrupt_requested INTEGER NOT NULL DEFAULT 0,
+                result_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                owner_host TEXT,
+                owner_pid INTEGER,
+                owner_acquired_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                started_at TEXT,
+                finished_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (dev_session_id) REFERENCES dev_sessions(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dev_autonomous_missions_session
+                ON dev_autonomous_missions(dev_session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_dev_autonomous_missions_status
+                ON dev_autonomous_missions(status);
+
+            CREATE TABLE IF NOT EXISTS dev_mission_test_runs (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                profile TEXT NOT NULL,
+                argv_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                stdout_text TEXT,
+                stderr_text TEXT,
+                error_code TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                FOREIGN KEY (mission_id) REFERENCES dev_autonomous_missions(id)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_dev_mission_test_runs_mission
+                ON dev_mission_test_runs(mission_id, started_at);
             """
         )

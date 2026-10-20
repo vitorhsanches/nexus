@@ -24,7 +24,7 @@ from uuid import uuid4
 from nexus.dev import integration_gate
 from nexus.dev.service import DevServiceError, validate_dev_project
 from nexus.dev.worktree import DevWorktreeError, read_worktree_diff, verify_dev_worktree
-from nexus.registry import dev_integrations, dev_sessions
+from nexus.registry import dev_integrations, dev_missions, dev_sessions
 
 _apply_lock = threading.Lock()
 _ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -99,6 +99,8 @@ def create_review(session_id: str) -> dict:
     session, project_path, worktree = _authorized_session(session_id)
     if dev_sessions.get_active_turn_for_session(session_id) is not None:
         _error("TURN_ACTIVE", "Wait for the active Development turn to finish before reviewing integration.")
+    if dev_missions.get_active_mission_for_session(session_id) is not None:
+        _error("MISSION_ACTIVE", "Wait for the autonomous mission to reach a terminal review state.")
     snapshot = _snapshot(session, project_path, worktree)
     return dev_integrations.save_review(
         review_id=snapshot["review_id"], dev_session_id=session_id,
@@ -162,6 +164,8 @@ def _validate_review(review: dict, *, require_clean_target: bool = True) -> tupl
     issues = []
     if active is not None:
         issues.append({"code": "TURN_ACTIVE", "message": "A Development turn is still active."})
+    if dev_missions.get_active_mission_for_session(session["id"]) is not None:
+        issues.append({"code": "MISSION_ACTIVE", "message": "An autonomous mission is still active."})
     current = _snapshot_for_compare(session, project_path, worktree)
     if current["snapshot_hash"] != review["snapshot"]["snapshot_hash"]:
         issues.append({"code": "SNAPSHOT_STALE", "message": "Worktree content changed; create a new review."})

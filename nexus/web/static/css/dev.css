@@ -49,6 +49,14 @@ body[data-view="dev"] .topbar-chip:nth-child(-n+2) { display: none; }
   background: var(--bg-2);
 }
 
+.dev-mission-panel { margin: 10px 0; padding: 10px; border: 1px solid var(--border); background: var(--surface); }
+.dev-mission-panel h2 { margin: 0 0 6px; font: 600 11px var(--mono); color: var(--text); text-transform: uppercase; }
+.dev-mission-help { margin: 0 0 8px; color: var(--text-dim); font: 10px/1.5 var(--mono); }
+.dev-mission-panel textarea { box-sizing: border-box; width: 100%; resize: vertical; }
+.dev-mission-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; }
+.dev-mission-actions select, .dev-mission-actions button { font: 10px var(--mono); }
+.dev-mission-progress { max-height: 220px; overflow: auto; margin: 8px 0 0; padding: 8px; white-space: pre-wrap; color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); font: 10px/1.5 var(--mono); }
+
 .dev-session-panel h2, .dev-result-panel h2, .dev-changed-files-panel h2 {
   margin: 0 0 8px;
   color: var(--text-dim);
