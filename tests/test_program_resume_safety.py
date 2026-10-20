@@ -72,7 +72,7 @@ def live_other_pid():
     """A genuinely different, genuinely alive PID (not this test process's
     own -- classify_ownership special-cases owner_pid == current_pid() as
     "current_process", not "live_same_host")."""
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
     try:
         yield process.pid
     finally:

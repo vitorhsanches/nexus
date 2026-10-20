@@ -179,6 +179,8 @@ class DispatcherLaunchFailureTestCase(unittest.TestCase):
             "nexus.dispatchers.manager._find_codex", return_value=Path("/fake/codex"),
         ), patch(
             "nexus.dispatchers.manager.subprocess.Popen", return_value=fake_process,
+        ), patch(
+            "nexus.dispatchers.manager.codex_subprocess_env", return_value={},
         ):
             result = run_manager(
                 run_id="RUN-TEST001",
@@ -220,6 +222,8 @@ class DispatcherLaunchFailureTestCase(unittest.TestCase):
             "nexus.dispatchers.manager.subprocess.Popen", return_value=fake_process,
         ), patch.object(
             manager_module, "ProcessWatchdog", _FiredWatchdog,
+        ), patch(
+            "nexus.dispatchers.manager.codex_subprocess_env", return_value={},
         ):
             result = run_manager(
                 run_id="RUN-TEST001",

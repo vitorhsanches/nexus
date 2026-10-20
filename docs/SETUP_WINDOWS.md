@@ -54,3 +54,15 @@ features.
 The SQLite database and runtime logs are created locally under Nexus storage
 or the Windows local application data directory. They are not required for a
 fresh clone and should not be copied between computers.
+
+## Integration safety smoke (F3.6A)
+
+Development Mode's Git integration (worktree -> review -> preflight ->
+human-approved Apply) has an automated safety smoke suite that exercises
+four real, disposable Git repositories: a successful Apply, an integration
+conflict, a stale review, and a duplicate Apply attempt. Run all four with
+one command and get a PASS/FAIL/BLOCKED report:
+
+    python scripts/run_integration_safety_smoke.py
+
+It never touches the real Nexus repository and never calls a model.

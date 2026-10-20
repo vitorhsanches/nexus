@@ -170,10 +170,23 @@ def test_execution_feature_gate_default_is_unchanged_by_the_approval_override(mo
 # to confirm it holds regardless of approval_policy_override.)
 
 
-def test_unhandled_approval_request_is_still_denied_with_the_override_set():
+def test_unhandled_approval_request_is_still_denied_with_the_override_set(monkeypatch):
     import json
 
+    from nexus.chat import appserver_client
     from tests.test_chat_appserver_client import _make_client, _ok, _thread_result
+
+    monkeypatch.setattr(
+        appserver_client,
+        "codex_subprocess_env",
+        lambda profile, worker_home=None, include_auth=True: {
+            "FAKE_ENV": "1",
+            "CODEX_HOME": worker_home or "fake-home",
+        },
+    )
+    monkeypatch.setattr(
+        appserver_client, "with_scoped_git_trust", lambda env, repo: dict(env)
+    )
 
     client, captured = _make_client(
         {
