@@ -66,3 +66,36 @@ one command and get a PASS/FAIL/BLOCKED report:
     python scripts/run_integration_safety_smoke.py
 
 It never touches the real Nexus repository and never calls a model.
+
+
+## Operational Development missions
+
+Development write access stays off by default. After registering a project in
+`config/projects.local.json`, authorize only that project from the repository
+root:
+
+    .\.venv\Scripts\python -m nexus.dev.operator authorize example-project
+
+Check or revoke it with `status` or `revoke` in place of `authorize`.
+This is a local operator command; Nexus does not expose a web route that changes
+Development authorization.
+
+Trusted verification commands are also local. Copy
+`config/dev-test-profiles.local.example.json` to
+`config/dev-test-profiles.local.json`, bind each profile to explicit
+`project_ids`, and use an argv array. Nexus rejects shell launchers, paths as
+executables, malformed arguments, and profiles not bound to the selected
+project. Mission text and model output can select a profile ID but cannot
+supply or extend its command.
+
+The launcher now checks Python imports, Codex CLI, the dedicated
+`~/.codex-omniroute-worker/config.toml` profile, and OmniRoute readiness.
+Start an operational Development server with an explicit per-process opt in:
+
+    .\scripts\start-nexus.ps1 -EnableDevelopment
+
+Omitting `-EnableDevelopment` keeps write-capable execution disabled unless
+the operator already set `NEXUS_DEV_EXECUTION_ENABLED=1` in that process
+environment. Model selection in Development Mode is limited to routes that are
+both advertised live by OmniRoute and approved in Nexus for coding. Free and
+low-cost routes are listed first; Nexus never substitutes a different route.

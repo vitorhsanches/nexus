@@ -533,8 +533,7 @@
               <textarea id="dev-mission-description" rows="3" placeholder="Describe the bounded mission…" disabled></textarea>
               <div class="dev-mission-actions">
                 <select id="dev-mission-test-profile" aria-label="Trusted test profile" disabled>
-                  <option value="nexus-f36b">Nexus F3.6B targeted tests</option>
-                  <option value="nexus-backend">Nexus backend suite</option>
+                  <option value="">Select a project first</option>
                 </select>
                 <button type="button" id="dev-mission-start" class="chat-send-button" disabled>Start mission</button>
                 <button type="button" id="dev-mission-stop" class="chat-secondary-button" disabled>Interrupt mission</button>
@@ -602,7 +601,7 @@
               </section>
               <section class="chat-context-section">
                 <h3>Restrictions</h3>
-                <p>No branch integration, commits, merges or automatic worktree removal happen from this UI. Review and integrate changes yourself, outside Nexus.</p>
+                <p>Missions never commit, push, merge, or apply automatically. Review, Preflight, and Apply remain explicit human actions.</p>
               </section>
             </div>
           </aside>

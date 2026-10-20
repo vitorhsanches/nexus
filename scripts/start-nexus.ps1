@@ -5,6 +5,7 @@ param(
     [int]$OmniRoutePort = 20128,
     [int]$NexusPort = 8000,
     [int]$TimeoutSeconds = 90,
+    [switch]$EnableDevelopment,
     [switch]$NoBrowser
 )
 
@@ -80,6 +81,37 @@ try {
 }
 if ($importExit -ne 0) {
     Stop-Launch "Nexus failed to import with the project environment:" @($python)
+}
+
+$codex = Get-Command "codex" -ErrorAction SilentlyContinue
+if (-not $codex) {
+    Stop-Launch "Codex CLI is not available on PATH." @(
+        "Install or expose Codex CLI before starting model-backed Development missions."
+    )
+}
+Write-Ok "Codex CLI available"
+
+$omniProfileRoot = if ($env:NEXUS_OMNIROUTE_CODEX_HOME) {
+    $env:NEXUS_OMNIROUTE_CODEX_HOME
+} else {
+    Join-Path $env:USERPROFILE ".codex-omniroute-worker"
+}
+$omniProfileConfig = Join-Path $omniProfileRoot "config.toml"
+if (-not (Test-Path -LiteralPath $omniProfileConfig)) {
+    Stop-Launch "The dedicated Codex OmniRoute profile is missing." @(
+        $omniProfileConfig,
+        "Create this local profile before starting Nexus; credentials are never stored in the repository."
+    )
+}
+Write-Ok "Codex OmniRoute profile available"
+
+if ($EnableDevelopment) {
+    $env:NEXUS_DEV_EXECUTION_ENABLED = "1"
+    Write-Ok "Development execution explicitly enabled for this Nexus process"
+} elseif ($env:NEXUS_DEV_EXECUTION_ENABLED -eq "1") {
+    Write-Ok "Development execution enabled by the existing process environment"
+} else {
+    Write-Info "Development execution remains disabled. Use -EnableDevelopment to opt in for this process."
 }
 
 # ---- Step 2: OmniRoute -------------------------------------------------------

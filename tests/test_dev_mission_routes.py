@@ -32,3 +32,18 @@ def test_mission_read_progress_tests_result_and_interrupt_routes():
         assert client.get("/api/dev/sessions/DEV-1/missions/M1/tests").json()["tests"][0]["status"] == "PASSED"
         assert client.get("/api/dev/sessions/DEV-1/missions/M1/result").json()["result"] == {"ok": True}
         assert client.post("/api/dev/sessions/DEV-1/missions/M1/interrupt").json()["status"] == "NOT_ACTIVE"
+
+
+def test_operational_model_and_profile_catalog_routes():
+    with patch(
+        "nexus.dev.models.list_dev_models",
+        return_value={"models": [{"id": "free/model"}], "default_model": "free/model", "catalog_error": None},
+    ), patch("nexus.dev.service.validate_dev_project", return_value="C:/demo"), patch(
+        "nexus.dev.test_profiles.list_test_profiles",
+        return_value=[{"id": "unit", "name": "Unit", "timeout_seconds": 30, "source": "local"}],
+    ):
+        client = TestClient(app, base_url="http://127.0.0.1")
+        assert client.get("/api/dev/models").json()["default_model"] == "free/model"
+        response = client.get("/api/dev/test-profiles", params={"project_id": "demo"})
+        assert response.status_code == 200
+        assert response.json()["profiles"][0]["id"] == "unit"

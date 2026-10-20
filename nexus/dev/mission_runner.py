@@ -116,11 +116,18 @@ def start_mission(
         not isinstance(item, str) or not item.strip() or len(item) > 128 for item in allowed_models
     ):
         raise DevServiceError("INVALID_ALLOWED_MODELS", "allowed_models contains an invalid route identifier.", http_status=400)
-    normalized_allowed = list(dict.fromkeys(allowed_models))
     if not selected_model:
         raise DevServiceError("MODEL_REQUIRED", "An explicit selected model is required.", http_status=400)
+
+    from nexus.dev.models import list_dev_models
+
+    model_catalog = list_dev_models()
+    normalized_allowed = [item["id"] for item in model_catalog["models"]]
     if selected_model not in normalized_allowed:
-        raise DevServiceError("MODEL_NOT_ALLOWED", "The selected model is not in allowed_models.", http_status=403)
+        message = model_catalog.get("catalog_error") or "The selected model is not an approved live Development route."
+        raise DevServiceError("MODEL_NOT_ALLOWED", message, http_status=403)
+    if selected_model not in allowed_models:
+        raise DevServiceError("MODEL_NOT_CONFIRMED", "The selected model was not explicitly confirmed by the caller.", http_status=400)
     if not MIN_MISSION_TIMEOUT_SECONDS <= timeout_seconds <= MAX_MISSION_TIMEOUT_SECONDS:
         raise DevServiceError("INVALID_TIMEOUT", "timeout_seconds is outside the allowed range.", http_status=400)
     try:
@@ -134,7 +141,7 @@ def start_mission(
     except dev_missions.MissionBusyError as error:
         raise DevServiceError("MISSION_BUSY", str(error), http_status=409) from error
 
-    if resolve_test_profile(test_profile) is None:
+    if resolve_test_profile(test_profile, session["project_id"]) is None:
         dev_missions.update_status(
             mission_id,
             "BLOCKED",
@@ -196,11 +203,12 @@ def _execute_test_profile(
     mission_id: str,
     attempt_number: int,
     profile_name: str,
+    project_id: str,
     worktree: str,
     stop_event: threading.Event,
     mission_deadline: float,
 ) -> dict:
-    resolved = resolve_test_profile(profile_name)
+    resolved = resolve_test_profile(profile_name, project_id)
     if resolved is None:
         raise DevServiceError("TEST_PROFILE_NOT_FOUND", "Trusted test profile is unavailable.", http_status=409)
     argv, profile_timeout = resolved
@@ -285,7 +293,7 @@ def _run_mission_body(mission_id: str, timeout_seconds: int, stop_event: threadi
     session_id = row["dev_session_id"]
     deadline = time.monotonic() + timeout_seconds
     try:
-        _session, worktree = _require_session_worktree(session_id)
+        session, worktree = _require_session_worktree(session_id)
         dev_missions.update_status(mission_id, "RUNNING", attempt_count=1)
         turn = executor.run_dev_turn(session_id, _prompt(row["description"]), model=row["requested_model"])
         dev_missions.update_status(mission_id, "RUNNING", current_turn_id=turn["turn_id"], attempt_count=1)
@@ -294,7 +302,7 @@ def _run_mission_body(mission_id: str, timeout_seconds: int, stop_event: threadi
             raise DevServiceError("EXECUTION_FAILED", turn.get("error_message") or "Initial development turn failed.", http_status=500)
 
         dev_missions.update_status(mission_id, "TESTING", attempt_count=1)
-        tested = _execute_test_profile(mission_id, 1, row["test_profile"], worktree, stop_event, deadline)
+        tested = _execute_test_profile(mission_id, 1, row["test_profile"], session["project_id"], worktree, stop_event, deadline)
         if _stop_requested(mission_id, stop_event):
             raise InterruptedError("Mission interrupted after verification.")
         if tested["status"] == "PASSED":
@@ -309,7 +317,7 @@ def _run_mission_body(mission_id: str, timeout_seconds: int, stop_event: threadi
             raise DevServiceError("REPAIR_FAILED", repair.get("error_message") or "Automatic repair turn failed.", http_status=500)
 
         dev_missions.update_status(mission_id, "TESTING", attempt_count=2)
-        retested = _execute_test_profile(mission_id, 2, row["test_profile"], worktree, stop_event, deadline)
+        retested = _execute_test_profile(mission_id, 2, row["test_profile"], session["project_id"], worktree, stop_event, deadline)
         if retested["status"] == "PASSED":
             _finish_ready(mission_id, session_id, 2)
         else:
