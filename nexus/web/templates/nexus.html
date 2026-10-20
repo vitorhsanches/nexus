@@ -527,6 +527,21 @@
               <pre id="dev-turn-result" class="dev-turn-result">No turn run yet.</pre>
             </div>
 
+            <section class="dev-mission-panel" aria-label="Autonomous mission runner">
+              <h2>Autonomous mission</h2>
+              <p class="dev-mission-help">Runs one implementation turn, a trusted server test profile, and at most one repair. The result always stops for human review.</p>
+              <textarea id="dev-mission-description" rows="3" placeholder="Describe the bounded mission…" disabled></textarea>
+              <div class="dev-mission-actions">
+                <select id="dev-mission-test-profile" aria-label="Trusted test profile" disabled>
+                  <option value="nexus-f36b">Nexus F3.6B targeted tests</option>
+                  <option value="nexus-backend">Nexus backend suite</option>
+                </select>
+                <button type="button" id="dev-mission-start" class="chat-send-button" disabled>Start mission</button>
+                <button type="button" id="dev-mission-stop" class="chat-secondary-button" disabled>Interrupt mission</button>
+              </div>
+              <pre id="dev-mission-progress" class="dev-mission-progress" aria-live="polite">Select an active Development session.</pre>
+            </section>
+
             <div class="dev-changed-files-panel">
               <div class="dev-review-heading">
                 <h2>Changes review (read-only)</h2>

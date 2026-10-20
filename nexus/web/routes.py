@@ -722,6 +722,15 @@ class DevTurnCreateRequest(BaseModel):
     model: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class DevMissionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    description: str = Field(min_length=1, max_length=100_000)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    allowed_models: list[str] = Field(min_length=1, max_length=50)
+    test_profile: str = Field(min_length=1, max_length=128)
+    timeout_seconds: int = Field(default=900, ge=5, le=3600)
+
+
 class DevIntegrationReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     review_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
@@ -926,6 +935,107 @@ def interrupt_dev_turn_route(session_id: str, turn_id: str | None = None):
 
     try:
         return interrupt_dev_turn(session_id, turn_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/sessions/{session_id}/missions")
+def start_dev_mission(session_id: str, request: DevMissionCreateRequest):
+    from nexus.dev.mission_runner import start_mission
+    from nexus.dev.service import DevServiceError
+
+    try:
+        return start_mission(
+            session_id,
+            request.description,
+            model=request.model,
+            allowed_models=request.allowed_models,
+            test_profile=request.test_profile,
+            timeout_seconds=request.timeout_seconds,
+        )
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/missions")
+def list_dev_missions(session_id: str):
+    from nexus.dev.mission_runner import list_missions
+    from nexus.dev.service import DevServiceError
+
+    try:
+        return {"missions": list_missions(session_id)}
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/missions/{mission_id}")
+def get_dev_mission(session_id: str, mission_id: str):
+    from nexus.dev.mission_runner import get_mission
+    from nexus.dev.service import DevServiceError
+
+    try:
+        return get_mission(session_id, mission_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/missions/{mission_id}/progress")
+def get_dev_mission_progress(session_id: str, mission_id: str):
+    from nexus.dev.mission_runner import get_mission
+    from nexus.dev.service import DevServiceError
+
+    try:
+        mission = get_mission(session_id, mission_id)
+        return {
+            "mission_id": mission["mission_id"],
+            "status": mission["status"],
+            "attempt_count": mission["attempt_count"],
+            "current_turn_id": mission["current_turn_id"],
+            "updated_at": mission["updated_at"],
+            "error_code": mission["error_code"],
+            "error_message": mission["error_message"],
+        }
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/missions/{mission_id}/tests")
+def get_dev_mission_tests(session_id: str, mission_id: str):
+    from nexus.dev.mission_runner import get_mission
+    from nexus.dev.service import DevServiceError
+
+    try:
+        mission = get_mission(session_id, mission_id)
+        return {"mission_id": mission_id, "tests": mission["tests"]}
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/missions/{mission_id}/result")
+def get_dev_mission_result(session_id: str, mission_id: str):
+    from nexus.dev.mission_runner import get_mission
+    from nexus.dev.service import DevServiceError
+
+    try:
+        mission = get_mission(session_id, mission_id)
+        return {
+            "mission_id": mission_id,
+            "status": mission["status"],
+            "result": mission["result"],
+            "error_code": mission["error_code"],
+            "error_message": mission["error_message"],
+        }
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/sessions/{session_id}/missions/{mission_id}/interrupt")
+def interrupt_dev_mission(session_id: str, mission_id: str):
+    from nexus.dev.mission_runner import interrupt_mission
+    from nexus.dev.service import DevServiceError
+
+    try:
+        return interrupt_mission(session_id, mission_id)
     except DevServiceError as error:
         raise _dev_error_response(error) from error
 
