@@ -46,7 +46,11 @@ class CodexPromptLauncherStdinTests(unittest.TestCase):
                 captured.update(kwargs)
                 self.stdout = iter(())
 
-        with patch.object(review_module.subprocess, "Popen", _FakePopen):
+        with patch.object(
+            review_module.subprocess, "Popen", _FakePopen
+        ), patch.object(
+            review_module, "codex_subprocess_env", return_value={}
+        ):
             review_module._default_process_launcher(
                 ["codex", "exec", "-C", r"C:\fake\reviewed-worktree"]
             )
