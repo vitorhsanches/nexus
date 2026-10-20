@@ -69,7 +69,53 @@ def establish_ownership(run_id):
             return
         conn.execute("UPDATE runs SET owner_host=?, owner_pid=?, owner_acquired_at=? WHERE id=?",(host,pid,now,run_id))
         conn.commit()
-def classify_ownership(owner_host, owner_pid):
+
+def get_process_created_at(pid):
+    """Return the UTC creation time of process *pid*, or None if not determinable.
+
+    Windows: reads the process creation time via GetProcessTimes (ctypes).
+    Other platforms: returns None (best-effort; PID-reuse detection skipped).
+    """
+    if pid is None:
+        return None
+    if os.name != "nt":
+        return None
+    try:
+        pid = int(pid)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            class FILETIME(ctypes.Structure):
+                _fields_ = [("dwLowDateTime", ctypes.c_uint32),
+                             ("dwHighDateTime", ctypes.c_uint32)]
+            creation_time = FILETIME()
+            exit_time = FILETIME()
+            kernel_time = FILETIME()
+            user_time = FILETIME()
+            ret = k32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation_time),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            )
+            if not ret:
+                return None
+            # FILETIME: 100-nanosecond intervals since 1601-01-01
+            intervals = (creation_time.dwHighDateTime << 32) | creation_time.dwLowDateTime
+            # Offset between 1601-01-01 and 1970-01-01 in 100-ns intervals
+            EPOCH_DIFF = 116444736000000000
+            unix_us = (intervals - EPOCH_DIFF) // 10  # microseconds
+            return datetime.fromtimestamp(unix_us / 1_000_000, tz=timezone.utc)
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:
+        return None
+
+def classify_ownership(owner_host, owner_pid, owner_acquired_at=None):
     if owner_host is None or owner_pid is None:
         return "unowned"
     if owner_host != current_host():
@@ -79,6 +125,19 @@ def classify_ownership(owner_host, owner_pid):
     if int(owner_pid) == current_pid():
         return "current_process"
     if is_pid_alive(int(owner_pid)):
+        # PID-reuse detection: if the process was created after ownership was acquired
+        # it cannot be the same process that set owner_pid => treat as dead.
+        if owner_acquired_at is not None:
+            proc_created = get_process_created_at(int(owner_pid))
+            if proc_created is not None:
+                try:
+                    acquired_dt = datetime.fromisoformat(
+                        owner_acquired_at.replace("Z", "+00:00")
+                    )
+                    if proc_created > acquired_dt:
+                        return "dead_same_host"
+                except Exception:
+                    pass
         return "live_same_host"
     return "dead_same_host"
 def try_acquire_for_recovery(run_id):
@@ -99,7 +158,7 @@ def try_acquire_for_recovery(run_id):
         owner_host=row["owner_host"]
         owner_pid=row["owner_pid"]
         cls=classify_ownership(owner_host, owner_pid)
-        if cls!="dead_same_host":
+        if cls not in ("dead_same_host", "unowned"):
             conn.rollback()
             return False
         conn.execute("UPDATE runs SET owner_host=?, owner_pid=?, owner_acquired_at=? WHERE id=?",(host,pid,now,run_id))

@@ -29,10 +29,13 @@ and ``build_command()`` remain deterministic and network-free on their own
 for standalone/backward-compatible use.
 """
 
+import os
 import shutil
 import subprocess
 
 from nexus.agents.adapters.base import AdapterResult, ExecutionAdapter
+from nexus.process_env import codex_subprocess_env, command_argument, with_scoped_git_trust
+from nexus.runtime_assets import OMNIROUTE_WORKER_SCRIPT
 from nexus.policies.escalation import (
     MECHANICAL_CAPABILITIES,
     validate_route_for_class,
@@ -45,10 +48,7 @@ MECHANICAL_MODEL = "oc/big-pickle"
 STANDARD_CODING_MODEL = "cc/claude-sonnet-5-low"
 DEFAULT_EFFORT = "low"
 
-DEFAULT_WORKER_SCRIPT = (
-    r"C:\Users\Vitor Sanches\.codex\skills\multi-agent-development-manager"
-    r"\scripts\omniroute-worker.ps1"
-)
+DEFAULT_WORKER_SCRIPT = str(OMNIROUTE_WORKER_SCRIPT)
 
 
 def select_route(required_capabilities, route_override=None):
@@ -243,8 +243,15 @@ class OmniRouteAdapter(ExecutionAdapter):
         # The task prompt already travels as the -Task argument value, so
         # stdin is explicitly closed/empty here: this process must never
         # rely on stdin to deliver the task to the wrapper.
+        env = codex_subprocess_env(profile="omniroute")
+        repo = command_argument(command, "-Repo")
+        # Trust only an absolute assigned repo. A relative workspace is left
+        # untrusted; the wrapper rejects it exactly as before.
+        if os.path.isabs(repo):
+            env = with_scoped_git_trust(env, repo)
         return subprocess.run(
             command,
+            env=env,
             input="",
             capture_output=True,
             text=True,

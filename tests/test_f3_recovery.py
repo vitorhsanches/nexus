@@ -74,12 +74,14 @@ class F3RecoveryTestCase(unittest.TestCase):
         with patch("nexus.orchestration.ownership.current_host", return_value="HOST"), patch("nexus.orchestration.ownership.current_pid", return_value=111):
             self.assertFalse(try_acquire_for_recovery(run_id))
 
-    def test_legacy_unowned_run_is_not_auto_recovered(self):
+    def test_unowned_run_is_acquirable_for_explicit_recovery(self):
+        # Phase-4 correction: after CASE-B reconciliation, ownership is set to NULL.
+        # try_acquire_for_recovery must accept such "unowned" non-terminal runs so
+        # that an explicit `nexus recover` can reacquire them.
         run_id = self._make_run(); self._set_owner(run_id, None, None)
         with patch("nexus.orchestration.ownership.current_host", return_value="HOST"), patch("nexus.orchestration.ownership.current_pid", return_value=111):
-            self.assertFalse(try_acquire_for_recovery(run_id))
-            with self.assertRaises(ResumeError) as ctx: recover_one(run_id)
-        self.assertEqual(ctx.exception.code, "RECOVERY_NOT_ELIGIBLE")
+            self.assertTrue(try_acquire_for_recovery(run_id),
+                            "unowned non-terminal run must be acquirable for explicit recovery")
 
     def test_unknown_status_fails_closed(self):
         run_id = self._make_run(); self._set_owner(run_id, "HOST", 222); self._set_status(run_id, "MYSTERY")

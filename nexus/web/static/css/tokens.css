@@ -1,0 +1,84 @@
+/* Nexus – Shared design tokens
+   Single source of truth for color, spacing, radius and type across
+   nexus.css, programs.css and board.css. Values preserved from the
+   original nexus.css palette so nothing shifts unexpectedly; board.css's
+   divergent --bg-elev/--ok/--warn/--danger names are mapped onto these
+   in board.css itself rather than duplicated here. */
+
+:root {
+  /* ── Elevation / surfaces (dark → lighter) ── */
+  --bg:        #0d1117;
+  --bg-1:      #13191f;
+  --bg-2:      #1a2030;
+  --bg-3:      #202736;
+
+  /* ── Borders ── */
+  --border:    #2a3347;
+  --border-2:  #374260;
+
+  /* ── Text ── */
+  --text:      #cdd5e0;
+  --text-muted:#7a8599;
+  --text-dim:  #4d5a6e;
+
+  /* ── Accent / semantic colors ── */
+  --accent:    #3b82f6;
+  --accent-hl: #60a5fa;
+  --green:     #22c55e;
+  --yellow:    #eab308;
+  --red:       #ef4444;
+  --purple:    #a78bfa;
+  --cyan:      #22d3ee;
+  --orange:    #f97316;
+
+  /* ── Radius ── */
+  --radius:    6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  /* ── Spacing scale ── */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-7: 14px;
+  --space-8: 16px;
+  --space-9: 20px;
+  --space-10: 24px;
+
+  /* ── Type ── */
+  --mono: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* ── Layout constants ── */
+  --sidebar-w: 220px;
+  --topbar-h:  40px;
+
+  /* ── Elevation shadows ── */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  /* ── Focus ring ── */
+  --focus-ring: 0 0 0 1px var(--accent), 0 0 0 3px rgba(59, 130, 246, 0.25);
+
+  /* ── "Live" glow — active/running states ── */
+  --glow-live: 0 0 0 2px rgba(59, 130, 246, 0.18), 0 0 8px rgba(59, 130, 246, 0.35);
+  --glow-live-color: rgba(59, 130, 246, 0.5);
+
+  /* ── Semantic status aliases (control-center redesign) ── */
+  --status-ok:   var(--green);
+  --status-warn: var(--yellow);
+  --status-err:  var(--red);
+  --status-info: var(--accent-hl);
+
+  /* ── Control-center surfaces and dividers ── */
+  --surface-panel:  rgba(13, 17, 23, 0.96);
+  --surface-strip:  rgba(10, 14, 19, 0.92);
+  --surface-inset:  #070a0e;
+  --row-divider:    rgba(42, 51, 71, 0.6);
+
+  /* ── Featured-content emphasis (used sparingly, one per view) ── */
+  --glow-featured: 0 0 0 1px rgba(245, 158, 11, 0.22), 0 0 22px rgba(245, 158, 11, 0.07);
+}

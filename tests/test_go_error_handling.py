@@ -7,6 +7,7 @@ from unittest.mock import patch
 import nexus.registry.database as database
 import nexus.registry.projects as projects
 from nexus.orchestration.go import GoError, run_go
+from nexus.orchestration.integration import IntegrationError
 from nexus.registry.runs import get_run
 
 
@@ -145,6 +146,12 @@ class GoOperationalFailureTestCase(unittest.TestCase):
                 "history": [],
                 "worker": {"status": "FAILED", "error": "boom"},
             },
+        ), patch(
+            "nexus.orchestration.go.run_integrated_plan",
+            side_effect=IntegrationError(
+                "WORKER_EXECUTION_FAILED",
+                run_status="FAILED",
+            ),
         ):
             with self.assertRaises(GoError) as ctx:
                 run_go("Norte: fix a bug", project_query="norte")
@@ -165,6 +172,12 @@ class GoOperationalFailureTestCase(unittest.TestCase):
         ), patch(
             "nexus.orchestration.go.execute_progressively",
             side_effect=OSError("launcher unavailable"),
+        ), patch(
+            "nexus.orchestration.go.run_integrated_plan",
+            side_effect=IntegrationError(
+                "ESCALATION_UNAVAILABLE",
+                run_status="BLOCKED",
+            ),
         ):
             with self.assertRaises(GoError) as ctx:
                 run_go("Norte: fix a bug", project_query="norte")
@@ -184,6 +197,9 @@ class GoOperationalFailureTestCase(unittest.TestCase):
             },
         ), patch(
             "nexus.orchestration.go.execute_progressively",
+            side_effect=RuntimeError("unexpected programming error"),
+        ), patch(
+            "nexus.orchestration.go.run_integrated_plan",
             side_effect=RuntimeError("unexpected programming error"),
         ):
             with self.assertRaises(RuntimeError) as ctx:
@@ -224,6 +240,12 @@ class GoOperationalFailureTestCase(unittest.TestCase):
                     "error": "No valid review envelope found.",
                 },
             },
+        ), patch(
+            "nexus.orchestration.go.run_integrated_plan",
+            side_effect=IntegrationError(
+                "REVIEW_BLOCKED",
+                run_status="BLOCKED",
+            ),
         ):
             with self.assertRaises(GoError) as ctx:
                 run_go("Norte: fix a bug", project_query="norte")
@@ -251,6 +273,12 @@ class GoOperationalFailureTestCase(unittest.TestCase):
                 "history": [],
                 "review": {},
             },
+        ), patch(
+            "nexus.orchestration.go.run_integrated_plan",
+            side_effect=IntegrationError(
+                "ESCALATION_UNAVAILABLE",
+                run_status="BLOCKED",
+            ),
         ):
             with self.assertRaises(GoError) as ctx:
                 run_go("Norte: fix a bug", project_query="norte")

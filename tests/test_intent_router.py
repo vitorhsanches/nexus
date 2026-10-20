@@ -240,19 +240,18 @@ class GoIntentRoutingTestCase(unittest.TestCase):
                 "plan": EXECUTION_PLAN,
             },
         ) as mock_manager, patch(
-            "nexus.orchestration.go.execute_progressively",
-            return_value={
+            "nexus.orchestration.go.run_integrated_plan",
+            return_value=[{
                 "status": "COMPLETED",
-                "verdict": "PASS",
-                "history": [],
                 "worker": {"status": "COMPLETED"},
-                "review": {},
-            },
-        ) as mock_execute:
+                "review": {"verdict": "PASS"},
+                "_planned_scope": "Fix the thing.",
+            }],
+        ) as mock_integrated:
             result = run_go("Norte: fix a bug", project_query="norte")
 
         mock_manager.assert_called_once()
-        mock_execute.assert_called_once()
+        mock_integrated.assert_called_once()
         self.assertEqual(result["status"], "COMPLETED")
         self.assertEqual(len(result["workers"]), 1)
 

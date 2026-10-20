@@ -1,19 +1,17 @@
+/* Legacy "Nexus Control Board" page.
+   Design tokens live in tokens.css (loaded before this file). This block
+   maps board.css's original variable names onto the shared tokens so
+   every rule below keeps working unchanged, while the page now renders
+   with the same palette as the Mission Commander (nexus.html). */
 :root {
-  --bg: #0e1116;
-  --bg-elev: #161a21;
-  --bg-elev-2: #1c212b;
-  --border: #2a313d;
-  --text: #d7dee8;
-  --text-muted: #8b94a3;
-  --accent: #4c8dff;
-  --accent-soft: rgba(76, 141, 255, 0.14);
-  --ok: #2eb872;
-  --warn: #f0b429;
-  --danger: #ef5b5b;
-  --purple: #9d7bf5;
-  --radius: 10px;
-  --gap: 16px;
-  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --bg-elev:     var(--bg-1);
+  --bg-elev-2:   var(--bg-2);
+  --accent-soft: rgba(59, 130, 246, 0.14);
+  --ok:          var(--green);
+  --warn:        var(--yellow);
+  --danger:      var(--red);
+  --radius:      var(--radius-lg);
+  --gap:         var(--space-8);
 }
 
 * { box-sizing: border-box; }
@@ -23,9 +21,14 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--sans);
   font-size: 14px;
   line-height: 1.45;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 /* ---------- Top bar ---------- */
@@ -625,4 +628,44 @@ html, body {
   .operational-run-list {
     max-height: 320px;
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Ops-console polish pass — brings the legacy board page in line with
+   the Mission Commander's visual system (card elevation, pill
+   typography, focus rings). Additive only; no id/class renamed.
+   ══════════════════════════════════════════════════════════════════ */
+
+.panel,
+.board-panel,
+.mission-card,
+.task-card,
+.agent-card,
+.session-card,
+.operational-run-card,
+.operational-run-detail,
+.operational-agent-card,
+.modal {
+  box-shadow: var(--shadow-1);
+}
+
+.status-pill,
+.count-pill,
+.column-count {
+  font-family: var(--sans);
+}
+
+.operational-run-card.selected,
+.task-card,
+.mission-card {
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.refresh-btn:focus-visible,
+.create-btn:focus-visible,
+.execute-btn:focus-visible,
+.btn-primary:focus-visible,
+.btn-secondary:focus-visible,
+.form-input:focus-visible {
+  box-shadow: var(--focus-ring);
 }

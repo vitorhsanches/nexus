@@ -179,3 +179,4 @@ class SelectedRoute:
     score: float
     reason: str
     fallbacks: tuple[RoutingCandidate, ...] = field(default_factory=tuple)
+    degraded: str | None = None

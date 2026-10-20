@@ -31,8 +31,9 @@ _BAND_SCORE = {
 
 _COST_SCORE = {
     "free": 3,
-    "standard": 2,
-    "premium": 1,
+    "low_cost": 2,
+    "standard": 1,
+    "premium": 0,
 }
 
 _QUALITY_SCORE = {
@@ -55,6 +56,15 @@ def cost_score(
         route.cost_class or "",
         0,
     )
+
+
+def cost_tier(route: ModelRoute) -> str:
+    """Return the normalized cost tier without inventing unknown pricing."""
+
+    value = (route.cost_class or "").strip().lower().replace("-", "_")
+    if value in _COST_SCORE:
+        return value
+    return "unknown"
 
 
 def quality_score(
@@ -165,5 +175,5 @@ def explain(
     return (
         f"{route.model_id} ({route.provider}) satisfied "
         f"'{capability}' capability at '{risk_level}' risk "
-        f"with {headroom_desc}."
+        f"with {headroom_desc}; cost={cost_tier(route)}."
     )

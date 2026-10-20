@@ -447,7 +447,7 @@ class RegressionAssertionsTests(unittest.TestCase):
         )
         selected = select_best_route(request)
 
-        self.assertEqual(selected.route.model_id, "cc/claude-sonnet-5-high")
+        self.assertEqual(selected.route.model_id, "openrouter/cohere/north-mini-code:free")
         self.assertTrue(selected.route.approved)
 
     def test_fleet_module_does_not_mutate_catalog_routes(self):

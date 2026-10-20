@@ -1,0 +1,11 @@
+{
+  "projects": [
+    {
+      "id": "example-project",
+      "name": "Example Project",
+      "path": "D:/work/example-project",
+      "aliases": ["example-project"],
+      "enabled": false
+    }
+  ]
+}

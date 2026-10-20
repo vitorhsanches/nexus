@@ -67,6 +67,7 @@ class FakeRoutingService:
         self,
         capability,
         risk_level=None,
+        blocked_models=frozenset(),
     ):
         self.calls.append((capability, risk_level))
         return self.decision
@@ -136,11 +137,20 @@ class InitialAdaptiveBindingTests(unittest.TestCase):
                 routing_service=service,
             )
 
-    def test_non_executable_route_class_fails_closed(self):
+    def test_unmapped_route_class_fails_closed(self):
+        """A route_class with no adaptive-capability mapping must fail
+        closed before the router/FakeRoutingService is ever consulted.
+
+        security-critical now HAS an executable mapping (see
+        INITIAL_ROUTE_CAPABILITY_BY_CLASS and
+        tests/test_nexus_routing_fix_regressions.py), so this regression
+        uses a route_class that is genuinely absent from that mapping to
+        keep covering the "no bypass for unmapped classes" contract.
+        """
         with self.assertRaises(InitialRoutingUnavailable):
             resolve_initial_worker_route(
                 planned_worker(
-                    route_class="security-critical",
+                    route_class="unmapped-route-class",
                 ),
                 plan_risk="HIGH",
                 routing_service=FakeRoutingService(

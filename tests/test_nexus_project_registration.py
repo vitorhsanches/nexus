@@ -22,6 +22,7 @@ class RealProjectsRegistryTestCase(unittest.TestCase):
         self._original_db_path = database.DATABASE_PATH
         self._original_storage_dir = database.STORAGE_DIR
         self._original_projects_file = projects.PROJECTS_FILE
+        self._original_local_projects_file = projects.LOCAL_PROJECTS_FILE
 
         import tempfile
 
@@ -31,6 +32,7 @@ class RealProjectsRegistryTestCase(unittest.TestCase):
         database.STORAGE_DIR = tmp_path
         database.DATABASE_PATH = tmp_path / "nexus-test.db"
         projects.PROJECTS_FILE = REAL_PROJECTS_FILE
+        projects.LOCAL_PROJECTS_FILE = tmp_path / "projects.local.json"
 
         database.initialize_database()
         projects.sync_projects()
@@ -39,6 +41,7 @@ class RealProjectsRegistryTestCase(unittest.TestCase):
         database.DATABASE_PATH = self._original_db_path
         database.STORAGE_DIR = self._original_storage_dir
         projects.PROJECTS_FILE = self._original_projects_file
+        projects.LOCAL_PROJECTS_FILE = self._original_local_projects_file
         self._tmp_dir.cleanup()
 
     def _find_nexus_entry(self):
@@ -54,7 +57,7 @@ class RealProjectsRegistryTestCase(unittest.TestCase):
         )
         self.assertEqual(entry["name"], "Nexus")
         self.assertTrue(entry["enabled"])
-        self.assertTrue(entry["path"].endswith("nexus"))
+        self.assertEqual(entry["path"], ".")
 
     def test_nexus_generic_aliases_are_not_present(self):
         entry = self._find_nexus_entry()
@@ -69,16 +72,18 @@ class RealProjectsRegistryTestCase(unittest.TestCase):
         result = resolve_project("nexus")
         self.assertEqual(result.id, "nexus")
         self.assertEqual(result.name, "Nexus")
-        self.assertTrue(result.path.endswith("nexus"))
+        self.assertEqual(Path(result.path).resolve(), projects.ROOT_DIR.resolve())
 
     def test_nexus_resolves_via_name(self):
         result = resolve_project("Nexus")
         self.assertEqual(result.id, "nexus")
 
-    def test_norte_and_poc_still_present(self):
-        ids = {project["id"] for project in self._payload["projects"]}
-        self.assertIn("norte", ids)
-        self.assertIn("orchestrator-poc", ids)
+    def test_shared_config_contains_no_machine_specific_projects(self):
+        self.assertEqual(
+            {project["id"] for project in self._payload["projects"]},
+            {"nexus"},
+        )
+        self.assertEqual(self._find_nexus_entry()["path"], ".")
 
 
 if __name__ == "__main__":

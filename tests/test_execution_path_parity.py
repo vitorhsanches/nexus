@@ -84,8 +84,10 @@ class ExecutionPathParityTestCase(unittest.TestCase):
 
         source = inspect.getsource(manager.run_manager)
 
-        self.assertNotIn("NATIVE_CODEX", source)
+        self.assertIn("Do not invent, translate, expand, or rename execution_path values", source)
+        self.assertIn("NATIVE CODEX WORKER", source)
         self.assertIn("execution_paths", source)
+        self.assertIn("execution_path_values", source)
 
     def test_executor_rejects_native_codex_before_worker_launch(self):
         worker = _plan_with_execution_path("NATIVE_CODEX")["workers"][0]

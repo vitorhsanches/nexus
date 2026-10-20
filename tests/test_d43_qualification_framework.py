@@ -233,7 +233,7 @@ class CatalogUnchangedTests(unittest.TestCase):
         c = _candidate()
         evaluate_qualification(c, _pass_evidence(c), route_kind=OK_KIND, normalization_status=OK_NS)
         self.assertEqual(before, list(APPROVED_CATALOG))
-        self.assertEqual(len(APPROVED_CATALOG), 4)
+        self.assertEqual(len(APPROVED_CATALOG), 6)
 
 if __name__ == "__main__":
     unittest.main()

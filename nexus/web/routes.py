@@ -1,7 +1,10 @@
 ﻿"""JSON API routes for the Nexus Local Mission Board UI V1."""
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+import asyncio
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from nexus.agents.policy import ExecutionPolicyError
 from nexus.manager.agent import ManagerError
@@ -9,7 +12,7 @@ from nexus.missions.scheduler import MissionDependencyError
 from nexus.missions.service import MissionNotFoundError
 from nexus.tasks.registry import TaskNotFoundError
 from nexus.reviews.reviewer import AlwaysPassReviewer
-from nexus.web import execution, mission_execution, operational, services
+from nexus.web import execution, mission_execution, operational, programs, services
 from nexus.web.mission_execution import MissionConflictError, MissionExecutionError
 
 
@@ -45,6 +48,21 @@ def operational_agents(run_id: str | None = None):
     return {"agents": operational.get_operational_agents(run_id=run_id)}
 
 
+@router.get("/operational/agents/{agent_id}/result")
+def operational_agent_result(agent_id: str):
+    """Return one agent's complete, untruncated result on demand.
+
+    The bulk `/operational/agents` and `/operational/runs/{run_id}` reads
+    only ever return the bounded preview plus a `has_full_result` flag; a
+    client follows up here -- explicitly, one agent at a time -- to fetch
+    the complete deliverable text when it needs it.
+    """
+    result = operational.get_operational_agent_result(agent_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+    return {"result": result}
+
+
 @router.get("/operational/reviewer-routing")
 def operational_reviewer_routing(run_id: str | None = None):
     """Return the real ManagerReview routing history from the registry.
@@ -56,6 +74,36 @@ def operational_reviewer_routing(run_id: str | None = None):
             run_id=run_id
         )
     }
+
+
+@router.get("/programs")
+def list_programs():
+    """Return every Nexus Program (nexus build/run), newest first.
+
+    Read-only projection over nexus.program.state's JSON files -- these are
+    written by whichever process ran ``nexus build``/``nexus run`` (usually
+    the CLI, not this web server), so this reflects the real Program state
+    on disk regardless of which process is currently live.
+    """
+    return {"programs": programs.list_program_summaries()}
+
+
+@router.get("/programs/{program_id}")
+def program_detail(program_id: str):
+    """Return one Program's full detail: phases, acceptance, active agents,
+    routing/failure timeline, bounded file activity, best-effort telemetry."""
+    view = programs.get_program_view(program_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"Program not found: {program_id}")
+    return {"program": view}
+
+
+@router.get("/routing/status")
+def routing_status():
+    """Return a read-only, fail-safe view of Nexus routes and OmniRoute."""
+    from nexus.web.routing_status import get_routing_status  # noqa: PLC0415
+
+    return get_routing_status()
 
 
 @router.get("/missions")
@@ -242,3 +290,800 @@ def create_demo_mission():
     """
     mission = services.create_demo_mission(run_id="RUN-DEMO")
     return {"mission": services._to_dict(mission), "tasks": services.get_tasks()}
+
+
+# ---------------------------------------------------------------------------
+# Nexus Interface MVP – Phase C additions
+# ---------------------------------------------------------------------------
+
+
+@router.get("/projects")
+def list_projects():
+    """Return all registered projects from the SQLite registry."""
+    from nexus.registry.projects import list_projects as _list_projects  # noqa: PLC0415
+
+    rows = _list_projects()
+    return {"projects": [dict(r) for r in rows]}
+
+
+@router.get("/runs/{run_id}/checkpoints")
+def run_checkpoints(run_id: str):
+    """Return durable checkpoints and approved plan for a Run."""
+    from nexus.registry.checkpoints import (  # noqa: PLC0415
+        get_approved_plan,
+        list_checkpoints,
+    )
+
+    checkpoints = list_checkpoints(run_id)
+    plan = get_approved_plan(run_id)
+    return {
+        "run_id": run_id,
+        "checkpoints": checkpoints,
+        "approved_plan": plan,
+    }
+
+
+class GoRequest(BaseModel):
+    """Request body for launching a real Nexus GO orchestration run."""
+
+    mission: str
+    project_id: str | None = None
+    # None (default) preserves existing automatic Manager model selection.
+    # When set, it must be one of MANAGER_MODEL_CHOICES; validated below
+    # before anything is launched.
+    manager_model: str | None = None
+    # False (default) preserves existing GO behavior exactly. When True,
+    # opts this Run into explicit JavaScript dependency readiness
+    # (nexus.orchestration.js_dependency_prep) -- a no-op for non-npm
+    # projects, and a hard failure before any Worker launches if requested
+    # but not achievable (see run_go()'s docstring).
+    prepare_dependencies: bool = False
+
+
+@router.get("/manager/models")
+def manager_models():
+    """Describe Manager model choices for the New Mission composer.
+
+    Returns the Auto default, the Codex-CLI-compatible models a user may
+    explicitly pick, and discovered-but-ineligible models with a concrete
+    reason -- never the raw OmniRoute Worker catalog.
+    """
+    from nexus.policies.manager_model import describe_manager_models  # noqa: PLC0415
+
+    return describe_manager_models()
+
+
+@router.post("/go")
+def go(request: GoRequest):
+    """Launch run_go() in a background thread. Returns a job_id immediately.
+
+    The client should poll GET /api/go/jobs/{job_id} every 2-3 seconds to
+    discover the run_id (available within ~1 s) and track final status.
+    """
+    mission = request.mission.strip()
+    if not mission:
+        raise HTTPException(status_code=422, detail="mission must not be empty")
+
+    manager_model = request.manager_model.strip() if request.manager_model else None
+    if manager_model:
+        from nexus.policies.manager_model import (  # noqa: PLC0415
+            ManagerModelUnavailableError,
+            validate_manual_manager_model,
+        )
+
+        try:
+            validate_manual_manager_model(manager_model)
+        except ManagerModelUnavailableError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+    else:
+        manager_model = None
+
+    from nexus.web.go_runner import launch_go  # noqa: PLC0415
+
+    job_id = launch_go(
+        mission,
+        request.project_id,
+        manager_model=manager_model,
+        prepare_dependencies=request.prepare_dependencies,
+    )
+    return {"job_id": job_id, "project_id": request.project_id}
+
+
+@router.get("/go/jobs/{job_id}")
+def go_job(job_id: str):
+    """Poll a launched GO job for its run_id and terminal status."""
+    from nexus.web.go_runner import get_job  # noqa: PLC0415
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    return {"job": job}
+
+
+@router.get("/go/jobs")
+def go_jobs():
+    """Return recent GO jobs (newest first)."""
+    from nexus.web.go_runner import list_jobs  # noqa: PLC0415
+
+    return {"jobs": list_jobs()}
+
+
+# ---------------------------------------------------------------------------
+# Nexus Chat -- minimal persistent sessions + streaming API (T2)
+#
+# Every route here is a thin delegation to nexus.chat.service, which owns
+# all session/turn state and is the only caller of
+# nexus.chat.appserver_client.AppServerClient -- mirrors how /go delegates
+# to nexus.web.go_runner / nexus.orchestration.go above. No route blocks on
+# a full Codex turn: POST .../turns returns as soon as the turn is
+# recorded and its background thread has started.
+# ---------------------------------------------------------------------------
+
+
+class ChatSessionCreateRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
+    allow_unknown_cost: bool = False
+
+
+class ChatTurnCreateRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=100_000)
+    # Optional; when supplied, resubmitting the exact same
+    # (session_id, idempotency_key) returns the original turn's current
+    # state instead of executing it again. Omit only for a caller that
+    # genuinely cannot retry.
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+def _chat_error_response(error) -> HTTPException:
+    return HTTPException(status_code=error.http_status, detail={"code": error.code, "message": str(error)})
+
+
+@router.post("/chat/sessions")
+def create_chat_session(request: ChatSessionCreateRequest):
+    """Create a Chat session bound to a registered project. The workspace
+    path is always that project's own registered path -- never a
+    caller-supplied path -- so a session can never target an unapproved
+    location."""
+    from nexus.chat.service import ChatError, create_session  # noqa: PLC0415
+
+    try:
+        if request.model is None and request.effort is None and not request.allow_unknown_cost:
+            return create_session(request.project_id)
+        return create_session(request.project_id, request.model, request.effort, request.allow_unknown_cost)
+    except ChatError as error:
+        raise _chat_error_response(error) from error
+
+
+@router.get("/chat/sessions")
+def list_chat_sessions(project_id: str | None = None):
+    from nexus.chat.service import list_sessions  # noqa: PLC0415
+
+    return {"sessions": list_sessions(project_id)}
+
+
+@router.get("/chat/models")
+def list_chat_models():
+    from nexus.chat.service import list_models  # noqa: PLC0415
+    return list_models()
+
+
+@router.get("/chat/sessions/{session_id}")
+def get_chat_session(session_id: str):
+    from nexus.chat.service import ChatError, get_session_detail  # noqa: PLC0415
+
+    try:
+        return get_session_detail(session_id)
+    except ChatError as error:
+        raise _chat_error_response(error) from error
+
+
+@router.get("/chat/sessions/{session_id}/history")
+def get_chat_history(
+    session_id: str,
+    turn_id: str | None = Query(default=None, min_length=1, max_length=128),
+    cursor: str | None = Query(default=None, max_length=4096),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    """Read an authorized session's persisted Codex conversation page.
+
+    ``turn_id`` is a Codex-native turn ID from a prior history item; a
+    Nexus session is always the authority for selecting the thread.
+    """
+    from nexus.chat.service import ChatError, get_history  # noqa: PLC0415
+
+    try:
+        return get_history(session_id, turn_id=turn_id, cursor=cursor, limit=limit)
+    except ChatError as error:
+        raise _chat_error_response(error) from error
+
+
+@router.post("/chat/sessions/{session_id}/turns")
+def create_chat_turn(session_id: str, request: ChatTurnCreateRequest):
+    """Start (or resume) the session's Codex thread and run one turn in
+    the background. Returns immediately with the turn's id and current
+    status -- poll GET /chat/sessions/{id} or stream
+    GET /chat/sessions/{id}/events?turn_id=... for the result."""
+    from nexus.chat.service import ChatError, send_turn  # noqa: PLC0415
+
+    if not request.text.strip():
+        raise HTTPException(status_code=422, detail="text must not be empty")
+
+    try:
+        return send_turn(session_id, request.text, idempotency_key=request.idempotency_key)
+    except ChatError as error:
+        raise _chat_error_response(error) from error
+
+
+@router.post("/chat/sessions/{session_id}/interrupt")
+def interrupt_chat_turn(session_id: str, turn_id: str | None = None):
+    """Request cancellation of the session's active turn (or a specific
+    ``turn_id``). A no-op (status=NOT_ACTIVE) if nothing is running --
+    never an error, since the turn may simply have already finished."""
+    from nexus.chat.service import ChatError, interrupt_turn  # noqa: PLC0415
+
+    try:
+        return interrupt_turn(session_id, turn_id)
+    except ChatError as error:
+        raise _chat_error_response(error) from error
+
+
+def _sse_line(event_id, event: dict) -> str:
+    import json  # noqa: PLC0415
+
+    payload = json.dumps(event, ensure_ascii=False)
+    if event_id is None:
+        return f"data: {payload}\n\n"
+    return f"id: {event_id}\ndata: {payload}\n\n"
+
+
+def _parse_chat_event_cursor(session_id: str, turn_id: str, cursor: str | None) -> int | None:
+    if cursor is None:
+        return None
+    if len(cursor) > 512:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_EVENT_CURSOR", "message": "Event cursor is invalid."})
+    prefix = f"{session_id}:{turn_id}:"
+    if not cursor.startswith(prefix):
+        raise HTTPException(status_code=400, detail={"code": "INVALID_EVENT_CURSOR", "message": "Event cursor does not belong to this session and turn."})
+    value = cursor[len(prefix):]
+    if not value.isascii() or not value.isdigit() or len(value) > 16:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_EVENT_CURSOR", "message": "Event cursor is invalid."})
+    return int(value)
+
+
+async def _chat_event_stream(session_id: str, turn_id: str | None, request: Request, after_seq: int | None = None, raw_cursor: str | None = None):
+    """Bounded SSE generator.
+
+    Replays whatever is still buffered for the turn (bounded, in-memory,
+    evicted after NEXUS_CHAT event-buffer-limit events or once the turn
+    ends and every subscriber has disconnected), then streams live events
+    until the turn ends, the client disconnects, or a hard time cap is
+    hit. KNOWN LIMITATION, documented rather than solved with a second
+    general-purpose event-persistence engine: if a client is not
+    subscribed while an event is produced and the turn is no longer
+    active by the time it reconnects, the live buffer may be gone -- the
+    client always still gets the turn's final, durable
+    status/response_text from chat_turns (a plain GET never loses that),
+    it just will not get a verbatim replay of every intermediate delta.
+    """
+    from nexus.chat import service  # noqa: PLC0415
+
+    max_stream_seconds = 600
+
+    resolved_turn_id = turn_id
+    if resolved_turn_id is None:
+        yield _sse_line(None, {"type": "nexus/noTurn", "sessionId": session_id})
+        return
+
+    subscription = service.subscribe_events(resolved_turn_id, after_seq=after_seq)
+    if subscription is None:
+        # Restart/turn completion can evict all volatile events. State the
+        # gap, then provide the durable snapshot and terminal marker.
+        yield _sse_line(None, {
+            "type": "nexus/replayGap", "sessionId": session_id,
+            "turnId": resolved_turn_id, "requested_cursor": raw_cursor,
+            "reason": "volatile_events_unavailable",
+            "reconcile": f"GET /api/chat/sessions/{session_id}/history",
+        })
+        snapshot = service.turn_snapshot(resolved_turn_id)
+        yield _sse_line(None, {"type": "nexus/turnSnapshot", "turn": snapshot, "sessionId": session_id})
+        yield _sse_line(None, {
+            "type": "nexus/turnEnded", "sessionId": session_id,
+            "turnId": resolved_turn_id,
+            "status": snapshot.get("status") if isinstance(snapshot, dict) else None,
+        })
+        return
+
+    subscriber_queue, catch_up, active_done, replay_gap, oldest, latest = subscription
+    expected_seq = (after_seq + 1) if after_seq is not None else latest + 1
+    try:
+        if after_seq is not None and after_seq > latest:
+            yield _sse_line(None, {
+                "type": "nexus/replayGap", "sessionId": session_id,
+                "turnId": resolved_turn_id, "requested_cursor": raw_cursor,
+                "reason": "cursor_ahead_of_stream",
+                "reconcile": f"GET /api/chat/sessions/{session_id}/history",
+            })
+            return
+        if replay_gap:
+            yield _sse_line(None, {
+                "type": "nexus/replayGap", "sessionId": session_id,
+                "turnId": resolved_turn_id, "requested_cursor": raw_cursor,
+                "oldest_available_seq": oldest, "latest_available_seq": latest,
+                "reconcile": f"GET /api/chat/sessions/{session_id}/history",
+            })
+        for seq, event in catch_up:
+            if expected_seq is not None and seq > expected_seq and not replay_gap:
+                yield _sse_line(None, {
+                    "type": "nexus/replayGap", "sessionId": session_id,
+                    "turnId": resolved_turn_id, "requested_cursor": raw_cursor,
+                    "oldest_available_seq": seq, "latest_available_seq": latest,
+                    "reconcile": f"GET /api/chat/sessions/{session_id}/history",
+                })
+            yield _sse_line(f"{session_id}:{resolved_turn_id}:{seq}", event)
+            expected_seq = seq + 1
+        if replay_gap and not catch_up:
+            expected_seq = latest + 1
+
+        deadline = asyncio.get_event_loop().time() + max_stream_seconds
+        while asyncio.get_event_loop().time() < deadline:
+            if await request.is_disconnected():
+                break
+            try:
+                seq, event = await asyncio.to_thread(subscriber_queue.get, True, 0.5)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                if active_done.is_set():
+                    break
+                continue
+            if expected_seq is not None and seq > expected_seq:
+                dropped_through = getattr(subscriber_queue, "dropped_through", 0)
+                yield _sse_line(None, {
+                    "type": "nexus/replayGap", "sessionId": session_id,
+                    "turnId": resolved_turn_id,
+                    "requested_cursor": raw_cursor,
+                    "dropped_through_seq": dropped_through,
+                    "next_available_seq": seq,
+                    "reconcile": f"GET /api/chat/sessions/{session_id}/history",
+                })
+            yield _sse_line(f"{session_id}:{resolved_turn_id}:{seq}", event)
+            expected_seq = seq + 1
+            if active_done.is_set() and subscriber_queue.empty():
+                break
+        if active_done.is_set():
+            snapshot = service.turn_snapshot(resolved_turn_id)
+            yield _sse_line(None, {
+                "type": "nexus/turnEnded", "sessionId": session_id,
+                "turnId": resolved_turn_id,
+                "status": snapshot.get("status") if isinstance(snapshot, dict) else None,
+            })
+    finally:
+        service.unsubscribe_events(resolved_turn_id, subscriber_queue)
+
+
+@router.get("/chat/sessions/{session_id}/events")
+async def stream_chat_events(
+    session_id: str,
+    request: Request,
+    turn_id: str | None = Query(default=None, min_length=1, max_length=128),
+    cursor: str | None = Query(default=None, max_length=512),
+):
+    """Server-Sent Events stream for one turn (the session's latest turn
+    if ``turn_id`` is omitted). Event payloads are the raw App-Server
+    notification envelopes -- renderable text fields inside them are
+    untrusted plain text and must be escaped by the client, never
+    rendered as HTML."""
+    from nexus.chat import service  # noqa: PLC0415
+    from nexus.chat.service import ChatError  # noqa: PLC0415
+    from nexus.registry.chat_sessions import get_session  # noqa: PLC0415
+
+    if get_session(session_id) is None:
+        raise _chat_error_response(ChatError("SESSION_NOT_FOUND", f"Unknown session: {session_id!r}", http_status=404))
+
+    resolved_turn_id = turn_id if turn_id is not None else service.latest_turn_id_for_session(session_id)
+    header_cursor = request.headers.get("last-event-id") or None
+    if cursor is not None and header_cursor is not None and cursor != header_cursor:
+        raise HTTPException(status_code=400, detail={"code": "EVENT_CURSOR_CONFLICT", "message": "Query cursor conflicts with Last-Event-ID."})
+    raw_cursor = cursor if cursor is not None else header_cursor
+    after_seq = _parse_chat_event_cursor(session_id, resolved_turn_id, raw_cursor) if resolved_turn_id is not None else None
+    if resolved_turn_id is not None:
+        try:
+            service.require_session_turn(session_id, resolved_turn_id)
+        except ChatError as error:
+            raise _chat_error_response(error) from error
+        latest_seq = service.active_event_latest_seq(resolved_turn_id)
+        if after_seq is not None and latest_seq is not None and after_seq > latest_seq:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_EVENT_CURSOR", "message": "Event cursor is ahead of this turn."})
+
+    return StreamingResponse(
+        _chat_event_stream(session_id, resolved_turn_id, request, after_seq=after_seq, raw_cursor=raw_cursor),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# == Development Mode (F2.2) ==============================================
+#
+# Separate API surface, additive only -- nothing above this line is
+# modified by it. Reuses nexus.dev.service/executor and
+# nexus.registry.dev_sessions exactly as built in F1.2/F2.1/F2.2 Phase 1;
+# this section only exposes them over HTTP.
+
+
+class DevSessionCreateRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    requested_model: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class DevTurnCreateRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=100_000)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class DevIntegrationReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
+class DevIntegrationApplyRequest(DevIntegrationReviewRequest):
+    confirmed: bool = Field(strict=True)
+
+
+def _dev_error_response(error) -> HTTPException:
+    return HTTPException(status_code=error.http_status, detail={"code": error.code, "message": str(error)})
+
+
+@router.post("/dev/sessions")
+def create_dev_session(request: DevSessionCreateRequest):
+    """Create a Development session: an isolated Git worktree bound to a
+    registered, Development-Mode-authorized project. Never accepts a
+    caller-supplied filesystem path -- the worktree always lives under
+    the project's own registered path. Cross-origin/DNS-rebinding
+    protection for this whole /api/dev/ surface is enforced once, up
+    front, by nexus.web.app's protect_chat_localhost middleware -- not
+    re-implemented per route."""
+    from nexus.dev.service import DevServiceError, create_dev_session as _create_dev_session  # noqa: PLC0415
+
+    try:
+        return _create_dev_session(request.project_id, requested_model=request.requested_model)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions")
+def list_dev_sessions(project_id: str | None = None):
+    from nexus.dev.service import list_sessions  # noqa: PLC0415
+
+    return {"sessions": list_sessions(project_id)}
+
+
+@router.get("/dev/sessions/{session_id}")
+def get_dev_session(session_id: str):
+    from nexus.dev.service import DevServiceError, get_session_detail  # noqa: PLC0415
+
+    try:
+        return get_session_detail(session_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/turns")
+def list_dev_turns(session_id: str):
+    from nexus.dev.service import DevServiceError, get_session_detail  # noqa: PLC0415
+    from nexus.dev.executor import list_turns  # noqa: PLC0415
+
+    try:
+        get_session_detail(session_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+    return {"turns": list_turns(session_id)}
+
+
+@router.get("/dev/sessions/{session_id}/turns/{turn_id}")
+def get_dev_turn(session_id: str, turn_id: str):
+    from nexus.dev.service import DevServiceError  # noqa: PLC0415
+    from nexus.dev.executor import get_turn_detail  # noqa: PLC0415
+
+    try:
+        return get_turn_detail(session_id, turn_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/changed-files")
+def get_dev_changed_files(session_id: str):
+    """Read-only Git status summary for a session's isolated worktree
+    (F2.4A) -- added/modified/deleted/renamed paths, never file content
+    or a diff. Not gated by the execution feature gate: viewing what a
+    session's worktree already contains is not an execution action."""
+    from nexus.dev.executor import changed_files  # noqa: PLC0415
+    from nexus.dev.service import DevServiceError  # noqa: PLC0415
+
+    try:
+        return {"files": changed_files(session_id)}
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/diff")
+def get_dev_session_diff(session_id: str):
+    """Read-only diff review against the session's persisted base SHA."""
+    from nexus.dev.executor import review_diff  # noqa: PLC0415
+    from nexus.dev.service import DevServiceError  # noqa: PLC0415
+
+    try:
+        return review_diff(session_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/sessions/{session_id}/reviews")
+def create_dev_integration_review(session_id: str):
+    from nexus.dev.integration import create_review
+    from nexus.dev.service import DevServiceError
+    try:
+        return create_review(session_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/reviews/{review_id}")
+def get_dev_integration_review(session_id: str, review_id: str):
+    from nexus.dev.integration import get_review
+    from nexus.dev.service import DevServiceError
+    try:
+        return get_review(session_id, review_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/preflight")
+def get_dev_integration_preflight(session_id: str, review_id: str = Query(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")):
+    from nexus.dev.integration import integration_preflight
+    from nexus.dev.service import DevServiceError
+    try:
+        return integration_preflight(session_id, review_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/sessions/{session_id}/apply")
+def apply_dev_integration(session_id: str, request: DevIntegrationApplyRequest):
+    from nexus.dev.integration import apply_review
+    from nexus.dev.service import DevServiceError
+    try:
+        return apply_review(session_id, request.review_id, confirmed=request.confirmed)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/sessions/{session_id}/reject")
+def reject_dev_integration(session_id: str, request: DevIntegrationReviewRequest):
+    from nexus.dev.integration import reject_review
+    from nexus.dev.service import DevServiceError
+    try:
+        return reject_review(session_id, request.review_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/integrations")
+def list_dev_integrations(session_id: str):
+    from nexus.dev.integration import list_history
+    from nexus.dev.service import DevServiceError
+    try:
+        return {"integrations": list_history(session_id)}
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/execution-status")
+def dev_execution_status():
+    """Whether the server-side write-execution feature gate is enabled.
+
+    Read-only, unauthenticated-by-design (it reveals no project data) --
+    the Cockpit UI polls this to decide whether to show a usable Run
+    control at all, per F2.2 Phase 4's "never display a misleading
+    enabled Run action" requirement."""
+    from nexus.dev import feature_gate  # noqa: PLC0415
+
+    return {"execution_enabled": feature_gate.execution_enabled()}
+
+
+@router.get("/dev/integration-status")
+def dev_integration_status():
+    from nexus.dev import integration_gate  # noqa: PLC0415
+    return {"integration_enabled": integration_gate.integration_enabled()}
+
+
+@router.post("/dev/sessions/{session_id}/turns")
+def create_dev_turn(session_id: str, request: DevTurnCreateRequest):
+    """Start one development turn (subject to the execution feature gate
+    and this session's own authorization/worktree checks). Returns
+    immediately with the turn's PENDING record -- poll
+    GET /dev/sessions/{id}/turns/{turn_id} or stream
+    GET /dev/sessions/{id}/events?turn_id=... for the result."""
+    from nexus.dev.service import DevServiceError  # noqa: PLC0415
+    from nexus.dev.executor import run_dev_turn  # noqa: PLC0415
+
+    if not request.prompt.strip():
+        raise HTTPException(status_code=422, detail="prompt must not be empty")
+
+    try:
+        return run_dev_turn(session_id, request.prompt, model=request.model)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/sessions/{session_id}/interrupt")
+def interrupt_dev_turn_route(session_id: str, turn_id: str | None = None):
+    """Request cancellation of the session's active turn (or a specific
+    ``turn_id``). A no-op (status=NOT_ACTIVE) if nothing is running."""
+    from nexus.dev.service import DevServiceError  # noqa: PLC0415
+    from nexus.dev.executor import interrupt_dev_turn  # noqa: PLC0415
+
+    try:
+        return interrupt_dev_turn(session_id, turn_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+def _parse_dev_event_cursor(session_id: str, turn_id: str, cursor: str | None) -> int | None:
+    if cursor is None:
+        return None
+    if len(cursor) > 512:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_EVENT_CURSOR", "message": "Event cursor is invalid."})
+    prefix = f"{session_id}:{turn_id}:"
+    if not cursor.startswith(prefix):
+        raise HTTPException(status_code=400, detail={"code": "INVALID_EVENT_CURSOR", "message": "Event cursor does not belong to this session and turn."})
+    value = cursor[len(prefix):]
+    if not value.isascii() or not value.isdigit() or len(value) > 16:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_EVENT_CURSOR", "message": "Event cursor is invalid."})
+    return int(value)
+
+
+async def _dev_event_stream(session_id: str, turn_id: str | None, request: Request, after_seq: int | None = None, raw_cursor: str | None = None):
+    """Bounded SSE generator for a development turn -- exact mirror of
+    _chat_event_stream, applied to nexus.dev.executor's event fan-out.
+    A browser disconnect here (detected via request.is_disconnected())
+    only stops this generator; it never touches the background thread
+    actually running the turn, so the turn itself keeps running to
+    completion and a later reconnect can reconcile against the durable
+    turn row regardless of whether this stream was open when it
+    finished."""
+    from nexus.dev import executor  # noqa: PLC0415
+
+    max_stream_seconds = 600
+
+    resolved_turn_id = turn_id
+    if resolved_turn_id is None:
+        yield _sse_line(None, {"type": "nexus/noTurn", "sessionId": session_id})
+        return
+
+    subscription = executor.subscribe_events(resolved_turn_id, after_seq=after_seq)
+    if subscription is None:
+        yield _sse_line(None, {
+            "type": "nexus/replayGap", "sessionId": session_id,
+            "turnId": resolved_turn_id, "requested_cursor": raw_cursor,
+            "reason": "volatile_events_unavailable",
+            "reconcile": f"GET /api/dev/sessions/{session_id}/turns/{resolved_turn_id}",
+        })
+        snapshot = executor.turn_snapshot(resolved_turn_id)
+        yield _sse_line(None, {"type": "nexus/turnSnapshot", "turn": snapshot, "sessionId": session_id})
+        yield _sse_line(None, {
+            "type": "nexus/turnEnded", "sessionId": session_id,
+            "turnId": resolved_turn_id,
+            "status": snapshot.get("status") if isinstance(snapshot, dict) else None,
+        })
+        return
+
+    subscriber_queue, catch_up, active_done, replay_gap, oldest, latest = subscription
+    expected_seq = (after_seq + 1) if after_seq is not None else latest + 1
+    try:
+        if after_seq is not None and after_seq > latest:
+            yield _sse_line(None, {
+                "type": "nexus/replayGap", "sessionId": session_id,
+                "turnId": resolved_turn_id, "requested_cursor": raw_cursor,
+                "reason": "cursor_ahead_of_stream",
+                "reconcile": f"GET /api/dev/sessions/{session_id}/turns/{resolved_turn_id}",
+            })
+            return
+        if replay_gap:
+            yield _sse_line(None, {
+                "type": "nexus/replayGap", "sessionId": session_id,
+                "turnId": resolved_turn_id, "requested_cursor": raw_cursor,
+                "oldest_available_seq": oldest, "latest_available_seq": latest,
+                "reconcile": f"GET /api/dev/sessions/{session_id}/turns/{resolved_turn_id}",
+            })
+        for seq, event in catch_up:
+            if expected_seq is not None and seq > expected_seq and not replay_gap:
+                yield _sse_line(None, {
+                    "type": "nexus/replayGap", "sessionId": session_id,
+                    "turnId": resolved_turn_id, "requested_cursor": raw_cursor,
+                    "oldest_available_seq": seq, "latest_available_seq": latest,
+                    "reconcile": f"GET /api/dev/sessions/{session_id}/turns/{resolved_turn_id}",
+                })
+            yield _sse_line(f"{session_id}:{resolved_turn_id}:{seq}", event)
+            expected_seq = seq + 1
+        if replay_gap and not catch_up:
+            expected_seq = latest + 1
+
+        deadline = asyncio.get_event_loop().time() + max_stream_seconds
+        while asyncio.get_event_loop().time() < deadline:
+            if await request.is_disconnected():
+                break
+            try:
+                seq, event = await asyncio.to_thread(subscriber_queue.get, True, 0.5)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                if active_done.is_set():
+                    break
+                continue
+            if expected_seq is not None and seq > expected_seq:
+                dropped_through = getattr(subscriber_queue, "dropped_through", 0)
+                yield _sse_line(None, {
+                    "type": "nexus/replayGap", "sessionId": session_id,
+                    "turnId": resolved_turn_id,
+                    "requested_cursor": raw_cursor,
+                    "dropped_through_seq": dropped_through,
+                    "next_available_seq": seq,
+                    "reconcile": f"GET /api/dev/sessions/{session_id}/turns/{resolved_turn_id}",
+                })
+            yield _sse_line(f"{session_id}:{resolved_turn_id}:{seq}", event)
+            expected_seq = seq + 1
+            if active_done.is_set() and subscriber_queue.empty():
+                break
+        if active_done.is_set():
+            snapshot = executor.turn_snapshot(resolved_turn_id)
+            yield _sse_line(None, {
+                "type": "nexus/turnEnded", "sessionId": session_id,
+                "turnId": resolved_turn_id,
+                "status": snapshot.get("status") if isinstance(snapshot, dict) else None,
+            })
+    finally:
+        executor.unsubscribe_events(resolved_turn_id, subscriber_queue)
+
+
+@router.get("/dev/sessions/{session_id}/events")
+async def stream_dev_events(
+    session_id: str,
+    request: Request,
+    turn_id: str | None = Query(default=None, min_length=1, max_length=128),
+    cursor: str | None = Query(default=None, max_length=512),
+):
+    """Server-Sent Events stream for one development turn (the session's
+    latest turn if ``turn_id`` is omitted). Event payloads are raw
+    App-Server notification envelopes -- renderable text fields inside
+    them are untrusted plain text and must be escaped by the client,
+    never rendered as HTML."""
+    from nexus.dev import executor  # noqa: PLC0415
+    from nexus.dev.service import DevServiceError, get_session_detail  # noqa: PLC0415
+
+    try:
+        get_session_detail(session_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+    resolved_turn_id = turn_id if turn_id is not None else executor.latest_turn_id_for_session(session_id)
+    header_cursor = request.headers.get("last-event-id") or None
+    if cursor is not None and header_cursor is not None and cursor != header_cursor:
+        raise HTTPException(status_code=400, detail={"code": "EVENT_CURSOR_CONFLICT", "message": "Query cursor conflicts with Last-Event-ID."})
+    raw_cursor = cursor if cursor is not None else header_cursor
+    after_seq = _parse_dev_event_cursor(session_id, resolved_turn_id, raw_cursor) if resolved_turn_id is not None else None
+    if resolved_turn_id is not None:
+        try:
+            executor.require_dev_session_turn(session_id, resolved_turn_id)
+        except DevServiceError as error:
+            raise _dev_error_response(error) from error
+        latest_seq = executor.active_event_latest_seq(resolved_turn_id)
+        if after_seq is not None and latest_seq is not None and after_seq > latest_seq:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_EVENT_CURSOR", "message": "Event cursor is ahead of this turn."})
+
+    return StreamingResponse(
+        _dev_event_stream(session_id, resolved_turn_id, request, after_seq=after_seq, raw_cursor=raw_cursor),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -55,9 +55,13 @@ class PlanRiskPropagationThroughRunGoTests(unittest.TestCase):
 
         captured_calls = []
 
-        def _fake_execute_progressively(**kwargs):
+        def _fake_run_integrated_plan(**kwargs):
             captured_calls.append(kwargs)
-            return progressive_result
+            return [{
+                "status": "COMPLETED",
+                "worker": {"status": "COMPLETED", "output": ""},
+                "_planned_scope": "fix things",
+            }]
 
         with patch.object(
             go_module,
@@ -79,8 +83,8 @@ class PlanRiskPropagationThroughRunGoTests(unittest.TestCase):
             return_value=manager_result,
         ), patch.object(
             go_module,
-            "execute_progressively",
-            side_effect=_fake_execute_progressively,
+            "run_integrated_plan",
+            side_effect=_fake_run_integrated_plan,
         ), patch.object(
             go_module,
             "record_approved_plan",

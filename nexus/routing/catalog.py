@@ -63,7 +63,12 @@ APPROVED_CATALOG: tuple[ModelRoute, ...] = (
         max_risk_level="low",
 
         approved=True,
-        enabled=True,
+        # Disabled: oc/big-pickle requires the OpenCode application runtime.
+        # When invoked via the current Nexus GO execution path
+        # (run_omniroute_worker -> PowerShell -> Codex CLI -> OmniRoute),
+        # the opencode provider returns HTTP 403. Re-enable once
+        # execution-context qualification is implemented.
+        enabled=False,
         experimental=False,
 
         cost_class="free",
@@ -163,6 +168,65 @@ APPROVED_CATALOG: tuple[ModelRoute, ...] = (
 
         cost_class="standard",
         quality_tier="high",
+    ),
+
+    # Qualified for MEDIUM-risk advanced-coding on 2026-09-25.
+    #
+    # Exact qualified identity:
+    #   model_id       = nvidia/nemotron-3-super-120b-a12b
+    #   provider       = nvidia
+    #   execution_path = OMNIROUTE
+    #   effort         = low
+    #   capability     = advanced-coding
+    #   max_risk_level = medium
+    #
+    # Qualification evidence (D4.4 framework):
+    #   exact-identity-check: PASS
+    #     requested=nvidia/nemotron-3-super-120b-a12b
+    #     returned=nvidia/nemotron-3-super-120b-a12b
+    #   host-validation: PASS (valid JSON 200 via OmniRoute /v1/responses)
+    #   semantic-review: PASS (deterministic sentinel NEXUS_D44_SENTINEL_7F3A)
+    #
+    # Provider: NVIDIA direct (not OpenRouter). Provides provider diversity
+    # for the advanced-coding fleet beyond Claude-only.
+    #
+    # Cost metadata absent from OmniRoute; cost_class set to "unknown".
+    # Approval is advanced-coding-only and capped at MEDIUM.
+    # Does not grant review, planning, or standard-coding capability.
+    ModelRoute(
+        model_id="nvidia/nemotron-3-super-120b-a12b",
+        provider="nvidia",
+        execution_path="OMNIROUTE",
+        effort="low",
+
+        capabilities=frozenset(
+            {
+                "advanced-coding",
+            }
+        ),
+
+        max_risk_level="medium",
+
+        approved=True,
+        enabled=True,
+        experimental=False,
+
+        cost_class="unknown",
+        quality_tier="standard",
+    ),
+
+    ModelRoute(
+        model_id="openrouter/cohere/north-mini-code:free",
+        provider="openrouter",
+        execution_path="OMNIROUTE",
+        effort="low",
+        capabilities=frozenset({"advanced-coding"}),
+        max_risk_level="medium",
+        approved=True,
+        enabled=True,
+        experimental=False,
+        cost_class="free",
+        quality_tier="standard",
     ),
 )
 

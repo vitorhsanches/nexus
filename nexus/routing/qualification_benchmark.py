@@ -24,9 +24,29 @@ from nexus.routing.qualification_framework import (
 )
 
 DEFAULT_BASE_URL = "http://127.0.0.1:20128"
-DEFAULT_TIMEOUT_SECONDS = 10.0
+# Free-provider startup can exceed 15 s; a live probe answered after 38.4 s.
+# Keep this qualification-only wait bounded and preserve distinct HTTP errors.
+DEFAULT_TIMEOUT_SECONDS = 45.0
 SENTINEL = "NEXUS_D44_SENTINEL_7F3A"
 PROBE = f"Reply with exactly this text and nothing else: {SENTINEL}"
+
+
+def canonical_response_model_id(requested_model_id: str, returned_model_id: object, provider: str) -> str | None:
+    """Return the provider-canonical identity when the response is safe.
+
+    OpenRouter is a routing namespace, so its responses may omit the
+    ``openrouter/`` prefix while retaining the vendor/model identity.  No
+    other provider gets prefix stripping, and the remainder must match
+    exactly; a different model therefore never passes this comparison.
+    """
+
+    if not isinstance(returned_model_id, str):
+        return None
+    requested = requested_model_id.strip()
+    returned = returned_model_id.strip()
+    if provider.strip().lower() == "openrouter" and requested.lower().startswith("openrouter/"):
+        requested = requested[len("openrouter/"):]
+    return returned if returned == requested else None
 
 
 class QualificationTransport(Protocol):
@@ -106,7 +126,10 @@ class QualificationClient:
             return self._failed(candidate, identity, "transport failure")
         returned_model = response.get("model")
         text = _response_text(response)
-        exact_pass = isinstance(returned_model, str) and returned_model == candidate.model_id
+        canonical_returned = canonical_response_model_id(
+            candidate.model_id, returned_model, candidate.provider,
+        )
+        exact_pass = canonical_returned is not None
         exact_detail = f"exact model identity: requested={candidate.model_id!r} returned={returned_model!r}"
         exact_meta = {"returned_model": returned_model}
         evidence = (

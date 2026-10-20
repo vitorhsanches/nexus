@@ -10,7 +10,16 @@ DATABASE_PATH = STORAGE_DIR / "nexus.db"
 def get_connection() -> sqlite3.Connection:
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(DATABASE_PATH)
+    # Phase 2 Multi-Agent MVP: multiple Worker threads can now issue
+    # concurrent checkpoint/agent/run writes for the same Run. Each thread
+    # still gets its own independent sqlite3.Connection (never shared
+    # across threads) -- record_checkpoint()'s BEGIN IMMEDIATE already
+    # serializes concurrent writers correctly at the SQLite level. The
+    # only change needed is a longer busy-wait timeout (default is 5s)
+    # so a writer that is briefly blocked behind another thread's short
+    # transaction retries instead of failing with "database is locked"
+    # under legitimate, small-scale (a handful of Workers) concurrency.
+    connection = sqlite3.connect(DATABASE_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
 
@@ -108,3 +117,255 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE runs ADD COLUMN owner_pid INTEGER")
         if "owner_acquired_at" not in cols:
             connection.execute("ALTER TABLE runs ADD COLUMN owner_acquired_at TEXT")
+
+        # Full, untruncated agent deliverable -- separate from the bounded
+        # `result` preview column so existing readers of `result` (dependency
+        # context, CLI reports, legacy UI) are unaffected. NULL for every
+        # agent row written before this migration: there is no way to
+        # recover a complete result for a run whose full text was never
+        # captured, so historical rows honestly report has_full_result=False
+        # rather than pretending the bounded preview was the whole thing.
+        agent_cols = [r[1] for r in connection.execute("PRAGMA table_info(agents)").fetchall()]
+        if "full_result" not in agent_cols:
+            connection.execute("ALTER TABLE agents ADD COLUMN full_result TEXT")
+        if "full_result_truncated" not in agent_cols:
+            connection.execute(
+                "ALTER TABLE agents ADD COLUMN full_result_truncated INTEGER NOT NULL DEFAULT 0"
+            )
+
+        # The Manager's planned capability requirement for this Worker
+        # (mechanical/standard-coding/complex-coding/review-critical/
+        # security-critical) -- never overwritten by adaptive routing, so
+        # unlike `provider`/`model`/`effort` (which the router always
+        # replaces with the actual selected route; see
+        # resolve_initial_worker_route) this one planned field genuinely is
+        # authoritative. NULL for agent rows created before this migration
+        # and for non-Worker roles (Manager/ManagerReview).
+        if "route_class" not in agent_cols:
+            connection.execute("ALTER TABLE agents ADD COLUMN route_class TEXT")
+
+        # Manager model selection (NEXUS_MANAGER_MODEL_SELECTION): which mode
+        # chose the Manager model for this Run, and the model the caller
+        # explicitly requested when mode="manual". The *actual* executed
+        # model/provider/effort continue to live on the Manager's own
+        # agents row, same as before this migration -- these two columns
+        # only capture user intent. Historical rows predating this migration
+        # read back as manager_mode="auto", manager_requested_model=NULL,
+        # which is honest: they were all auto-selected (no manual mode
+        # existed yet).
+        cols = [r[1] for r in connection.execute("PRAGMA table_info(runs)").fetchall()]
+        if "manager_mode" not in cols:
+            connection.execute(
+                "ALTER TABLE runs ADD COLUMN manager_mode TEXT NOT NULL DEFAULT 'auto'"
+            )
+        if "manager_requested_model" not in cols:
+            connection.execute("ALTER TABLE runs ADD COLUMN manager_requested_model TEXT")
+
+        # Nexus Chat: minimal session/turn metadata. Codex App-Server's own
+        # non-ephemeral thread (nexus/chat/appserver_client.py) is the
+        # source of truth for conversation *content* -- these tables only
+        # map a Nexus session id to the Codex thread/CODEX_HOME needed to
+        # resume it, plus durable turn status for idempotency and for a
+        # client that reconnects long after a turn finished.
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                workspace_path TEXT NOT NULL,
+                codex_thread_id TEXT,
+                codex_home TEXT,
+                model TEXT,
+                provider TEXT,
+                status TEXT NOT NULL DEFAULT 'CREATED',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_project
+                ON chat_sessions(project_id);
+
+            CREATE TABLE IF NOT EXISTS chat_turns (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                response_text TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                model TEXT,
+                provider TEXT,
+                owner_host TEXT,
+                owner_pid INTEGER,
+                owner_acquired_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                started_at TEXT,
+                finished_at TEXT,
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chat_turns_session
+                ON chat_turns(session_id);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_turns_session_idem
+                ON chat_turns(session_id, idempotency_key);
+            """
+        )
+
+        # Existing Nexus databases predate durable Chat process ownership.
+        # Keep active-turn recovery safe across service restarts without
+        # replaying a turn whose provider outcome may be uncertain.
+        chat_turn_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(chat_turns)")
+        }
+        if "owner_pid" not in chat_turn_columns:
+            connection.execute("ALTER TABLE chat_turns ADD COLUMN owner_pid INTEGER")
+        if "owner_host" not in chat_turn_columns:
+            connection.execute("ALTER TABLE chat_turns ADD COLUMN owner_host TEXT")
+        if "owner_acquired_at" not in chat_turn_columns:
+            connection.execute("ALTER TABLE chat_turns ADD COLUMN owner_acquired_at TEXT")
+        chat_session_columns = {row["name"] for row in connection.execute("PRAGMA table_info(chat_sessions)")}
+        if "requested_model" not in chat_session_columns:
+            connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_model TEXT")
+        if "requested_effort" not in chat_session_columns:
+            connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_effort TEXT")
+
+        # Development Mode (F1.2): per-project authorization flag. Disabled
+        # by default for every project -- new AND pre-existing rows alike,
+        # since a plain ADD COLUMN with DEFAULT 0 backfills every existing
+        # row as disabled. nexus.registry.projects.sync_projects() never
+        # touches this column (see its own INSERT/UPDATE column lists), so
+        # re-syncing config/projects.json can never silently re-enable or
+        # disable it -- only the explicit internal setter in
+        # nexus/registry/projects.py does.
+        project_columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)")}
+        if "dev_enabled" not in project_columns:
+            connection.execute(
+                "ALTER TABLE projects ADD COLUMN dev_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+
+        # Development Mode (F1.2): durable session metadata only -- no
+        # agent execution, no turns/messages yet (see nexus/dev/service.py).
+        # One row per development session: which project, which isolated
+        # worktree (nexus/dev/worktree.py), which branch, and the exact
+        # base commit it was created from. Mirrors chat_sessions'
+        # shape/intent closely (and reuses its owner_host/owner_pid/
+        # owner_acquired_at + BEGIN IMMEDIATE pattern for restart recovery
+        # and concurrency-safe creation) but is a fully separate table:
+        # Development Mode's safety requirements (write-capable sandbox,
+        # explicit per-project authorization) are different enough from
+        # read-only Chat's that keeping the schemas independent avoids any
+        # risk of a Dev Mode change ever affecting Chat's already-hardened
+        # code path.
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS dev_sessions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                worktree_path TEXT,
+                branch TEXT NOT NULL,
+                base_sha TEXT,
+                requested_model TEXT,
+                -- Codex App-Server's own non-ephemeral thread for this
+                -- session (F2.1), mirroring chat_sessions.codex_thread_id/
+                -- codex_home exactly: lets a second and later turn in the
+                -- same development session resume the same conversation
+                -- instead of starting a fresh, unrelated one each time.
+                codex_thread_id TEXT,
+                codex_home TEXT,
+                status TEXT NOT NULL DEFAULT 'CREATING',
+                error_code TEXT,
+                error_message TEXT,
+                owner_host TEXT,
+                owner_pid INTEGER,
+                owner_acquired_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_dev_sessions_project
+                ON dev_sessions(project_id);
+
+            CREATE INDEX IF NOT EXISTS idx_dev_sessions_status
+                ON dev_sessions(status);
+
+            -- One branch per project at a time: also the DB-level backstop
+            -- against two concurrent requests racing to reserve the same
+            -- session's branch name (Git's own branch-collision check in
+            -- nexus/dev/worktree.py is the first line of defense; this is
+            -- the second, for the metadata row itself).
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_dev_sessions_project_branch
+                ON dev_sessions(project_id, branch);
+
+            -- Development Mode (F2.1): one row per executed turn inside a
+            -- development session. Deliberately a separate table from
+            -- chat_turns -- same reasoning as dev_sessions vs chat_sessions
+            -- above. owner_host/owner_pid/owner_acquired_at +
+            -- started_at/finished_at mirror chat_turns exactly, for the
+            -- same orphan-recovery and duplicate-completion-prevention
+            -- guarantees.
+            CREATE TABLE IF NOT EXISTS dev_turns (
+                id TEXT PRIMARY KEY,
+                dev_session_id TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                requested_model TEXT,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                response_text TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                owner_host TEXT,
+                owner_pid INTEGER,
+                owner_acquired_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                started_at TEXT,
+                finished_at TEXT,
+                FOREIGN KEY (dev_session_id) REFERENCES dev_sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_dev_turns_session
+                ON dev_turns(dev_session_id);
+
+            CREATE INDEX IF NOT EXISTS idx_dev_turns_status
+                ON dev_turns(status);
+
+            -- Human-approved Development Mode integration audit trail.
+            -- Review snapshots and Apply results are session-linked and
+            -- survive reopening the session/browser.
+            CREATE TABLE IF NOT EXISTS dev_integration_reviews (
+                review_id TEXT PRIMARY KEY,
+                dev_session_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                base_sha TEXT NOT NULL,
+                target_head TEXT NOT NULL,
+                target_branch TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                candidate_sha TEXT,
+                result_sha TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (dev_session_id) REFERENCES dev_sessions(id),
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dev_integration_reviews_session
+                ON dev_integration_reviews(dev_session_id, created_at);
+
+            -- Cross-process serialization for the final branch update.
+            -- Orphaned locks are intentionally fail-closed and require
+            -- operator inspection instead of being silently reclaimed.
+            CREATE TABLE IF NOT EXISTS dev_integration_locks (
+                project_id TEXT PRIMARY KEY,
+                review_id TEXT NOT NULL,
+                owner_host TEXT NOT NULL,
+                owner_pid INTEGER NOT NULL,
+                acquired_at TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id),
+                FOREIGN KEY (review_id) REFERENCES dev_integration_reviews(review_id)
+            );
+            """
+        )

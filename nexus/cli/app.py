@@ -1,5 +1,6 @@
 import argparse
 import sys
+from pathlib import Path
 
 from nexus.registry.database import initialize_database
 from nexus.registry.projects import list_projects, sync_projects
@@ -10,6 +11,14 @@ from nexus.orchestration.go import GoError, run_go
 from nexus.orchestration.recovery import recover_all
 from nexus.orchestration.resume import ResumeError, resume_run
 from nexus.orchestration.show import RunNotFoundError, show_run
+from nexus.intake import UnsupportedTaskError, dispatch_request
+from nexus.program.bootstrap import BootstrapError
+from nexus.program.runner import ProgramBlockedError, resume_program, start_program
+from nexus.program.state import (
+    ProgramNotFoundError,
+    ProgramOwnershipError,
+    list_programs,
+)
 
 
 def _bootstrap() -> None:
@@ -164,9 +173,13 @@ def demo_command() -> None:
     print()
 
 
-def go_command(request: str, project: str | None = None) -> None:
+def go_command(
+    request: str, project: str | None = None, prepare_dependencies: bool = False
+) -> None:
     try:
-        result = run_go(request, project_query=project)
+        result = run_go(
+            request, project_query=project, prepare_dependencies=prepare_dependencies
+        )
 
     except GoError as error:
         print()
@@ -186,6 +199,47 @@ def go_command(request: str, project: str | None = None) -> None:
     print("=" * 60)
     print(f"Run    : {result['run_id']}")
     print(f"Status : {result['status']}")
+    print()
+
+
+def run_command(args) -> None:
+    try:
+        dispatched = dispatch_request(
+            args.request,
+            project=args.project,
+            requirements_path=args.requirements,
+            name=args.name,
+            workspace_root=Path(args.workspace) if args.workspace else None,
+            autonomy=args.autonomy,
+        )
+    except (
+        UnsupportedTaskError, ProgramBlockedError, ProgramOwnershipError,
+        BootstrapError, GoError, OSError,
+    ) as error:
+        print()
+        print(f"NEXUS RUN FAILED: {type(error).__name__}")
+        print("=" * 60)
+        print(str(error))
+        print()
+        sys.exit(1)
+        return
+
+    result = dispatched["result"]
+    identity = result.get("program_id") or result.get("run_id")
+    print()
+    print("NEXUS RUN")
+    print("=" * 60)
+    print(f"Type   : {dispatched['task_contract']['task_type']}")
+    print(f"Mode   : {dispatched['execution_mode']}")
+    print(f"ID     : {identity}")
+    print(f"Status : {result['status']}")
+    failure_class = result.get("failure_class")
+    if failure_class:
+        print(f"Failure: {failure_class}")
+    acceptance_criteria = result.get("acceptance")
+    if acceptance_criteria:
+        satisfied = sum(1 for c in acceptance_criteria if c["status"] == "SATISFIED")
+        print(f"Accept : {satisfied}/{len(acceptance_criteria)} criteria satisfied")
     print()
 
 
@@ -227,6 +281,60 @@ def resume_command(run_id: str) -> None:
     print()
 
 
+def build_command(args) -> None:
+    try:
+        if args.resume:
+            program = resume_program(args.resume)
+        else:
+            if not args.name or not args.requirements:
+                print("nexus build needs --name and a requirements file (or --resume).")
+                sys.exit(2)
+            requirements = Path(args.requirements).read_text(encoding="utf-8-sig")
+            program = start_program(
+                args.name,
+                requirements,
+                workspace_root=Path(args.workspace) if args.workspace else None,
+                stop_after_spec=args.spec_only,
+            )
+    except (
+        ProgramBlockedError, ProgramOwnershipError, ProgramNotFoundError,
+        BootstrapError, OSError,
+    ) as error:
+        print()
+        print(f"NEXUS BUILD FAILED: {type(error).__name__}")
+        print("=" * 60)
+        print(str(error))
+        program_id = getattr(error, "program_id", None)
+        if program_id:
+            print(f"Program : {program_id}")
+            print(f"Resume  : python -m nexus build --resume {program_id}")
+        print()
+        sys.exit(1)
+        return
+
+    print()
+    print("NEXUS BUILD")
+    print("=" * 60)
+    print(f"Program : {program['program_id']}")
+    print(f"Status  : {program['status']}")
+    print(f"Repo    : {program['path']}")
+    print()
+
+
+def programs_command() -> None:
+    print()
+    print("PROGRAMS")
+    print("=" * 60)
+    for program in list_programs():
+        phases = program.get("phases") or []
+        done = sum(1 for phase in phases if phase["status"] == "DONE")
+        print(
+            f"{program['program_id']}  {program['status']:<11} "
+            f"{done}/{len(phases)} phases  {program['name']}  {program['path']}"
+        )
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="nexus",
@@ -249,11 +357,39 @@ def main() -> None:
         "request",
         help="Complete natural-language request, e.g. 'No Norte corrija o problema X'.",
     )
+
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Normalize and dispatch a general request as a Task or Program.",
+    )
+    run_parser.add_argument("request", help="Natural-language goal.")
+    run_parser.add_argument("--project", default=None)
+    run_parser.add_argument(
+        "--requirements",
+        help="Requirements file for a complete software-project request.",
+    )
+    run_parser.add_argument("--name", help="Program/project name.")
+    run_parser.add_argument("--workspace", help="Parent directory for a new Program.")
+    run_parser.add_argument(
+        "--autonomy",
+        choices=("local",),
+        help="Grant bounded local autonomous execution; never grants push/deploy.",
+    )
     go_parser.add_argument(
         "--project",
         dest="project",
         default=None,
         help="Explicit project id, name, or alias to route this request to.",
+    )
+    go_parser.add_argument(
+        "--prepare-dependencies",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt in to explicit JavaScript dependency readiness (npm ci "
+            "--ignore-scripts + a baseline test run) before the Worker "
+            "launches. No-op for non-npm projects. Disabled by default."
+        ),
     )
 
     show_parser = subparsers.add_parser(
@@ -264,6 +400,33 @@ def main() -> None:
         "run_id",
         help="Run id, e.g. RUN-XXXXXXXX.",
     )
+
+    build_parser = subparsers.add_parser(
+        "build",
+        help="Build a new project autonomously from a requirements file.",
+    )
+    build_parser.add_argument(
+        "requirements",
+        nargs="?",
+        help="Path to a text/markdown file with the full project requirements.",
+    )
+    build_parser.add_argument("--name", help="Project name (also the folder slug).")
+    build_parser.add_argument(
+        "--workspace",
+        help="Parent directory for the new project (default: Nexus's parent folder).",
+    )
+    build_parser.add_argument(
+        "--spec-only",
+        action="store_true",
+        help="Stop after the Architect spec is written, without executing phases.",
+    )
+    build_parser.add_argument(
+        "--resume",
+        metavar="PROGRAM_ID",
+        help="Continue an existing Program from its first unfinished phase.",
+    )
+
+    subparsers.add_parser("programs", help="List Programs.")
 
     resume_parser = subparsers.add_parser(
         "resume",
@@ -291,7 +454,19 @@ def main() -> None:
     _bootstrap()
 
     if command == "go":
-        go_command(args.request, project=args.project)
+        go_command(
+            args.request,
+            project=args.project,
+            prepare_dependencies=args.prepare_dependencies,
+        )
+        return
+
+    if command == "run":
+        run_command(args)
+        return
+
+    if command == "build":
+        build_command(args)
         return
 
     if command == "show":
@@ -319,6 +494,7 @@ def main() -> None:
         "runs": runs_command,
         "agents": agents_command,
         "demo": demo_command,
+        "programs": programs_command,
     }
 
     commands[command]()

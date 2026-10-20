@@ -105,7 +105,7 @@ class NexusCliGoArgumentTestCase(unittest.TestCase):
             main()
 
         mock_run_go.assert_called_once_with(
-            "request text", project_query="Nexus"
+            "request text", project_query="Nexus", prepare_dependencies=False
         )
 
     def test_cli_parses_project_after_request(self):
@@ -121,7 +121,7 @@ class NexusCliGoArgumentTestCase(unittest.TestCase):
             main()
 
         mock_run_go.assert_called_once_with(
-            "request text", project_query="Nexus"
+            "request text", project_query="Nexus", prepare_dependencies=False
         )
 
     def test_cli_without_project_remains_backward_compatible(self):
@@ -136,7 +136,9 @@ class NexusCliGoArgumentTestCase(unittest.TestCase):
         ) as mock_run_go:
             main()
 
-        mock_run_go.assert_called_once_with("request text", project_query=None)
+        mock_run_go.assert_called_once_with(
+            "request text", project_query=None, prepare_dependencies=False
+        )
 
 
 if __name__ == "__main__":

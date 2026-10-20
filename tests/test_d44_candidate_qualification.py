@@ -323,5 +323,27 @@ class D44CatalogSnapshotTests(unittest.TestCase):
         self.assertIn("is_candidate_eligible", src)
 
 
+
+
+def test_default_qualification_timeout_is_bounded_and_propagated():
+    from nexus.routing.qualification_benchmark import DEFAULT_TIMEOUT_SECONDS
+    c = cand(model="openrouter/cohere/north-mini-code:free", provider="openrouter")
+    transport = FakeTransport({"model": "cohere/north-mini-code:free", "output_text": SENTINEL})
+    result = QualificationClient(transport=transport).qualify(
+        c, fleet_modality="text", route_kind="fixed", normalization_status="resolved",
+    )
+    assert DEFAULT_TIMEOUT_SECONDS == 45.0
+    assert transport.calls[0][3] == DEFAULT_TIMEOUT_SECONDS
+    assert result.verdict == QualificationVerdict.PASS
+
+
+def test_qualification_transport_timeout_remains_visible():
+    c = cand(model="openrouter/cohere/north-mini-code:free", provider="openrouter")
+    result = QualificationClient(transport=FakeTransport(error=TimeoutError())).qualify(
+        c, fleet_modality="text", route_kind="fixed", normalization_status="resolved",
+    )
+    assert result.verdict == QualificationVerdict.FAIL
+    assert "timeout" in result.evidence[0].detail
+
 if __name__ == "__main__":
     unittest.main()
