@@ -220,6 +220,8 @@ def plan_view(row) -> dict:
         proposal.setdefault("source", "deterministic")
         proposal.setdefault("explanation", "Proposta determinística por palavras-chave (P1, sem IA).")
     keys = row.keys()
+    from nexus.registry import workspace_execution
+
     return {
         "plan_id": row["id"],
         "project_id": row["project_id"],
@@ -228,11 +230,47 @@ def plan_view(row) -> dict:
         **proposal,
         "status": row["status"] if "status" in keys else "PROPOSED",
         "approval": json.loads(row["approval_json"]) if "approval_json" in keys and row["approval_json"] else None,
+        "execution": workspace_execution.view(row["id"]),
     }
 
 
 def list_plans(project_id: str) -> list[dict]:
     return [plan_view(row) for row in store.list_plans(project_id)]
+
+
+def authorize_plan_execution(
+    plan_id: str,
+    *,
+    agent_keys: list[str],
+    test_profiles: dict[str, str],
+    max_turns_per_agent: int,
+    mission_timeout_seconds: int,
+    confirm_costs: bool = False,
+) -> dict:
+    """Authorize and start one durable sequential plan execution."""
+    from nexus.workspace import coordinator
+
+    coordinator.authorize_execution(
+        plan_id,
+        agent_keys=agent_keys,
+        test_profiles=test_profiles,
+        max_turns_per_agent=max_turns_per_agent,
+        mission_timeout_seconds=mission_timeout_seconds,
+        confirm_costs=confirm_costs,
+    )
+    return coordinator.start(plan_id)
+
+
+def plan_execution_state(plan_id: str) -> dict:
+    from nexus.workspace import coordinator
+
+    return coordinator.state(plan_id)
+
+
+def interrupt_plan_execution(plan_id: str) -> dict:
+    from nexus.workspace import coordinator
+
+    return coordinator.interrupt(plan_id)
 
 
 def create_pane(
@@ -683,6 +721,7 @@ def pane_history(pane_id: str) -> dict:
 
 def workspace_state(project_id: str) -> dict:
     from nexus.dev import feature_gate, integration_gate
+    from nexus.workspace import coordinator
 
     return {
         "project_id": project_id,
@@ -692,5 +731,6 @@ def workspace_state(project_id: str) -> dict:
         "roles": policy.ROLES,
         "execution_enabled": feature_gate.execution_enabled(),
         "integration_enabled": integration_gate.integration_enabled(),
+        "coordination": coordinator.project_state(project_id),
         "policy_version": policy.POLICY_VERSION,
     }

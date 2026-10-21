@@ -28,6 +28,11 @@
     PROPOSED: "Proposto", SUPERSEDED: "Substituído por um plano mais novo", APPROVING: "Criando agentes…",
     APPROVED: "Aprovado — agentes criados", APPROVED_PARTIAL: "Aprovado parcialmente", APPROVAL_FAILED: "Falha ao criar agentes",
   };
+  const EXECUTION_STATUS_LABELS = {
+    AWAITING_EXECUTION: "Aguardando início", RUNNING: "Executando sequência",
+    WAITING_DEPENDENCY: "Aguardando dependência", AWAITING_REVIEW: "Aguardando revisão humana",
+    BLOCKED: "Bloqueado", FAILED: "Falhou", INTERRUPTED: "Interrompido", RESULT_UNCERTAIN: "Resultado incerto",
+  };
 
   function costLabel(costStatus) {
     switch (costStatus) {
@@ -135,6 +140,22 @@
       },
       paid: [...new Set(paid)],
     };
+  }
+
+  function executionPayload(plan, form) {
+    const testProfiles = {};
+    for (const agent of plan.agents) {
+      const profile = form.profiles[agent.key];
+      if (!profile) return { error: `Escolha o perfil de teste de ${agent.title}.` };
+      testProfiles[agent.key] = profile;
+    }
+    return { payload: {
+      agent_keys: plan.agents.map((agent) => agent.key),
+      test_profiles: testProfiles,
+      max_turns_per_agent: Number(form.maxTurns),
+      mission_timeout_seconds: Number(form.timeoutMinutes) * 60,
+      confirm_costs: Boolean(form.confirmCosts),
+    } };
   }
 
   function planSourceLabel(plan) {
@@ -331,7 +352,7 @@
       if (!state.approvals[plan.plan_id]) {
         const models = {};
         plan.agents.forEach((agent) => { models[agent.key] = agent.model || ""; });
-        state.approvals[plan.plan_id] = { models, maxTurns: 1, timeoutMinutes: 15, confirmCosts: false };
+        state.approvals[plan.plan_id] = { models, profiles: {}, maxTurns: 1, timeoutMinutes: 15, confirmCosts: false };
       }
       return state.approvals[plan.plan_id];
     }
@@ -347,6 +368,30 @@
       const editable = plan.status === "PROPOSED" && Boolean(state.workspace);
       const draft = approvalDraft(plan);
       plan.agents.forEach((agent) => card.appendChild(renderAgentRow(plan, agent, draft, editable)));
+      if (plan.status === "APPROVED") {
+        const execution = plan.execution;
+        if (execution) {
+          card.appendChild(el("div", { className: "ws-pane-section" },
+            el("h3", { text: EXECUTION_STATUS_LABELS[execution.status] || execution.status }),
+            el("div", { className: "ws-msg-meta", text: `${execution.current_index}/${execution.steps.length} agentes processados` }),
+            ...execution.steps.map((step) => el("div", { text: `${step.ordinal + 1}. ${step.agent_key}: ${step.status}${step.error_code ? ` · ${step.error_code}` : ""}` })),
+            execution.error_message ? el("div", { className: "ws-error", text: execution.error_message }) : null,
+            ["RUNNING", "WAITING_DEPENDENCY"].includes(execution.status)
+              ? button("Interromper sequência", () => interruptExecution(plan), { className: "ws-button-secondary" }) : null));
+          return card;
+        }
+        const profileControls = plan.agents.map((agent) => {
+          const select = el("select", { attrs: { "aria-label": `Perfil de teste de ${agent.title}` } },
+            ...state.profiles.map((profile) => el("option", { text: profile.name || profile.id, attrs: { value: profile.id } })));
+          select.value = draft.profiles[agent.key] || (state.profiles[0] && state.profiles[0].id) || "";
+          draft.profiles[agent.key] = select.value;
+          select.addEventListener("change", () => { draft.profiles[agent.key] = select.value; });
+          return el("label", { className: "ws-plan-limits" }, el("span", { text: `Teste · ${agent.title}` }), select);
+        });
+        card.append(el("div", { className: "ws-plan-limits" }, ...profileControls),
+          button("Autorizar e executar sequência", () => authorizeExecution(plan), { className: "ws-button-primary", disabled: !state.profiles.length }));
+        return card;
+      }
       if (!editable) return card;
 
       const turns = el("select", { attrs: { "aria-label": "Turnos por agente" } },
@@ -369,6 +414,23 @@
         el("p", { className: "ws-msg-meta", text: "A aprovação cria os agentes e autoriza estes modelos dentro dos limites acima. Nenhuma missão começa sozinha; nada é aplicado ao projeto. Limites financeiros não são impostos pela infraestrutura." }),
         approve);
       return card;
+    }
+
+    async function authorizeExecution(plan) {
+      const draft = approvalDraft(plan);
+      const result = executionPayload(plan, draft);
+      if (result.error) { showError(result.error); return; }
+      try {
+        await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execute`, { method: "POST", body: result.payload });
+        showError("");
+      } catch (error) { showError(error.message); }
+      await refresh({ force: true });
+    }
+
+    async function interruptExecution(plan) {
+      try { await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/interrupt`, { method: "POST" }); showError(""); }
+      catch (error) { showError(error.message); }
+      await refresh({ force: true });
     }
 
     function renderMaestro() {
@@ -789,12 +851,12 @@
       await loadProject(initial);
     }
 
-    return { init, refresh, state, api, sendMaestro, approvePlan, authorizePlanning, patchPane, move, select };
+    return { init, refresh, state, api, sendMaestro, approvePlan, authorizeExecution, authorizePlanning, patchPane, move, select };
   }
 
   const exported = {
     createWorkspace, paneStatus, density, sortPanes, moveUpdates, missionPayload, messagePayload,
-    canStartMission, costLabel, approvalPayload, planSourceLabel, outcomeLabel, planAuthorized,
+    canStartMission, costLabel, approvalPayload, executionPayload, planSourceLabel, outcomeLabel, planAuthorized,
   };
   global.NexusWorkspace = exported;
   if (typeof module !== "undefined" && module.exports) module.exports = exported;

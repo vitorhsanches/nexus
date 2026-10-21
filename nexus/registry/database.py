@@ -1,7 +1,6 @@
 import sqlite3
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
 STORAGE_DIR = ROOT_DIR / "nexus" / "storage"
 DATABASE_PATH = STORAGE_DIR / "nexus.db"
@@ -551,3 +550,60 @@ def initialize_database() -> None:
         for column in ("plan_agent_key", "brief_json"):
             if column not in pane_cols:
                 connection.execute(f"ALTER TABLE workspace_panes ADD COLUMN {column} TEXT")
+
+        # P2B.1 durable sequential plan execution. The coordinator is a
+        # controller over existing Development missions; it is not another
+        # executor. A single execution row is the cross-process claim, while
+        # steps preserve the exact order, mission id and outcome for restart
+        # recovery without replaying an uncertain mission.
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_plan_executions (
+                plan_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                agent_keys_json TEXT NOT NULL,
+                test_profiles_json TEXT NOT NULL,
+                max_turns_per_agent INTEGER NOT NULL,
+                mission_timeout_seconds INTEGER NOT NULL,
+                current_index INTEGER NOT NULL DEFAULT 0,
+                interrupt_requested INTEGER NOT NULL DEFAULT 0,
+                owner_host TEXT,
+                owner_pid INTEGER,
+                owner_acquired_at TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                result_json TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (plan_id) REFERENCES workspace_plans(id),
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_plan_executions_project
+                ON workspace_plan_executions(project_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS workspace_plan_execution_steps (
+                plan_id TEXT NOT NULL,
+                agent_key TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                pane_id TEXT NOT NULL,
+                test_profile TEXT NOT NULL,
+                status TEXT NOT NULL,
+                mission_id TEXT,
+                result_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (plan_id, agent_key),
+                UNIQUE (plan_id, ordinal),
+                FOREIGN KEY (plan_id) REFERENCES workspace_plan_executions(plan_id),
+                FOREIGN KEY (pane_id) REFERENCES workspace_panes(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_plan_execution_steps_status
+                ON workspace_plan_execution_steps(plan_id, status, ordinal);
+            """
+        )

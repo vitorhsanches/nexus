@@ -79,6 +79,15 @@ class PlanApproveRequest(BaseModel):
     confirm_costs: bool = False
 
 
+class PlanExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_keys: list[str] = Field(min_length=1, max_length=8)
+    test_profiles: dict[str, str] = Field(min_length=1, max_length=8)
+    max_turns_per_agent: int = Field(ge=1, le=6)
+    mission_timeout_seconds: int = Field(ge=60, le=3600)
+    confirm_costs: bool = False
+
+
 def _error(error) -> HTTPException:
     return HTTPException(status_code=error.http_status, detail={"code": error.code, "message": str(error)})
 
@@ -210,3 +219,40 @@ def approve_plan(plan_id: str, request: PlanApproveRequest):
         mission_timeout_seconds=request.mission_timeout_seconds,
         confirm_costs=request.confirm_costs,
     )
+
+
+@router.post("/plans/{plan_id}/execute")
+def execute_plan(plan_id: str, request: PlanExecuteRequest):
+    from nexus.workspace import service
+
+    return _call(
+        service.authorize_plan_execution,
+        plan_id,
+        agent_keys=request.agent_keys,
+        test_profiles=request.test_profiles,
+        max_turns_per_agent=request.max_turns_per_agent,
+        mission_timeout_seconds=request.mission_timeout_seconds,
+        confirm_costs=request.confirm_costs,
+    )
+
+
+@router.get("/plans/{plan_id}/execution")
+def plan_execution(plan_id: str):
+    from nexus.workspace import service
+
+    return _call(service.plan_execution_state, plan_id)
+
+
+@router.post("/plans/{plan_id}/interrupt")
+def interrupt_plan(plan_id: str):
+    from nexus.workspace import service
+
+    return _call(service.interrupt_plan_execution, plan_id)
+
+
+@router.post("/plans/{plan_id}/recover")
+def recover_plan(plan_id: str):
+    """Reattach only to a known durable execution; never replay a mission."""
+    from nexus.workspace import coordinator
+
+    return _call(coordinator.recover, plan_id)
