@@ -142,19 +142,42 @@
     };
   }
 
+  function approvedExecutionLimits(plan) {
+    const approval = plan.approval || {};
+    const turns = approval.max_turns_per_agent;
+    const seconds = approval.mission_timeout_seconds;
+    if (plan.status !== "APPROVED" || !Number.isInteger(turns) || turns < 1 || turns > 6 ||
+        !Number.isInteger(seconds) || seconds < 60 || seconds > 3600) {
+      return { error: "Aprovação persistida incompleta. Revise a aprovação antes de executar a sequência." };
+    }
+    return { max_turns_per_agent: turns, mission_timeout_seconds: seconds };
+  }
+
+  function persistedCostConfirmed(plan) {
+    const approval = plan.approval || {};
+    const choices = Object.values(approval.agent_models || {});
+    const paid = choices.filter((choice) => !isFree(choice.cost_status));
+    const confirmed = new Set(approval.cost_confirmed_for || []);
+    return plan.status === "APPROVED" && paid.length > 0 && paid.every((choice) => confirmed.has(choice.model));
+  }
+
   function executionPayload(plan, form) {
+    const limits = approvedExecutionLimits(plan);
+    if (limits.error) return limits;
     const testProfiles = {};
     for (const agent of plan.agents) {
-      const profile = form.profiles[agent.key];
+      const profile = (form.profiles || {})[agent.key];
       if (!profile) return { error: `Escolha o perfil de teste de ${agent.title}.` };
       testProfiles[agent.key] = profile;
     }
     return { payload: {
       agent_keys: plan.agents.map((agent) => agent.key),
       test_profiles: testProfiles,
-      max_turns_per_agent: Number(form.maxTurns),
-      mission_timeout_seconds: Number(form.timeoutMinutes) * 60,
-      confirm_costs: Boolean(form.confirmCosts),
+      // The persisted approval is authoritative even if a local draft is
+      // stale or has been edited. The server independently enforces equality.
+      max_turns_per_agent: limits.max_turns_per_agent,
+      mission_timeout_seconds: limits.mission_timeout_seconds,
+      confirm_costs: Boolean(form.confirmCosts || persistedCostConfirmed(plan)),
     } };
   }
 
@@ -354,7 +377,14 @@
         plan.agents.forEach((agent) => { models[agent.key] = agent.model || ""; });
         state.approvals[plan.plan_id] = { models, profiles: {}, maxTurns: 1, timeoutMinutes: 15, confirmCosts: false };
       }
-      return state.approvals[plan.plan_id];
+      const draft = state.approvals[plan.plan_id];
+      if (plan.status === "APPROVED") {
+        const limits = approvedExecutionLimits(plan);
+        draft.maxTurns = limits.error ? null : limits.max_turns_per_agent;
+        draft.timeoutMinutes = limits.error ? null : limits.mission_timeout_seconds / 60;
+        draft.confirmCosts = Boolean(draft.confirmCosts || persistedCostConfirmed(plan));
+      }
+      return draft;
     }
 
     function renderPlan(plan) {
@@ -369,6 +399,7 @@
       const draft = approvalDraft(plan);
       plan.agents.forEach((agent) => card.appendChild(renderAgentRow(plan, agent, draft, editable)));
       if (plan.status === "APPROVED") {
+        const limits = approvedExecutionLimits(plan);
         const execution = plan.execution;
         if (execution) {
           card.appendChild(el("div", { className: "ws-pane-section" },
@@ -388,8 +419,10 @@
           select.addEventListener("change", () => { draft.profiles[agent.key] = select.value; });
           return el("label", { className: "ws-plan-limits" }, el("span", { text: `Teste · ${agent.title}` }), select);
         });
-        card.append(el("div", { className: "ws-plan-limits" }, ...profileControls),
-          button("Autorizar e executar sequência", () => authorizeExecution(plan), { className: "ws-button-primary", disabled: !state.profiles.length }));
+        card.append(
+          el("p", { className: limits.error ? "ws-error" : "ws-msg-meta", text: limits.error || `Limites aprovados: ${limits.max_turns_per_agent} turnos por agente · ${limits.mission_timeout_seconds} segundos por missão` }),
+          el("div", { className: "ws-plan-limits" }, ...profileControls),
+          button("Autorizar e executar sequência", () => authorizeExecution(plan), { className: "ws-button-primary", disabled: !state.profiles.length || Boolean(limits.error) }));
         return card;
       }
       if (!editable) return card;
@@ -856,7 +889,7 @@
 
   const exported = {
     createWorkspace, paneStatus, density, sortPanes, moveUpdates, missionPayload, messagePayload,
-    canStartMission, costLabel, approvalPayload, executionPayload, planSourceLabel, outcomeLabel, planAuthorized,
+    canStartMission, costLabel, approvalPayload, approvedExecutionLimits, executionPayload, planSourceLabel, outcomeLabel, planAuthorized,
   };
   global.NexusWorkspace = exported;
   if (typeof module !== "undefined" && module.exports) module.exports = exported;

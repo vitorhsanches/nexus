@@ -425,3 +425,31 @@ def test_recent_renewal_blocks_takeover_of_old_acquisition(coord_env):
     with database.get_connection() as connection:
         connection.execute("UPDATE workspace_plan_executions SET owner_pid=999999, owner_acquired_at=? WHERE plan_id=?", (old, coord_env["plan_id"]))
     assert not executions.claim_recovery(coord_env["plan_id"])
+
+
+def test_api_uses_exact_persisted_approval_limits(coord_env, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nexus.web.workspace_routes import router
+
+    plan_id = coord_env["plan_id"]
+    with database.get_connection() as connection:
+        approval = json.loads(connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (plan_id,)).fetchone()[0])
+        approval.update(max_turns_per_agent=2, mission_timeout_seconds=1800)
+        connection.execute("UPDATE workspace_plans SET approval_json=? WHERE id=?", (json.dumps(approval), plan_id))
+    # Authorize through the real API/SQLite path without launching a mission.
+    monkeypatch.setattr(coordinator, "start", lambda ident: executions.view(ident))
+    app = FastAPI()
+    app.include_router(router)
+    payload = {"agent_keys": ["api", "tests"], "test_profiles": {"api": "unit", "tests": "unit"},
+               "max_turns_per_agent": 2, "mission_timeout_seconds": 1800}
+    with TestClient(app) as client:
+        rejected = client.post(f"/api/workspace/plans/{plan_id}/execute", json={**payload, "max_turns_per_agent": 6})
+        assert rejected.status_code == 400
+        assert rejected.json()["detail"]["code"] == "LIMITS_NOT_CONFIRMED"
+        accepted = client.post(f"/api/workspace/plans/{plan_id}/execute", json=payload)
+        assert accepted.status_code == 200
+        assert accepted.json()["max_turns_per_agent"] == 2
+        assert accepted.json()["mission_timeout_seconds"] == 1800
+        assert accepted.json()["status"] == "AWAITING_EXECUTION"

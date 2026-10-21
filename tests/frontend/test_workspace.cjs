@@ -340,3 +340,121 @@ test("a transient model-discovery failure is retried on refresh so plans become 
   const select = doc.byId["ws-maestro-log"].all().find((node) => node.tagName === "SELECT" && /Modelo de API/.test(node.getAttribute("aria-label") || ""));
   assert.equal(select.children.length, 3);
 });
+
+function approvedPlan(overrides = {}) {
+  return plan({ status: "APPROVED", approval: {
+    max_turns_per_agent: 2, mission_timeout_seconds: 1800,
+    agent_models: { api: { model: "free/model", cost_status: "free" }, ui: { model: "std/model", cost_status: "standard" } },
+    cost_confirmed_for: ["std/model"],
+  }, ...overrides });
+}
+
+function boxWithPlans(...plans) {
+  return { state: stateWith([]), maestro: maestroState(plans.map((p, i) => ({ message_id: `m${i}`, author: "maestro", text: "ok", status: "COMPLETED", plan: p }))) };
+}
+
+test("approval with 2 turns and 1800 seconds survives full reload and sequence authorization", async () => {
+  const proposed = plan();
+  const box = boxWithPlans(proposed);
+  const routes = {
+    ...baseRoutes(box),
+    "POST /api/workspace/plans/WSPLAN-1/approve": (body) => {
+      const approved = approvedPlan({ approval: { ...approvedPlan().approval, ...body,
+        agent_models: approvedPlan().approval.agent_models, cost_confirmed_for: ["std/model"] } });
+      box.maestro = boxWithPlans(approved).maestro;
+      return { plan: approved, panes: [] };
+    },
+    "POST /api/workspace/plans/WSPLAN-1/execute": (body) => {
+      const approval = box.maestro.messages[0].plan.approval;
+      if (body.max_turns_per_agent !== approval.max_turns_per_agent || body.mission_timeout_seconds !== approval.mission_timeout_seconds) {
+        return { __error: true, status: 400, detail: { code: "LIMITS_NOT_CONFIRMED", message: "limits differ" } };
+      }
+      return { status: "AWAITING_EXECUTION" };
+    },
+  };
+  const first = harness(routes);
+  await first.app.init();
+  const draft = first.app.state.approvals[proposed.plan_id];
+  draft.maxTurns = 2; draft.timeoutMinutes = 30; draft.confirmCosts = true;
+  await first.app.approvePlan(proposed);
+  const second = harness(routes);
+  Object.assign(second.store, first.store);
+  await second.app.init();
+  const restored = second.app.state.approvals[proposed.plan_id];
+  assert.equal(restored.maxTurns, 2);
+  assert.equal(restored.timeoutMinutes, 30);
+  assert.equal(restored.confirmCosts, true, "only the recorded paid routes retain cost approval");
+  await second.app.authorizeExecution(box.maestro.messages[0].plan);
+  const sent = second.calls.find((call) => call.url.endsWith("/execute"));
+  assert.deepEqual(sent.body, {
+    agent_keys: ["api", "ui"], test_profiles: { api: "python-unittest", ui: "python-unittest" },
+    max_turns_per_agent: 2, mission_timeout_seconds: 1800, confirm_costs: true,
+  });
+  assert.equal(second.doc.byId["ws-error"].textContent, "");
+});
+
+test("stale or enlarged local drafts cannot override persisted execution limits", () => {
+  const p = approvedPlan();
+  const sent = ws.executionPayload(p, { maxTurns: 6, timeoutMinutes: 60, profiles: { api: "unit", ui: "unit" } }).payload;
+  assert.equal(sent.max_turns_per_agent, 2);
+  assert.equal(sent.mission_timeout_seconds, 1800);
+});
+
+test("refresh reasserts persisted limits while preserving test profiles and explicit cost confirmation", async () => {
+  const p = approvedPlan();
+  const box = boxWithPlans(p);
+  const routes = { ...baseRoutes(box), "GET /api/dev/test-profiles": { profiles: [{ id: "unit" }, { id: "other" }] } };
+  const { app } = harness(routes);
+  await app.init();
+  const draft = app.state.approvals[p.plan_id];
+  draft.maxTurns = 6; draft.timeoutMinutes = 60; draft.profiles.api = "other";
+  draft.confirmCosts = true;
+  await app.refresh({ force: true });
+  assert.equal(draft.maxTurns, 2);
+  assert.equal(draft.timeoutMinutes, 30);
+  assert.equal(draft.profiles.api, "other");
+  assert.equal(draft.confirmCosts, true);
+});
+
+test("different approved plans restore isolated limits and profile drafts", async () => {
+  const a = approvedPlan();
+  const b = approvedPlan({ plan_id: "WSPLAN-2", approval: { ...a.approval, max_turns_per_agent: 3, mission_timeout_seconds: 61 } });
+  const { app } = harness(baseRoutes(boxWithPlans(a, b)));
+  await app.init();
+  const first = app.state.approvals[a.plan_id], second = app.state.approvals[b.plan_id];
+  assert.equal(first.maxTurns, 2);
+  assert.equal(second.maxTurns, 3);
+  assert.notEqual(first.profiles, second.profiles);
+  assert.equal(ws.executionPayload(b, second).payload.mission_timeout_seconds, 61, "seconds never round through minutes");
+});
+
+test("legacy approvals with missing or invalid persisted limits block execution without defaults", async () => {
+  for (const approval of [null, {}, { max_turns_per_agent: 2 }, { mission_timeout_seconds: 1800 },
+    { max_turns_per_agent: 0, mission_timeout_seconds: 1800 },
+    { max_turns_per_agent: 2, mission_timeout_seconds: 3601 }]) {
+    const p = approvedPlan({ approval });
+    const { app, doc, calls } = harness(baseRoutes(boxWithPlans(p)));
+    await app.init();
+    assert.equal(app.state.approvals[p.plan_id].maxTurns, null);
+    assert.equal(findButton(doc.byId["ws-maestro-log"], "Autorizar e executar sequência").disabled, true);
+    await app.authorizeExecution(p);
+    assert.ok(!calls.some((call) => call.url.endsWith("/execute")));
+    assert.match(doc.byId["ws-error"].textContent, /Aprovação persistida incompleta/);
+  }
+});
+
+test("recorded cost authorization never expands to a newly selected paid route", () => {
+  const p = approvedPlan();
+  p.approval.agent_models.ui.model = "different/paid";
+  const result = ws.executionPayload(p, { profiles: { api: "unit", ui: "unit" } });
+  assert.equal(result.payload.confirm_costs, false);
+});
+
+test("proposed plans retain their original approval defaults and cannot execute yet", async () => {
+  const p = plan();
+  const { app } = harness(baseRoutes(boxWithPlans(p)));
+  await app.init();
+  assert.equal(app.state.approvals[p.plan_id].maxTurns, 1);
+  assert.equal(app.state.approvals[p.plan_id].timeoutMinutes, 15);
+  assert.ok(ws.executionPayload(p, { profiles: { api: "unit", ui: "unit" } }).error);
+});
