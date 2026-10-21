@@ -44,7 +44,7 @@ def list_dev_models() -> dict:
         )
     )
     preferred = next(
-        (item["id"] for item in rows if item["cost_status"] in {"free", "low_cost"}),
+        (item["id"] for item in rows if item["cost_status"] == "free"),
         None,
     )
     error = discovered_payload.get("catalog_error")

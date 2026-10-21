@@ -21,6 +21,7 @@ from nexus.workspace import policy, service
 
 FREE = {"id": "free/model", "cost_status": "free"}
 STANDARD = {"id": "std/model", "cost_status": "standard"}
+LOW = {"id": "low/model", "cost_status": "low_cost"}
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -95,6 +96,7 @@ def test_policy_never_suggests_a_paid_route_without_flagging_cost_authorization(
     assert proposal["panes"][0]["cost_authorization_required"] is True
     empty = policy.propose("implemente algo", [])
     assert empty["panes"][0]["model"] is None
+    assert policy.suggest_model([LOW, STANDARD])["model"] is None
 
 
 # ── Panes: real sessions, isolation, persistence ────────────────────────
@@ -188,7 +190,7 @@ def test_model_change_is_validated_recorded_and_only_affects_future_missions(ws_
     assert running[0]["requested_model"] == "free/model"  # the active mission is untouched
     change = next(e for e in service.pane_history(pane["pane_id"])["events"] if e["kind"] == "MODEL_CHANGED")
     assert change["detail"] == {
-        "from": "free/model", "to": "std/model", "applies_to": "future_missions", "active_mission_unchanged": "DEVMISSION-1",
+        "from": "free/model", "to": "std/model", "applies_to": "future_turns_and_missions", "active_mission_unchanged": "DEVMISSION-1",
     }
 
 
@@ -205,7 +207,10 @@ def test_pane_mission_uses_pane_session_and_requires_exact_model_confirmation(ws
         service.start_pane_mission(pane["pane_id"], "do it", confirm_model="free/model", test_profile="unit")
     assert unconfirmed.value.code == "MODEL_NOT_CONFIRMED" and calls == []
 
-    result = service.start_pane_mission(pane["pane_id"], "  do it  ", confirm_model="std/model", test_profile="unit")
+    with pytest.raises(DevServiceError) as unpaid:
+        service.start_pane_mission(pane["pane_id"], "do it", confirm_model="std/model", test_profile="unit")
+    assert unpaid.value.code == "COST_CONFIRMATION_REQUIRED" and calls == []
+    result = service.start_pane_mission(pane["pane_id"], "  do it  ", confirm_model="std/model", confirm_cost=True, test_profile="unit")
     session_id, description, kwargs = calls[0]
     assert session_id == pane["session"]["session_id"]
     assert description.endswith("do it") and "QA" in description
@@ -271,8 +276,10 @@ def test_workspace_routes_report_errors_and_reject_unknown_fields(ws_env):
     assert client.get("/api/workspace/panes/PANE-NOPE").json()["detail"]["code"] == "PANE_NOT_FOUND"
     extra = client.post("/api/workspace/panes", json={"project_id": "demo", "role": "implementer", "apply": True})
     assert extra.status_code == 422
-    unconfirmed = client.post("/api/workspace/panes/PANE-NOPE/missions", json={"description": "x", "test_profile": "u"})
-    assert unconfirmed.status_code == 422
+    # confirm_model is optional at the route (a plan authorization may cover
+    # it); the service still refuses an unconfirmed, unauthorized mission.
+    missing = client.post("/api/workspace/panes/PANE-NOPE/missions", json={"description": "x"})
+    assert missing.status_code == 422
 
 
 def test_workspace_api_rejects_cross_origin_requests(ws_env):

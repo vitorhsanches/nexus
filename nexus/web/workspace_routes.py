@@ -46,10 +46,39 @@ class PaneUpdateRequest(BaseModel):
 
 class PaneMissionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    description: str = Field(min_length=1, max_length=100_000)
-    confirm_model: str = Field(min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=100_000)
+    confirm_model: str | None = Field(default=None, min_length=1, max_length=128)
+    confirm_cost: bool = False
     test_profile: str = Field(min_length=1, max_length=128)
-    timeout_seconds: int = Field(default=900, ge=5, le=3600)
+    timeout_seconds: int | None = Field(default=None, ge=5, le=3600)
+
+
+class PaneMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=100_000)
+    confirm_model: str | None = Field(default=None, min_length=1, max_length=128)
+    confirm_cost: bool = False
+
+
+class MaestroAuthorizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    model: str = Field(min_length=1, max_length=128)
+    confirm_cost: bool = False
+
+
+class MaestroMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class PlanApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_models: dict[str, str] = Field(min_length=1, max_length=8)
+    max_turns_per_agent: int = Field(ge=1, le=6)
+    mission_timeout_seconds: int = Field(ge=60, le=3600)
+    confirm_costs: bool = False
 
 
 def _error(error) -> HTTPException:
@@ -138,6 +167,52 @@ def start_pane_mission(pane_id: str, request: PaneMissionRequest):
         pane_id,
         request.description,
         confirm_model=request.confirm_model,
+        confirm_cost=request.confirm_cost,
         test_profile=request.test_profile,
         timeout_seconds=request.timeout_seconds,
+    )
+
+
+@router.post("/panes/{pane_id}/messages")
+def send_pane_message(pane_id: str, request: PaneMessageRequest):
+    from nexus.workspace import service
+
+    return _call(
+        service.send_pane_message, pane_id, request.text,
+        confirm_model=request.confirm_model, confirm_cost=request.confirm_cost,
+    )
+
+
+@router.get("/maestro")
+def maestro_state(project_id: str):
+    from nexus.workspace import maestro
+
+    return _call(maestro.conversation_state, project_id)
+
+
+@router.post("/maestro/authorize")
+def maestro_authorize(request: MaestroAuthorizeRequest):
+    from nexus.workspace import maestro
+
+    return _call(maestro.authorize_planning, request.project_id, request.model, confirm_cost=request.confirm_cost)
+
+
+@router.post("/maestro/messages")
+def maestro_message(request: MaestroMessageRequest):
+    from nexus.workspace import maestro
+
+    return _call(maestro.send_message, request.project_id, request.text)
+
+
+@router.post("/plans/{plan_id}/approve")
+def approve_plan(plan_id: str, request: PlanApproveRequest):
+    from nexus.workspace import service
+
+    return _call(
+        service.approve_plan,
+        plan_id,
+        agent_models=request.agent_models,
+        max_turns_per_agent=request.max_turns_per_agent,
+        mission_timeout_seconds=request.mission_timeout_seconds,
+        confirm_costs=request.confirm_costs,
     )

@@ -181,6 +181,15 @@ def recover_orphaned_turns(is_orphaned: Callable[[str | None, int | None, str | 
     return recovered
 
 
+def get_turn_by_idempotency_key(session_id: str, idempotency_key: str):
+    """The turn a caller reserved with this idempotency key, if any."""
+    with get_connection() as connection:
+        return connection.execute(
+            "SELECT * FROM chat_turns WHERE session_id = ? AND idempotency_key = ?",
+            (session_id, idempotency_key),
+        ).fetchone()
+
+
 def get_turn(turn_id: str):
     with get_connection() as connection:
         return connection.execute(

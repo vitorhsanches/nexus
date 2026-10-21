@@ -116,3 +116,24 @@ existing Control Center stays at `/nexus` (linked as "Avançado").
 - Limits: `NEXUS_WORKSPACE_MAX_PANES` (open panes per project, default 6, max 8)
   and `NEXUS_WORKSPACE_MAX_AUTO_PANES` (panes per proposal, default 3, max 4).
 - Apply, merge and push remain manual, in the Development view.
+
+### Intelligent Maestro (P2A)
+
+- The Maestro chat is a real, persistent conversation per project, backed by a
+  read-only Nexus Chat session (Codex App-Server via OmniRoute). It can read
+  the project but never writes to it.
+- Activate it with "Ativar Maestro": pick an approved route; non-free routes
+  need explicit confirmation. Planning authorization never authorizes
+  execution. Without it, answers come from the labelled deterministic policy.
+- Every answer must contain a JSON plan (`maestro-plan/1`) that is strictly
+  validated: approved models only, at most `NEXUS_WORKSPACE_MAX_AUTO_PANES`
+  agents, one agent for simple tasks, dependencies only on earlier agents.
+  Invalid answers and failed turns fall back to the deterministic proposal,
+  clearly labelled, and never create anything.
+- "Aprovar e criar agentes" creates every planned pane in one step with the
+  exact models confirmed, a turn limit per agent and a mission timeout. No
+  mission starts on its own; planned agents run one after another
+  (dependencies must be ready for review first).
+- Each pane accepts direct messages as real Development turns in its own
+  worktree. Replies are marked "Somente conversa" or "Alterou código —
+  verificar". Apply, merge and push stay manual in the Development view.

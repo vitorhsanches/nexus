@@ -27,13 +27,16 @@
 
 <main class="ws-main" id="ws-main" data-density="empty">
   <section class="ws-maestro" aria-labelledby="ws-maestro-title">
-    <h1 class="ws-maestro-title" id="ws-maestro-title">Maestro</h1>
-    <p class="ws-maestro-hint" id="ws-maestro-hint">Descreva a tarefa. O Maestro propõe os agentes; nada executa sem a sua confirmação.</p>
+    <div class="ws-maestro-head">
+      <h1 class="ws-maestro-title" id="ws-maestro-title">Maestro</h1>
+      <div class="ws-maestro-planning" id="ws-maestro-planning" role="status" aria-live="polite"></div>
+    </div>
+    <p class="ws-maestro-hint" id="ws-maestro-hint">Converse com o Maestro. Ele analisa o projeto em modo somente leitura, propõe os agentes e só cria algo quando você aprova.</p>
     <ol class="ws-maestro-log" id="ws-maestro-log" aria-live="polite"></ol>
     <form class="ws-maestro-form" id="ws-maestro-form">
-      <label class="ws-visually-hidden" for="ws-maestro-input">Tarefa</label>
+      <label class="ws-visually-hidden" for="ws-maestro-input">Mensagem para o Maestro</label>
       <textarea id="ws-maestro-input" rows="2" maxlength="20000" placeholder="Ex.: implemente a API de pedidos e escreva testes para ela"></textarea>
-      <button type="submit" class="ws-button ws-button-primary" id="ws-maestro-send" disabled>Planejar</button>
+      <button type="submit" class="ws-button ws-button-primary" id="ws-maestro-send" disabled>Enviar</button>
     </form>
     <p class="ws-error" id="ws-error" role="alert" hidden></p>
   </section>

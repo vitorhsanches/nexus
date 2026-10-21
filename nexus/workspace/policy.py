@@ -14,7 +14,7 @@ Rules (policy_version below):
   "faça os testes passarem" is part of implementing, not a tester pane.
 * Frontend and backend work mentioned together split the implementer.
 * The proposal is capped at max_auto_panes (configurable, hard cap 4).
-* The suggested model is the first free/low-cost approved route; when none
+* The suggested model is the first free approved route; when none
   exists no model is pre-selected (cost_authorization_required=True), so a
   cost-bearing route is only ever chosen explicitly by the operator.
 """
@@ -30,7 +30,7 @@ DEFAULT_MAX_AUTO_PANES = 3
 HARD_MAX_AUTO_PANES = 4
 DEFAULT_MAX_OPEN_PANES = 6
 HARD_MAX_OPEN_PANES = 8
-FREE_COST_STATUSES = frozenset({"free", "low_cost"})
+FREE_COST_STATUSES = frozenset({"free"})
 
 ROLES = {
     "implementer": "Implementação",

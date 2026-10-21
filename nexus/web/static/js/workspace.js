@@ -1,24 +1,32 @@
-/* Nexus multi-pane agent workspace (P1).
+/* Nexus agent workspace (P1 layout + P2A intelligent Maestro).
  *
- * Maestro (centre): task -> auditable pane proposal (/api/workspace/plans).
+ * Maestro (centre): a persistent conversation backed by a read-only Nexus
+ * Chat session. Each answer carries a validated plan (or a clearly labelled
+ * deterministic fallback). Approving a plan creates every planned agent in
+ * one step, with the exact models and limits shown; it never starts work.
  * Panes (grid): one persisted agent per pane, each bound to its own real
- * Development session and worktree. Missions run through the existing
- * mission runner; the exact model must be re-confirmed for every mission.
- * Nothing here applies, merges, pushes or deletes. All server/model text is
- * rendered with textContent only.
+ * Development session and worktree. Agents receive direct messages (real
+ * Development turns) and missions (existing mission runner). Nothing here
+ * applies, merges, pushes or deletes. All server/model text is rendered with
+ * textContent only.
  */
 (function (global) {
   "use strict";
 
   const ACTIVE = new Set(["PENDING", "RUNNING", "TESTING", "REPAIRING"]);
-  const FAST_POLL_MS = 3000;
+  const FAST_POLL_MS = 2500;
   const IDLE_POLL_MS = 15000;
   const STORAGE_KEY = "nexus.workspace.v1";
+  const TIMEOUT_CHOICES = [5, 10, 15, 30, 60];
 
   const STATUS_LABELS = {
     PENDING: "Na fila", RUNNING: "Executando", TESTING: "Testando", REPAIRING: "Corrigindo",
     READY_FOR_REVIEW: "Aguardando revisão", FAILED: "Falhou", BLOCKED: "Bloqueado",
     CANCELLED: "Cancelado", OUTCOME_UNKNOWN: "Resultado desconhecido",
+  };
+  const PLAN_STATUS = {
+    PROPOSED: "Proposto", SUPERSEDED: "Substituído por um plano mais novo", APPROVING: "Criando agentes…",
+    APPROVED: "Aprovado — agentes criados", APPROVED_PARTIAL: "Aprovado parcialmente", APPROVAL_FAILED: "Falha ao criar agentes",
   };
 
   function costLabel(costStatus) {
@@ -31,10 +39,15 @@
     }
   }
 
+  function isFree(costStatus) { return costStatus === "free"; }
+
   function paneStatus(pane) {
     if (!pane.session) return { label: "Sessão ausente", tone: "bad" };
     if (pane.session.status !== "ACTIVE") return { label: `Sessão ${pane.session.status}`, tone: "bad" };
     const mission = pane.latest_mission;
+    const talking = (pane.messages || []).some((message) => message.status === "PENDING" || message.status === "RUNNING");
+    if (talking) return { label: "Respondendo", tone: "run" };
+    if ((pane.dependencies || []).some((dependency) => !dependency.ready) && !mission) return { label: "Aguardando dependência", tone: "" };
     if (!mission) return { label: "Ocioso", tone: "" };
     const label = STATUS_LABELS[mission.status] || mission.status;
     if (ACTIVE.has(mission.status)) return { label, tone: "run" };
@@ -68,19 +81,82 @@
     ];
   }
 
+  /* True when the approved plan already covers the next use of this pane. */
+  function planAuthorized(pane) {
+    return Boolean(pane.brief && pane.brief.authorization && pane.brief.authorization.applies);
+  }
+
   function missionPayload(pane, form) {
     const description = String(form.description || "").trim();
-    if (!description) return { error: "Descreva a missão do agente." };
+    if (!description && !pane.brief) return { error: "Descreva a missão do agente." };
     if (!pane.model) return { error: "Escolha um modelo para este agente." };
     if (!form.testProfile) return { error: "Escolha um perfil de teste confiável." };
+    const authorized = planAuthorized(pane);
+    if (!authorized && !form.confirmed) return { error: `Confirme o uso de ${pane.model}.` };
+    if (!authorized && !isFree(form.costStatus || pane.cost_status) && !form.confirmCost)
+      return { error: `Confirme o custo de ${pane.model}.` };
+    const payload = { test_profile: form.testProfile };
+    if (description) payload.description = description;
+    if (!authorized) payload.confirm_model = pane.model;
+    if (!authorized && !isFree(form.costStatus || pane.cost_status)) payload.confirm_cost = true;
+    return { payload };
+  }
+
+  function messagePayload(pane, form) {
+    const text = String(form.text || "").trim();
+    if (!text) return { error: "Escreva uma mensagem para o agente." };
+    if (!pane.model) return { error: "Escolha um modelo para este agente." };
+    if (planAuthorized(pane)) return { payload: { text } };
     if (!form.confirmed) return { error: `Confirme o uso de ${pane.model}.` };
-    return {
-      payload: { description, confirm_model: pane.model, test_profile: form.testProfile },
-    };
+    if (!isFree(form.costStatus || pane.cost_status) && !form.confirmCost)
+      return { error: `Confirme o custo de ${pane.model}.` };
+    return { payload: { text, confirm_model: pane.model,
+      ...(!isFree(form.costStatus || pane.cost_status) ? { confirm_cost: true } : {}) } };
   }
 
   function canStartMission(pane, state) {
-    return Boolean(state.execution_enabled && pane.session && pane.session.status === "ACTIVE" && !pane.busy && pane.model);
+    const blocked = (pane.dependencies || []).some((dependency) => !dependency.ready);
+    return Boolean(state.execution_enabled && pane.session && pane.session.status === "ACTIVE" && !pane.busy && pane.model && !blocked);
+  }
+
+  /* Build the approval request for a plan; every agent needs an explicit model. */
+  function approvalPayload(plan, form, models) {
+    const agentModels = {};
+    for (const agent of plan.agents) {
+      const model = form.models[agent.key];
+      if (!model) return { error: `Escolha o modelo de ${agent.title}.` };
+      agentModels[agent.key] = model;
+    }
+    const paid = Object.values(agentModels).filter((model) => {
+      const row = models.find((item) => item.id === model);
+      return !row || !isFree(row.cost_status);
+    });
+    if (paid.length && !form.confirmCosts) return { error: `Confirme o custo de: ${[...new Set(paid)].join(", ")}.` };
+    return {
+      payload: {
+        agent_models: agentModels,
+        max_turns_per_agent: Number(form.maxTurns),
+        mission_timeout_seconds: Number(form.timeoutMinutes) * 60,
+        confirm_costs: Boolean(paid.length && form.confirmCosts),
+      },
+      paid: [...new Set(paid)],
+    };
+  }
+
+  function planSourceLabel(plan) {
+    if (plan.source === "llm") return { text: "Plano do Maestro (IA)", tone: "ok" };
+    if (plan.source === "deterministic-fallback") return { text: "Proposta determinística — fallback", tone: "warn" };
+    return { text: "Proposta determinística (sem IA)", tone: "" };
+  }
+
+  function outcomeLabel(message) {
+    switch (message.outcome) {
+      case "conversation": return { text: "Somente conversa", tone: "" };
+      case "code_changed": return { text: "Alterou código — verificar", tone: "warn" };
+      case "failed": return { text: "Falhou", tone: "bad" };
+      case "cancelled": return { text: "Cancelada", tone: "" };
+      default: return { text: "Em andamento", tone: "run" };
+    }
   }
 
   function createWorkspace(env) {
@@ -92,8 +168,9 @@
     const $ = (id) => doc.getElementById(id);
 
     const state = {
-      projectId: null, projects: [], workspace: null, models: [], catalogError: null,
-      profiles: [], plans: [], selectedPaneId: null, timer: null, drafts: {}, openDetails: new Set(),
+      projectId: null, projects: [], workspace: null, maestro: null, models: [], catalogError: null,
+      profiles: [], selectedPaneId: null, timer: null, drafts: {}, approvals: {}, openDetails: new Set(),
+      planningDraft: { model: "", confirmCost: false },
     };
 
     function readPrefs() {
@@ -159,6 +236,13 @@
       return node;
     }
 
+    function checkbox(label, checked, onChange) {
+      const input = el("input", { attrs: { type: "checkbox" } });
+      input.checked = Boolean(checked);
+      input.addEventListener("change", () => onChange(input.checked));
+      return { input, label: el("label", { className: "ws-check" }, input, el("span", { text: label })) };
+    }
+
     function showError(message) {
       const node = $("ws-error");
       node.textContent = message || "";
@@ -167,7 +251,7 @@
 
     function modelOptions(select, selected, includeNone) {
       const options = [];
-      if (includeNone) options.push(el("option", { text: "— escolher depois —", attrs: { value: "" } }));
+      if (includeNone) options.push(el("option", { text: "— escolher —", attrs: { value: "" } }));
       state.models.forEach((model) => {
         const option = el("option", { text: `${model.id} · ${costLabel(model.cost_status)}`, attrs: { value: model.id } });
         if (model.id === selected) option.setAttribute("selected", "selected");
@@ -182,7 +266,7 @@
       return row ? row.cost_status : null;
     }
 
-    /* ── Rendering ── */
+    /* ── Top bar ── */
 
     function renderGates() {
       const ws = state.workspace;
@@ -196,54 +280,142 @@
       $("ws-gates").replaceChildren(...nodes);
     }
 
-    function renderProposal(plan) {
-      const rows = plan.panes.map((proposed, index) => {
-        const label = `${proposed.title} · ${proposed.model || "modelo a escolher"}`;
-        const row = el("div", { className: "ws-proposal-row" },
-          el("span", { className: "ws-grow", text: label }),
-          chip(proposed.model ? costLabel(proposed.cost_status) : "sem rota gratuita — escolha em Configurar", proposed.cost_authorization_required ? "warn" : "ok"),
-          button("Criar", () => createFromPlan(plan, index), { className: "ws-button-small" }));
-        row.title = `Critérios: ${proposed.signals.join(", ")}`;
-        return row;
-      });
-      const meta = el("div", { className: "ws-msg-meta",
-        text: `${plan.policy_version} · ${plan.complexity === "simple" ? "tarefa simples: um agente" : `${plan.panes.length} responsabilidades`}${plan.dropped_by_limit && plan.dropped_by_limit.length ? ` · limite ${plan.limit} (fora: ${plan.dropped_by_limit.join(", ")})` : ""}` });
-      const all = plan.panes.length > 1 ? button("Criar todos", () => createAllFromPlan(plan), { className: "ws-button-small" }) : null;
-      return el("div", { className: "ws-proposal" }, meta, ...rows, all);
+    /* ── Maestro ── */
+
+    function renderPlanning() {
+      const planning = state.maestro && state.maestro.planning;
+      const host = $("ws-maestro-planning");
+      if (!planning) { host.replaceChildren(); return; }
+      const details = disclosure("maestro:planning", planning.authorized
+        ? `IA: ${planning.model} · ${costLabel(planning.cost_status)} · somente leitura`
+        : "IA do Maestro desligada — usando proposta determinística");
+      const select = el("select", { attrs: { "aria-label": "Modelo do Maestro" } });
+      modelOptions(select, state.planningDraft.model || planning.model || "", true);
+      select.addEventListener("change", () => { state.planningDraft = { model: select.value, confirmCost: false }; renderPlanning(); });
+      const chosen = select.value;
+      const needsCost = chosen && !isFree(modelCost(chosen));
+      const cost = checkbox(`Autorizo usar ${chosen || "este modelo"} (${costLabel(modelCost(chosen))}) apenas para planejar`,
+        state.planningDraft.confirmCost, (value) => { state.planningDraft.confirmCost = value; });
+      cost.label.hidden = !needsCost;
+      const activate = button(planning.authorized ? "Trocar modelo" : "Ativar Maestro", () => authorizePlanning(select.value, cost.input.checked),
+        { className: "ws-button-small ws-button-primary", disabled: !chosen });
+      details.append(
+        el("p", { className: "ws-msg-meta", text: "O Maestro lê o projeto sem escrever nada. Autorizar o planejamento não autoriza a execução de agentes." }),
+        select, cost.label, activate);
+      if (!planning.authorized && !state.models.length) details.appendChild(el("p", { className: "ws-msg-meta", text: "Nenhum modelo aprovado disponível agora." }));
+      host.replaceChildren(details);
+    }
+
+    function renderAgentRow(plan, agent, draft, editable) {
+      const deps = agent.depends_on.length
+        ? `depois de ${agent.depends_on.map((key) => (plan.agents.find((item) => item.key === key) || { title: key }).title).join(", ")}`
+        : (agent.independent ? "independente" : "em sequência");
+      const head = el("div", { className: "ws-agent-head" },
+        el("strong", { text: agent.title }), chip(agent.role), chip(deps));
+      const body = el("div", { className: "ws-agent-task", text: agent.task });
+      const row = el("div", { className: "ws-proposal-row ws-agent" }, head, body);
+      if (agent.acceptance_criteria && agent.acceptance_criteria.length) {
+        const criteria = disclosure(`${plan.plan_id}:${agent.key}:criteria`, "Critérios de aceite");
+        criteria.appendChild(el("ul", { className: "ws-plan-criteria" }, ...agent.acceptance_criteria.map((item) => el("li", { text: item }))));
+        row.appendChild(criteria);
+      }
+      if (editable) {
+        const select = el("select", { attrs: { "aria-label": `Modelo de ${agent.title}` } });
+        modelOptions(select, draft.models[agent.key] || "", true);
+        select.addEventListener("change", () => { draft.models[agent.key] = select.value; draft.confirmCosts = false; renderMaestro(); });
+        const recommended = agent.model ? `recomendado: ${agent.model}` : "sem recomendação gratuita";
+        row.appendChild(el("div", { className: "ws-agent-model" }, select,
+          chip(draft.models[agent.key] ? costLabel(modelCost(draft.models[agent.key])) : recommended,
+            draft.models[agent.key] && isFree(modelCost(draft.models[agent.key])) ? "ok" : "warn")));
+      } else {
+        row.appendChild(el("div", { className: "ws-agent-model" }, chip(agent.model || "sem modelo"), chip(costLabel(agent.cost_status))));
+      }
+      return row;
+    }
+
+    function approvalDraft(plan) {
+      if (!state.approvals[plan.plan_id]) {
+        const models = {};
+        plan.agents.forEach((agent) => { models[agent.key] = agent.model || ""; });
+        state.approvals[plan.plan_id] = { models, maxTurns: 1, timeoutMinutes: 15, confirmCosts: false };
+      }
+      return state.approvals[plan.plan_id];
+    }
+
+    function renderPlan(plan) {
+      const source = planSourceLabel(plan);
+      const card = el("div", { className: "ws-plan", dataset: { source: plan.source, status: plan.status } });
+      card.appendChild(el("div", { className: "ws-plan-head" },
+        chip(source.text, source.tone), chip(PLAN_STATUS[plan.status] || plan.status, plan.status === "PROPOSED" ? "" : "ok"),
+        plan.agents.length ? chip(plan.agents.length === 1 ? "1 agente" : `${plan.agents.length} agentes · em sequência`) : null));
+      if (plan.fallback_reason) card.appendChild(el("p", { className: "ws-msg-meta", text: `Motivo do fallback: ${plan.fallback_reason}` }));
+      if (!plan.agents.length) return card;
+      const editable = plan.status === "PROPOSED" && Boolean(state.workspace);
+      const draft = approvalDraft(plan);
+      plan.agents.forEach((agent) => card.appendChild(renderAgentRow(plan, agent, draft, editable)));
+      if (!editable) return card;
+
+      const turns = el("select", { attrs: { "aria-label": "Turnos por agente" } },
+        ...[1, 2, 3, 4, 5, 6].map((value) => el("option", { text: `${value} ${value === 1 ? "turno" : "turnos"} por agente`, attrs: { value: String(value) } })));
+      turns.value = String(draft.maxTurns);
+      turns.addEventListener("change", () => { draft.maxTurns = Number(turns.value); });
+      const timeout = el("select", { attrs: { "aria-label": "Duração máxima por missão" } },
+        ...TIMEOUT_CHOICES.map((value) => el("option", { text: `até ${value} min por missão`, attrs: { value: String(value) } })));
+      timeout.value = String(draft.timeoutMinutes);
+      timeout.addEventListener("change", () => { draft.timeoutMinutes = Number(timeout.value); });
+      const preview = approvalPayload(plan, { ...draft, confirmCosts: true }, state.models);
+      const paid = preview.paid || [];
+      const cost = checkbox(`Autorizo os modelos não gratuitos: ${paid.join(", ")}`, draft.confirmCosts, (value) => { draft.confirmCosts = value; });
+      cost.label.hidden = !paid.length;
+      const approve = button(`Aprovar e criar ${plan.agents.length === 1 ? "o agente" : `${plan.agents.length} agentes`}`,
+        () => approvePlan(plan), { className: "ws-button-primary" });
+      card.append(
+        el("div", { className: "ws-plan-limits" }, turns, timeout),
+        cost.label,
+        el("p", { className: "ws-msg-meta", text: "A aprovação cria os agentes e autoriza estes modelos dentro dos limites acima. Nenhuma missão começa sozinha; nada é aplicado ao projeto. Limites financeiros não são impostos pela infraestrutura." }),
+        approve);
+      return card;
     }
 
     function renderMaestro() {
+      const conversation = state.maestro;
       const items = [];
-      state.plans.slice().reverse().forEach((plan) => {
-        items.push(el("li", { className: "ws-msg ws-msg-user", text: plan.task_text }));
-        items.push(el("li", { className: "ws-msg" },
-          el("div", { text: "Proposta do Maestro" }),
-          renderProposal(plan)));
+      (conversation ? conversation.messages : []).forEach((message) => {
+        if (message.author === "user") {
+          const item = el("li", { className: "ws-msg ws-msg-user", text: message.text });
+          if (message.status === "FAILED") item.appendChild(el("div", { className: "ws-msg-meta", text: `Falha: ${message.error_code || "erro"}` }));
+          items.push(item);
+          return;
+        }
+        const item = el("li", { className: "ws-msg" }, el("div", { className: "ws-msg-text", text: message.text }));
+        if (message.plan) item.appendChild(renderPlan(message.plan));
+        items.push(item);
       });
+      if (conversation && conversation.busy) items.push(el("li", { className: "ws-msg ws-msg-pending", text: "O Maestro está analisando o projeto…" }));
       $("ws-maestro-log").replaceChildren(...items);
+      renderPlanning();
     }
+
+    /* ── Panes ── */
 
     function renderMission(pane) {
       const mission = pane.latest_mission;
-      if (!mission) return el("p", { className: "ws-msg-meta", text: "Nenhuma missão ainda." });
-      const section = el("div", { className: "ws-pane-section" },
-        el("h3", { text: "Última missão" }),
-        el("div", { className: "ws-mono", text: `${mission.mission_id} · ${mission.requested_model} · tentativa ${mission.attempt_count}` }));
+      if (!mission) return null;
+      const section = el("div", { className: "ws-pane-section" }, el("h3", { text: "Última missão" }),
+        el("div", { text: `${STATUS_LABELS[mission.status] || mission.status} · tentativa ${mission.attempt_count}` }));
       if (mission.tests.length) {
         const last = mission.tests[mission.tests.length - 1];
-        section.appendChild(el("div", { text: `Testes: ${last.status}${last.exit_code === null || last.exit_code === undefined ? "" : ` (exit ${last.exit_code})`} · ${mission.tests.length} execução(ões)` }));
+        section.appendChild(el("div", { text: `Testes: ${last.status}${last.exit_code === null || last.exit_code === undefined ? "" : ` (exit ${last.exit_code})`}` }));
       }
       if (mission.error_code) section.appendChild(el("div", { className: "ws-error", text: `${mission.error_code}: ${mission.error_message || ""}` }));
       if (mission.changed_files.length) {
-        section.appendChild(el("h3", { text: "Arquivos alterados" }));
         section.appendChild(el("ul", { className: "ws-pane-files" },
           ...mission.changed_files.map((file) => el("li", { text: `${file.status} ${file.path}` }))));
       }
       if (mission.status === "READY_FOR_REVIEW" && !mission.integration_applied) {
-        const review = el("div", { className: "ws-pane-review" },
+        section.appendChild(el("div", { className: "ws-pane-review" },
           el("span", { text: "Revisão humana necessária. Nada foi aplicado ao projeto. " }),
-          el("a", { text: "Revisar e decidir no modo avançado", attrs: { href: "/nexus" } }));
-        section.appendChild(review);
+          el("a", { text: "Revisar no modo avançado", attrs: { href: "/nexus" } })));
         section.appendChild(renderDiff(pane));
       }
       return section;
@@ -269,26 +441,87 @@
       return details;
     }
 
+    function renderBrief(pane) {
+      if (!pane.brief) return null;
+      const section = el("div", { className: "ws-pane-section" }, el("h3", { text: "Tarefa planejada" }),
+        el("div", { className: "ws-agent-task", text: pane.brief.task }));
+      if (pane.brief.acceptance_criteria.length) {
+        const criteria = disclosure(`${pane.pane_id}:criteria`, "Critérios de aceite");
+        criteria.appendChild(el("ul", { className: "ws-plan-criteria" }, ...pane.brief.acceptance_criteria.map((item) => el("li", { text: item }))));
+        section.appendChild(criteria);
+      }
+      const waiting = (pane.dependencies || []).filter((dependency) => !dependency.ready);
+      if (waiting.length) section.appendChild(el("p", { className: "ws-msg-meta", text: `Aguardando revisão de: ${waiting.map((item) => item.title).join(", ")}` }));
+      const auth = pane.brief.authorization;
+      section.appendChild(chip(auth.applies ? `Autorizado pelo plano · ${auth.turns_used}/${auth.max_turns} usados` : "Autorização do plano esgotada ou modelo alterado", auth.applies ? "ok" : "warn"));
+      return section;
+    }
+
+    function renderChat(pane) {
+      const section = el("div", { className: "ws-pane-section" }, el("h3", { text: "Conversa" }));
+      const list = el("ol", { className: "ws-pane-chat" });
+      (pane.messages || []).forEach((message) => {
+        const outcome = outcomeLabel(message);
+        list.appendChild(el("li", { className: "ws-chat-user", text: message.text }));
+        const reply = el("li", { className: "ws-chat-agent" });
+        reply.appendChild(chip(outcome.text, outcome.tone));
+        if (message.response_text) reply.appendChild(el("div", { className: "ws-msg-text", text: message.response_text }));
+        else if (message.error_code) reply.appendChild(el("div", { className: "ws-error", text: message.error_code }));
+        list.appendChild(reply);
+      });
+      if (!list.children.length) list.appendChild(el("li", { className: "ws-msg-meta", text: "Sem mensagens ainda." }));
+      const draft = state.drafts[pane.pane_id] || {};
+      const input = el("textarea", { attrs: { maxlength: "100000", placeholder: `Mensagem para ${pane.title}`, "aria-label": `Mensagem para ${pane.title}` } });
+      input.value = draft.message || "";
+      input.addEventListener("input", () => { state.drafts[pane.pane_id] = { ...state.drafts[pane.pane_id], message: input.value }; });
+      const authorized = planAuthorized(pane);
+      const confirm = checkbox(pane.model ? `Confirmo o uso de ${pane.model}` : "Escolha um modelo em Configurar", false, () => {});
+      confirm.label.hidden = authorized || !pane.model;
+      const cost = checkbox(`Autorizo o custo de ${pane.model} (${costLabel(modelCost(pane.model))})`, false, () => {});
+      cost.label.hidden = authorized || !pane.model || isFree(modelCost(pane.model));
+      const disabled = !(state.workspace && state.workspace.execution_enabled) || pane.busy || !pane.model;
+      const send = button("Enviar", async () => {
+        const result = messagePayload(pane, { text: input.value, confirmed: confirm.input.checked,
+          confirmCost: cost.input.checked, costStatus: modelCost(pane.model) });
+        if (result.error) { showError(result.error); return; }
+        send.disabled = true;
+        try {
+          await api(`/api/workspace/panes/${encodeURIComponent(pane.pane_id)}/messages`, { method: "POST", body: result.payload });
+          state.drafts[pane.pane_id] = { ...state.drafts[pane.pane_id], message: "" };
+          showError("");
+          await refresh({ force: true });
+        } catch (error) {
+          showError(error.message);
+          send.disabled = false;
+        }
+      }, { className: "ws-button-small", disabled });
+      section.append(list, el("div", { className: "ws-pane-form" }, input, confirm.label, cost.label, send),
+        el("p", { className: "ws-msg-meta", text: "Mensagens rodam no worktree isolado deste agente. Se alterarem código, a mudança fica marcada para verificação." }));
+      return section;
+    }
+
     function renderMissionForm(pane) {
       const draft = state.drafts[pane.pane_id] || {};
-      const description = el("textarea", { attrs: { maxlength: "100000", placeholder: "Missão para este agente", "aria-label": `Missão para ${pane.title}` } });
+      const planned = Boolean(pane.brief);
+      const details = disclosure(`${pane.pane_id}:mission`, planned ? "Executar tarefa planejada" : "Nova missão (com testes)");
+      if (planned) details.open = details.open || !pane.latest_mission;
+      const description = el("textarea", { attrs: { maxlength: "100000", placeholder: planned ? "Instruções extras (opcional)" : "Missão para este agente", "aria-label": `Missão para ${pane.title}` } });
       description.value = draft.description || "";
       description.addEventListener("input", () => { state.drafts[pane.pane_id] = { ...state.drafts[pane.pane_id], description: description.value }; });
-
       const profile = el("select", { attrs: { "aria-label": "Perfil de teste" } },
         ...(state.profiles.length
           ? state.profiles.map((item) => el("option", { text: item.name || item.id, attrs: { value: item.id } }))
           : [el("option", { text: "Nenhum perfil de teste confiável para este projeto", attrs: { value: "" } })]));
       if (state.profiles.length) profile.value = draft.testProfile || state.profiles[0].id;
       profile.addEventListener("change", () => { state.drafts[pane.pane_id] = { ...state.drafts[pane.pane_id], testProfile: profile.value }; });
-
-      const confirm = el("input", { attrs: { type: "checkbox" } });
-      confirm.hidden = !pane.model;
-      const confirmLabel = el("label", {}, confirm,
-        el("span", { text: pane.model ? `Confirmo o uso de ${pane.model} (${costLabel(modelCost(pane.model))})` : "Escolha um modelo em Configurar" }));
-      const allowed = canStartMission(pane, state.workspace || {});
-      const start = button("Iniciar missão", async () => {
-        const result = missionPayload(pane, { description: description.value, testProfile: profile.value, confirmed: confirm.checked });
+      const authorized = planAuthorized(pane);
+      const confirm = checkbox(pane.model ? `Confirmo o uso de ${pane.model}` : "Escolha um modelo em Configurar", false, () => {});
+      confirm.label.hidden = authorized || !pane.model;
+      const cost = checkbox(`Autorizo o custo de ${pane.model} (${costLabel(modelCost(pane.model))})`, false, () => {});
+      cost.label.hidden = authorized || !pane.model || isFree(modelCost(pane.model));
+      const start = button(planned ? "Executar tarefa" : "Iniciar missão", async () => {
+        const result = missionPayload(pane, { description: description.value, testProfile: profile.value,
+          confirmed: confirm.input.checked, confirmCost: cost.input.checked, costStatus: modelCost(pane.model) });
         if (result.error) { showError(result.error); return; }
         start.disabled = true;
         try {
@@ -300,27 +533,31 @@
           showError(error.message);
           start.disabled = false;
         }
-      }, { className: "ws-button-primary", disabled: !allowed });
-      if (!state.profiles.length) start.disabled = true;
-      return el("div", { className: "ws-pane-form" }, description, profile, confirmLabel, start);
+      }, { className: "ws-button-primary", disabled: !canStartMission(pane, state.workspace || {}) || !state.profiles.length });
+      details.appendChild(el("div", { className: "ws-pane-form" }, description, profile, confirm.label, cost.label, start));
+      return details;
     }
 
     function renderConfig(pane) {
-      const details = disclosure(`${pane.pane_id}:config`, "Configurar");
+      const details = disclosure(`${pane.pane_id}:config`, "Detalhes e configuração");
       const select = el("select", { attrs: { "aria-label": `Modelo de ${pane.title}` } });
       modelOptions(select, pane.model, !pane.model);
       select.addEventListener("change", () => patchPane(pane.pane_id, { model: select.value }));
       details.append(
-        el("p", { className: "ws-msg-meta", text: "A troca de modelo vale apenas para missões futuras." }),
+        el("p", { className: "ws-msg-meta", text: "A troca de modelo vale apenas para turnos e missões futuras." }),
         select,
         el("div", { className: "ws-mono", text: `${pane.pane_id} · sessão ${pane.session ? pane.session.session_id : "—"}` }),
         el("div", { className: "ws-mono", text: pane.session ? `${pane.session.branch} · ${pane.session.worktree_path}` : "" }),
       );
+      if (pane.latest_mission) {
+        details.appendChild(el("div", { className: "ws-mono", text: `missão ${pane.latest_mission.mission_id} · ${pane.latest_mission.requested_model}` }));
+      }
+      details.appendChild(renderHistory(pane));
       return details;
     }
 
     function renderHistory(pane) {
-      const details = disclosure(`${pane.pane_id}:history`, "Histórico");
+      const details = disclosure(`${pane.pane_id}:history`, "Histórico técnico");
       const list = el("ol", { className: "ws-pane-events" });
       details.appendChild(list);
       const loadHistory = async () => {
@@ -341,7 +578,7 @@
       const status = paneStatus(pane);
       const node = el("article", { className: "ws-pane", dataset: {
         paneId: pane.pane_id, selected: pane.pane_id === state.selectedPaneId,
-        expanded: pane.layout.expanded, collapsed: pane.layout.collapsed,
+        expanded: pane.layout.expanded, collapsed: pane.layout.collapsed, origin: pane.origin,
       }, attrs: { "aria-label": pane.title } });
       const tools = el("div", { className: "ws-pane-tools" },
         button("←", () => move(pane.pane_id, -1), { className: "ws-button-small", label: "Mover para trás", disabled: index === 0 }),
@@ -355,11 +592,12 @@
       const body = el("div", { className: "ws-pane-body" },
         el("div", { className: "ws-pane-meta" },
           chip(pane.role_label), chip(pane.model || "sem modelo", pane.model ? "" : "warn"),
-          chip(pane.origin === "policy" ? "proposto pelo Maestro" : "manual")),
+          chip(pane.origin === "maestro" ? "criado pelo Maestro" : pane.origin === "policy" ? "proposta determinística" : "manual")),
+        renderBrief(pane),
         renderMission(pane),
+        renderChat(pane),
         renderMissionForm(pane),
-        renderConfig(pane),
-        renderHistory(pane));
+        renderConfig(pane));
       node.append(head, body);
       return node;
     }
@@ -374,19 +612,19 @@
       $("ws-hidden-list").replaceChildren(...(hidden.length ? hidden.map((pane) => button(`Restaurar ${pane.title}`, () => patchPane(pane.pane_id, { layout: { hidden: false } }))) : [el("span", { className: "ws-msg-meta", text: "Nenhum agente oculto." })]));
     }
 
-    function editingInGrid() {
+    function editingIn(id) {
       const active = doc.activeElement;
-      const grid = $("ws-grid");
-      return Boolean(active && grid && grid.contains && grid.contains(active) && ["TEXTAREA", "INPUT", "SELECT"].includes(active.tagName));
+      const host = $(id);
+      return Boolean(active && host && host.contains && host.contains(active) && ["TEXTAREA", "INPUT", "SELECT"].includes(active.tagName));
     }
 
     function render(options = {}) {
       renderGates();
-      renderMaestro();
-      if (options.force || !editingInGrid()) renderGrid();
-      const ready = Boolean(state.projectId && state.workspace);
+      if (options.force || !(editingIn("ws-maestro-log") || editingIn("ws-maestro-planning"))) renderMaestro();
+      if (options.force || !editingIn("ws-grid")) renderGrid();
+      const ready = Boolean(state.projectId && state.workspace && state.maestro);
       $("ws-add-pane").disabled = !ready;
-      $("ws-maestro-send").disabled = !ready;
+      $("ws-maestro-send").disabled = !ready || Boolean(state.maestro && state.maestro.busy);
     }
 
     /* ── Actions ── */
@@ -419,50 +657,47 @@
       await refresh({ force: true });
     }
 
-    async function createPane(body) {
-      const pane = await api("/api/workspace/panes", { method: "POST", body: { project_id: state.projectId, ...body } });
-      state.selectedPaneId = pane.pane_id;
-      return pane;
-    }
-
-    async function createFromPlan(plan, index) {
-      const proposed = plan.panes[index];
+    async function authorizePlanning(model, confirmCost) {
       try {
-        await createPane({ role: proposed.role, title: proposed.title, model: proposed.model || null, plan_id: plan.plan_id });
+        state.maestro = await api("/api/workspace/maestro/authorize", { method: "POST", body: { project_id: state.projectId, model, confirm_cost: Boolean(confirmCost) } });
+        state.planningDraft = { model: "", confirmCost: false };
+        state.openDetails.delete("maestro:planning");
         showError("");
       } catch (error) {
         showError(error.message);
       }
-      await refresh({ force: true });
+      render({ force: true });
     }
 
-    async function createAllFromPlan(plan) {
-      for (let index = 0; index < plan.panes.length; index += 1) {
-        try {
-          await createPane({ role: plan.panes[index].role, title: plan.panes[index].title, model: plan.panes[index].model || null, plan_id: plan.plan_id });
-        } catch (error) {
-          showError(error.message);
-          break;
-        }
-      }
-      await refresh({ force: true });
-    }
-
-    async function submitTask(event) {
+    async function sendMaestro(event) {
       if (event && event.preventDefault) event.preventDefault();
       const input = $("ws-maestro-input");
-      const task = input.value.trim();
-      if (!task || !state.projectId) return;
+      const text = input.value.trim();
+      if (!text || !state.projectId) return;
       $("ws-maestro-send").disabled = true;
       try {
-        const plan = await api("/api/workspace/plans", { method: "POST", body: { project_id: state.projectId, task } });
-        state.plans.unshift(plan);
+        state.maestro = await api("/api/workspace/maestro/messages", { method: "POST", body: { project_id: state.projectId, text } });
         input.value = "";
         showError("");
       } catch (error) {
         showError(error.message);
       }
-      render();
+      render({ force: true });
+      scheduleRefresh();
+    }
+
+    async function approvePlan(plan) {
+      const result = approvalPayload(plan, approvalDraft(plan), state.models);
+      if (result.error) { showError(result.error); return; }
+      try {
+        const approved = await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/approve`, { method: "POST", body: result.payload });
+        if (approved.panes && approved.panes.length) state.selectedPaneId = approved.panes[0].pane_id;
+        const errors = approved.plan && approved.plan.approval ? approved.plan.approval.errors : [];
+        showError(errors && errors.length ? `Alguns agentes não foram criados: ${errors.map((item) => `${item.key}: ${item.code}`).join("; ")}` : "");
+      } catch (error) {
+        showError(error.message);
+      }
+      await refresh({ force: true });
     }
 
     function openAddDialog() {
@@ -478,7 +713,10 @@
       if (event && event.preventDefault) event.preventDefault();
       const dialog = $("ws-add-dialog");
       try {
-        await createPane({ role: $("ws-add-role").value, title: $("ws-add-name").value || null, model: $("ws-add-model").value || null });
+        const pane = await api("/api/workspace/panes", { method: "POST", body: {
+          project_id: state.projectId, role: $("ws-add-role").value, title: $("ws-add-name").value || null, model: $("ws-add-model").value || null,
+        } });
+        state.selectedPaneId = pane.pane_id;
         showError("");
         if (dialog.close) dialog.close(); else dialog.removeAttribute("open");
       } catch (error) {
@@ -491,20 +729,31 @@
 
     function scheduleRefresh() {
       if (state.timer) cancel(state.timer);
-      const busy = state.workspace && state.workspace.panes.some((pane) => pane.busy);
+      const panesBusy = state.workspace && state.workspace.panes.some((pane) => pane.busy || (pane.messages || []).some((message) => message.outcome === null));
+      const busy = panesBusy || Boolean(state.maestro && state.maestro.busy) || Boolean(state.catalogError);
       state.timer = schedule(() => { refresh().catch(() => {}); }, busy ? FAST_POLL_MS : IDLE_POLL_MS);
+    }
+
+    async function loadModels() {
+      const models = await api("/api/dev/models").catch((error) => ({ models: [], catalog_error: error.message }));
+      state.models = models.models || [];
+      state.catalogError = models.catalog_error || null;
     }
 
     async function refresh(options = {}) {
       if (!state.projectId) { render(options); return; }
-      try {
-        state.workspace = await api(`/api/workspace/state?project_id=${encodeURIComponent(state.projectId)}`);
-        if (!state.workspace.panes.some((pane) => pane.pane_id === state.selectedPaneId)) {
-          state.selectedPaneId = state.workspace.panes.length ? state.workspace.panes[0].pane_id : null;
-        }
-      } catch (error) {
-        state.workspace = null;
-        showError(error.message);
+      // Model discovery can fail transiently; keep retrying until it works so
+      // plans never stay unapprovable because of one bad first load.
+      if (!state.models.length || state.catalogError) await loadModels();
+      const query = `project_id=${encodeURIComponent(state.projectId)}`;
+      const [workspace, maestro] = await Promise.all([
+        api(`/api/workspace/state?${query}`).catch((error) => { showError(error.message); return null; }),
+        api(`/api/workspace/maestro?${query}`).catch((error) => { showError(error.message); return state.maestro; }),
+      ]);
+      state.workspace = workspace;
+      state.maestro = maestro;
+      if (workspace && !workspace.panes.some((pane) => pane.pane_id === state.selectedPaneId)) {
+        state.selectedPaneId = workspace.panes.length ? workspace.panes[0].pane_id : null;
       }
       render(options);
       scheduleRefresh();
@@ -512,33 +761,31 @@
 
     async function loadProject(projectId) {
       state.projectId = projectId || null;
-      state.plans = [];
+      state.maestro = null;
       state.profiles = [];
+      state.approvals = {};
       writePrefs({ project: state.projectId });
       if (!state.projectId) { render(); return; }
       state.selectedPaneId = (readPrefs().selected || {})[state.projectId] || null;
-      const [plans, profiles] = await Promise.all([
-        api(`/api/workspace/plans?project_id=${encodeURIComponent(state.projectId)}`).catch((error) => { showError(error.message); return { plans: [] }; }),
-        api(`/api/dev/test-profiles?project_id=${encodeURIComponent(state.projectId)}`).catch(() => ({ profiles: [] })),
-      ]);
-      state.plans = plans.plans || [];
+      const profiles = await api(`/api/dev/test-profiles?project_id=${encodeURIComponent(state.projectId)}`).catch(() => ({ profiles: [] }));
       state.profiles = profiles.profiles || [];
       await refresh({ force: true });
     }
 
     async function init() {
-      $("ws-maestro-form").addEventListener("submit", submitTask);
+      $("ws-maestro-form").addEventListener("submit", sendMaestro);
+      $("ws-maestro-input").addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendMaestro(); }
+      });
       $("ws-add-pane").addEventListener("click", openAddDialog);
       $("ws-add-form").addEventListener("submit", confirmAdd);
       $("ws-add-cancel").addEventListener("click", () => { const dialog = $("ws-add-dialog"); if (dialog.close) dialog.close(); else dialog.removeAttribute("open"); });
       $("ws-project-select").addEventListener("change", (event) => loadProject(event.target.value));
 
-      const [projects, models] = await Promise.all([
+      const [projects] = await Promise.all([
         api("/api/projects").catch((error) => { showError(error.message); return { projects: [] }; }),
-        api("/api/dev/models").catch((error) => ({ models: [], catalog_error: error.message })),
+        loadModels(),
       ]);
-      state.models = models.models || [];
-      state.catalogError = models.catalog_error || null;
       state.projects = (projects.projects || []).filter((project) => project.enabled);
       const authorized = state.projects.filter((project) => project.dev_enabled);
       const options = [el("option", { text: authorized.length ? "Escolha um projeto" : "Nenhum projeto autorizado", attrs: { value: "" } })];
@@ -554,10 +801,13 @@
       await loadProject(initial);
     }
 
-    return { init, refresh, state, api, submitTask, createFromPlan, patchPane, move, select };
+    return { init, refresh, state, api, sendMaestro, approvePlan, authorizePlanning, patchPane, move, select };
   }
 
-  const exported = { createWorkspace, paneStatus, density, sortPanes, moveUpdates, missionPayload, canStartMission, costLabel };
+  const exported = {
+    createWorkspace, paneStatus, density, sortPanes, moveUpdates, missionPayload, messagePayload,
+    canStartMission, costLabel, approvalPayload, planSourceLabel, outcomeLabel, planAuthorized,
+  };
   global.NexusWorkspace = exported;
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
 

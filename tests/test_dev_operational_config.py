@@ -34,6 +34,23 @@ def test_dev_models_are_live_approved_coding_routes_and_prefer_free(monkeypatch)
     assert payload["models"][0]["cost_status"] == "free"
 
 
+def test_dev_models_do_not_substitute_a_paid_default_when_no_free_route_is_live(monkeypatch):
+    monkeypatch.setattr(
+        "nexus.chat.service.list_models",
+        lambda: {
+            "models": [
+                {"id": "cc/claude-sonnet-5-low", "selectable": True},
+                {"id": "oc/big-pickle", "selectable": True},  # approved but disabled
+                {"id": "unapproved/model", "selectable": True},
+            ],
+            "catalog_error": None,
+        },
+    )
+    payload = models.list_dev_models()
+    assert [item["id"] for item in payload["models"]] == ["cc/claude-sonnet-5-low"]
+    assert payload["default_model"] is None
+
+
 def test_local_profiles_are_project_bound_and_expand_python(tmp_path, monkeypatch):
     local_file = tmp_path / "profiles.json"
     local_file.write_text(
