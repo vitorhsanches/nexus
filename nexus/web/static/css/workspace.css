@@ -2,6 +2,9 @@
 
 * { box-sizing: border-box; }
 
+/* Components set display (flex/grid); the hidden attribute must still win. */
+[hidden] { display: none !important; }
+
 .ws-body {
   margin: 0;
   min-height: 100vh;
@@ -154,3 +157,35 @@
   .ws-main { padding: 16px 12px 32px; }
   .ws-maestro-form { flex-direction: column; align-items: stretch; }
 }
+
+/* ── P2A: Maestro conversation, plan cards, agent chat ── */
+.ws-maestro-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: space-between; }
+.ws-maestro-planning { font-size: 12px; color: var(--text-muted); }
+.ws-maestro-planning details { display: grid; gap: 6px; }
+.ws-maestro-planning details[open] {
+  padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-1);
+  max-width: 420px;
+}
+.ws-maestro-planning select { background: var(--bg-1); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 6px; font: inherit; }
+.ws-msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ws-msg-pending { color: var(--text-muted); font-style: italic; border-style: dashed; }
+.ws-check { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: var(--text-muted); }
+
+.ws-plan { display: grid; gap: 8px; margin-top: 10px; }
+.ws-plan-head { display: flex; gap: 6px; flex-wrap: wrap; }
+.ws-plan[data-status="SUPERSEDED"] { opacity: .55; }
+.ws-agent { display: grid; gap: 6px; border-style: solid; border-color: var(--border); }
+.ws-agent-head { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.ws-agent-task { color: var(--text); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ws-agent-model { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.ws-agent-model select, .ws-plan-limits select {
+  background: var(--bg-1); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 6px; font: inherit; font-size: 12px;
+}
+.ws-plan-limits { display: flex; gap: 8px; flex-wrap: wrap; }
+.ws-plan-criteria { margin: 4px 0 0; padding-left: 18px; font-size: 12px; color: var(--text-muted); }
+
+.ws-pane-chat { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+.ws-chat-user { justify-self: end; max-width: 90%; padding: 6px 8px; border-radius: var(--radius); background: var(--bg-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ws-chat-agent { display: grid; gap: 4px; padding: 6px 8px; border-radius: var(--radius); border: 1px solid var(--border); }
+.ws-chat-agent .ws-chip { justify-self: start; }
+.ws-pane[data-origin="maestro"] .ws-pane-head { border-left: 2px solid var(--accent); }

@@ -188,7 +188,7 @@ def test_model_change_is_validated_recorded_and_only_affects_future_missions(ws_
     assert running[0]["requested_model"] == "free/model"  # the active mission is untouched
     change = next(e for e in service.pane_history(pane["pane_id"])["events"] if e["kind"] == "MODEL_CHANGED")
     assert change["detail"] == {
-        "from": "free/model", "to": "std/model", "applies_to": "future_missions", "active_mission_unchanged": "DEVMISSION-1",
+        "from": "free/model", "to": "std/model", "applies_to": "future_turns_and_missions", "active_mission_unchanged": "DEVMISSION-1",
     }
 
 
@@ -271,8 +271,10 @@ def test_workspace_routes_report_errors_and_reject_unknown_fields(ws_env):
     assert client.get("/api/workspace/panes/PANE-NOPE").json()["detail"]["code"] == "PANE_NOT_FOUND"
     extra = client.post("/api/workspace/panes", json={"project_id": "demo", "role": "implementer", "apply": True})
     assert extra.status_code == 422
-    unconfirmed = client.post("/api/workspace/panes/PANE-NOPE/missions", json={"description": "x", "test_profile": "u"})
-    assert unconfirmed.status_code == 422
+    # confirm_model is optional at the route (a plan authorization may cover
+    # it); the service still refuses an unconfirmed, unauthorized mission.
+    missing = client.post("/api/workspace/panes/PANE-NOPE/missions", json={"description": "x"})
+    assert missing.status_code == 422
 
 
 def test_workspace_api_rejects_cross_origin_requests(ws_env):

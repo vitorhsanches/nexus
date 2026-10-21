@@ -122,9 +122,65 @@ def pane_view(row) -> dict:
         "mission_count": len(missions),
         "latest_mission": latest,
         "busy": bool(latest and latest["status"] in ACTIVE_MISSION_STATUSES),
+        "plan_agent_key": row["plan_agent_key"],
+        "brief": _brief_view(row),
+        "dependencies": _dependency_status(row),
+        "messages": pane_messages(row),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _brief(row) -> dict | None:
+    return json.loads(row["brief_json"]) if row["brief_json"] else None
+
+
+def _plan_authorized_uses(pane_id: str) -> int:
+    return sum(
+        1
+        for event in store.list_events(pane_id, limit=1000)
+        if event["kind"] in {"MISSION_STARTED", "MESSAGE_SENT"} and json.loads(event["detail_json"]).get("authorized_by_plan")
+    )
+
+
+def _brief_view(row) -> dict | None:
+    brief = _brief(row)
+    if brief is None:
+        return None
+    authorization = brief.get("authorization") or {}
+    used = _plan_authorized_uses(row["id"])
+    return {
+        "task": brief.get("task"),
+        "acceptance_criteria": brief.get("acceptance_criteria") or [],
+        "depends_on": brief.get("depends_on") or [],
+        "summary": brief.get("summary"),
+        "authorization": {
+            "model": authorization.get("model"),
+            "cost_status": authorization.get("cost_status"),
+            "max_turns": authorization.get("max_turns"),
+            "turns_used": used,
+            "mission_timeout_seconds": authorization.get("mission_timeout_seconds"),
+            "applies": bool(authorization) and authorization.get("model") == row["model"]
+            and used < int(authorization.get("max_turns") or 0),
+        },
+    }
+
+
+def _dependency_status(row) -> list[dict]:
+    brief = _brief(row)
+    if not brief or not brief.get("depends_on") or not row["plan_id"]:
+        return []
+    by_key = {pane["plan_agent_key"]: pane for pane in store.panes_for_plan(row["plan_id"])}
+    status = []
+    for key in brief["depends_on"]:
+        pane = by_key.get(key)
+        latest = _latest_mission(_missions(pane["dev_session_id"])) if pane is not None else None
+        status.append({
+            "key": key,
+            "title": pane["title"] if pane is not None else key,
+            "ready": bool(latest and latest["status"] == "READY_FOR_REVIEW"),
+        })
+    return status
 
 
 def plan_task(project_id: str, task_text: str) -> dict:
@@ -149,12 +205,26 @@ def plan_task(project_id: str, task_text: str) -> dict:
 
 
 def plan_view(row) -> dict:
+    proposal = json.loads(row["proposal_json"])
+    if "agents" not in proposal:
+        # P1 keyword proposals stored before the Maestro plan schema existed.
+        proposal["agents"] = [
+            {"key": f"{pane['role']}{index + 1}", "role": pane["role"], "title": pane["title"], "model": pane.get("model"),
+             "cost_status": pane.get("cost_status"), "task": row["task_text"], "acceptance_criteria": [],
+             "depends_on": [], "touches": [], "independent": False, "conflicts_with": []}
+            for index, pane in enumerate(proposal.get("panes", []))
+        ]
+        proposal.setdefault("source", "deterministic")
+        proposal.setdefault("explanation", "Proposta determinística por palavras-chave (P1, sem IA).")
+    keys = row.keys()
     return {
         "plan_id": row["id"],
         "project_id": row["project_id"],
         "task_text": row["task_text"],
         "created_at": row["created_at"],
-        **json.loads(row["proposal_json"]),
+        **proposal,
+        "status": row["status"] if "status" in keys else "PROPOSED",
+        "approval": json.loads(row["approval_json"]) if "approval_json" in keys and row["approval_json"] else None,
     }
 
 
@@ -169,6 +239,9 @@ def create_pane(
     title: str | None = None,
     model: str | None = None,
     plan_id: str | None = None,
+    _origin: str | None = None,
+    _plan_agent_key: str | None = None,
+    _brief: dict | None = None,
 ) -> dict:
     """Create one operational pane: a real Development session + identity."""
     from nexus.dev.service import create_dev_session
@@ -195,13 +268,126 @@ def create_pane(
     pane_id = store.create_pane(
         project_id=project_id,
         dev_session_id=session["session_id"],
-        origin="policy" if plan_id else "manual",
+        origin=_origin or ("policy" if plan_id else "manual"),
         role=role,
         title=clean_title,
         model=model,
         plan_id=plan_id,
+        plan_agent_key=_plan_agent_key,
+        brief=_brief,
     )
     return pane_view(store.get_pane(pane_id))
+
+
+MIN_PLAN_TURNS, MAX_PLAN_TURNS = 1, 6
+MIN_MISSION_TIMEOUT, MAX_MISSION_TIMEOUT = 60, 3600
+
+
+def approve_plan(
+    plan_id: str,
+    *,
+    agent_models: dict[str, str],
+    max_turns_per_agent: int,
+    mission_timeout_seconds: int,
+    confirm_costs: bool,
+) -> dict:
+    """Approve a Maestro plan: create every planned pane in one step.
+
+    The request must name the exact model for every agent (an explicit
+    change from the plan's recommendation is recorded, never silent). The
+    approval also records an execution authorization per pane -- that exact
+    model, at most ``max_turns_per_agent`` missions/messages and the mission
+    timeout -- so later actions inside those limits need no extra
+    confirmation. Nothing starts executing here.
+    """
+    plan_row = store.get_plan(plan_id)
+    if plan_row is None:
+        raise DevServiceError("PLAN_NOT_FOUND", f"Unknown plan: {plan_id!r}", http_status=404)
+    plan = plan_view(plan_row)
+    if plan["status"] != "PROPOSED":
+        raise DevServiceError("PLAN_NOT_PROPOSED", f"Plan is {plan['status']}; only a proposed plan can be approved.", http_status=409)
+    agents = plan["agents"]
+    if not agents:
+        raise DevServiceError("PLAN_HAS_NO_AGENTS", "This plan has no agents to create.", http_status=400)
+    if not isinstance(agent_models, dict) or set(agent_models) != {agent["key"] for agent in agents}:
+        raise DevServiceError("MODELS_NOT_CONFIRMED", "Confirm the exact model for every planned agent.", http_status=400)
+    if not MIN_PLAN_TURNS <= max_turns_per_agent <= MAX_PLAN_TURNS:
+        raise DevServiceError("INVALID_LIMITS", f"max_turns_per_agent must be {MIN_PLAN_TURNS}..{MAX_PLAN_TURNS}.", http_status=400)
+    if not MIN_MISSION_TIMEOUT <= mission_timeout_seconds <= MAX_MISSION_TIMEOUT:
+        raise DevServiceError("INVALID_LIMITS", f"mission_timeout_seconds must be {MIN_MISSION_TIMEOUT}..{MAX_MISSION_TIMEOUT}.", http_status=400)
+    if len(agents) > policy.max_auto_panes():
+        raise DevServiceError("PANE_LIMIT_REACHED", f"At most {policy.max_auto_panes()} agents per plan.", http_status=409)
+    if store.count_open_panes(plan["project_id"]) + len(agents) > policy.max_open_panes():
+        raise DevServiceError(
+            "PANE_LIMIT_REACHED",
+            f"Creating {len(agents)} agents would exceed {policy.max_open_panes()} open panes; hide some first.",
+            http_status=409,
+        )
+    chosen = {}
+    for agent in agents:
+        model = agent_models[agent["key"]]
+        row = _require_approved_model(model)
+        chosen[agent["key"]] = {
+            "model": model,
+            "cost_status": row.get("cost_status") or "unknown",
+            "recommended": agent.get("model"),
+            "changed_by_user": model != agent.get("model"),
+        }
+    paid = sorted({item["model"] for item in chosen.values() if item["cost_status"] not in {"free", "low_cost"}})
+    if paid and not confirm_costs:
+        raise DevServiceError(
+            "COST_CONFIRMATION_REQUIRED",
+            "These routes are not free and need explicit confirmation: " + ", ".join(paid),
+            http_status=400,
+        )
+    approval = {
+        "agent_models": chosen,
+        "max_turns_per_agent": max_turns_per_agent,
+        "mission_timeout_seconds": mission_timeout_seconds,
+        "cost_confirmed_for": paid,
+        "financial_limit": None,  # not enforceable by this infrastructure; never claimed
+        "panes": [],
+        "errors": [],
+    }
+    if not store.claim_plan_for_approval(plan_id, approval):
+        raise DevServiceError("PLAN_NOT_PROPOSED", "This plan is already being approved.", http_status=409)
+    created = []
+    for agent in agents:
+        choice = chosen[agent["key"]]
+        brief = {
+            "task": agent["task"],
+            "acceptance_criteria": agent.get("acceptance_criteria") or [],
+            "depends_on": agent.get("depends_on") or [],
+            "summary": plan.get("summary"),
+            "authorization": {
+                "plan_id": plan_id,
+                "model": choice["model"],
+                "cost_status": choice["cost_status"],
+                "max_turns": max_turns_per_agent,
+                "mission_timeout_seconds": mission_timeout_seconds,
+            },
+        }
+        try:
+            pane = create_pane(
+                plan["project_id"],
+                role=agent["role"],
+                title=agent["title"],
+                model=choice["model"],
+                plan_id=plan_id,
+                _origin="maestro",
+                _plan_agent_key=agent["key"],
+                _brief=brief,
+            )
+        except DevServiceError as error:
+            # Panes already created keep their sessions; nothing is rolled back
+            # or deleted. The partial result is recorded and reported.
+            approval["errors"].append({"key": agent["key"], "code": error.code, "message": str(error)})
+            break
+        approval["panes"].append({"key": agent["key"], "pane_id": pane["pane_id"]})
+        created.append(pane)
+    status = "APPROVED" if not approval["errors"] else ("APPROVED_PARTIAL" if created else "APPROVAL_FAILED")
+    store.finish_plan_approval(plan_id, status, approval)
+    return {"plan": plan_view(store.get_plan(plan_id)), "panes": created}
 
 
 def list_panes(project_id: str, *, include_hidden: bool = False) -> list[dict]:
@@ -227,7 +413,7 @@ def update_pane(pane_id: str, *, title: str | None = None, model: str | None = N
             event_detail={
                 "from": row["model"],
                 "to": model,
-                "applies_to": "future_missions",
+                "applies_to": "future_turns_and_missions",
                 "active_mission_unchanged": active,
             },
             model=model,
@@ -245,49 +431,162 @@ def update_pane(pane_id: str, *, title: str | None = None, model: str | None = N
     return get_pane(pane_id)
 
 
+def _authorize_use(row, confirm_model: str | None) -> bool:
+    """Return True when the plan authorization covers this use.
+
+    Otherwise the caller must re-confirm the pane's exact current model.
+    """
+    if not row["model"]:
+        raise DevServiceError("MODEL_REQUIRED", "Choose a model for this pane first.", http_status=400)
+    brief = _brief_view(row)
+    if brief and brief["authorization"]["applies"] and confirm_model in (None, row["model"]):
+        return True
+    if confirm_model != row["model"]:
+        raise DevServiceError(
+            "MODEL_NOT_CONFIRMED",
+            "Confirm the pane's exact current model (no plan authorization covers this use).",
+            http_status=400,
+        )
+    return False
+
+
+def _agent_context(row) -> str:
+    lines = [f"[Workspace agent: {row['title']} - role {policy.ROLES.get(row['role'], row['role'])}]"]
+    brief = _brief(row)
+    if brief:
+        lines.append(f"Planned task: {brief.get('task')}")
+        criteria = brief.get("acceptance_criteria") or []
+        if criteria:
+            lines.append("Acceptance criteria:\n" + "\n".join(f"- {item}" for item in criteria))
+    return "\n".join(lines) + "\n"
+
+
 def start_pane_mission(
     pane_id: str,
-    description: str,
+    description: str | None,
     *,
-    confirm_model: str,
+    confirm_model: str | None,
     test_profile: str,
-    timeout_seconds: int = 900,
+    timeout_seconds: int | None = None,
 ) -> dict:
     """Start one mission in the pane's own session with the pane's model.
 
-    ``confirm_model`` must equal the pane's current model: the caller
-    re-confirms the exact route (and therefore its cost) for every mission.
+    Without an applicable plan authorization, ``confirm_model`` must equal
+    the pane's current model. A planned pane whose dependencies are not
+    READY_FOR_REVIEW yet is refused: P2A runs planned agents one after
+    another and never lets two of them edit related code at the same time.
     """
     from nexus.dev.mission_runner import start_mission
 
     row = _require_pane(pane_id)
-    if not row["model"]:
-        raise DevServiceError("MODEL_REQUIRED", "Choose a model for this pane before starting a mission.", http_status=400)
-    if confirm_model != row["model"]:
+    if any(not item["ready"] for item in _dependency_status(row)):
         raise DevServiceError(
-            "MODEL_NOT_CONFIRMED",
-            "The confirmed model does not match the pane's current model.",
-            http_status=400,
+            "DEPENDENCY_PENDING",
+            "This agent depends on agents whose work is not ready for review yet.",
+            http_status=409,
         )
-    if not isinstance(description, str) or not description.strip():
+    by_plan = _authorize_use(row, confirm_model)
+    brief = _brief(row)
+    text = (description or "").strip()
+    if not text and brief:
+        text = "Execute the planned task above and satisfy every acceptance criterion."
+    if not text:
         raise DevServiceError("EMPTY_MISSION", "description must not be empty.", http_status=400)
-    role_context = (
-        f"[Workspace agent: {row['title']} - role {policy.ROLES.get(row['role'], row['role'])}]\n"
-    )
+    if timeout_seconds is None:
+        timeout_seconds = int(((brief or {}).get("authorization") or {}).get("mission_timeout_seconds") or 900)
     mission = start_mission(
         row["dev_session_id"],
-        role_context + description.strip(),
+        _agent_context(row) + text,
         model=row["model"],
-        allowed_models=[confirm_model],
+        allowed_models=[row["model"]],
         test_profile=test_profile,
         timeout_seconds=timeout_seconds,
     )
     store.record_event(
         pane_id,
         "MISSION_STARTED",
-        {"mission_id": mission["mission_id"], "model": row["model"], "status": mission["status"]},
+        {"mission_id": mission["mission_id"], "model": row["model"], "status": mission["status"], "authorized_by_plan": by_plan},
     )
     return {"pane": get_pane(pane_id), "mission": mission}
+
+
+def _snapshot(dev_session_id: str) -> list:
+    """Content-addressed view of the worktree diff, to detect any change."""
+    from nexus.dev import executor
+
+    try:
+        diff = executor.review_diff(dev_session_id)
+    except DevServiceError:
+        return [["?", "unavailable", None]]
+    return sorted([file["path"], file["status"], file.get("content_sha256")] for file in diff.get("files", []))
+
+
+def send_pane_message(pane_id: str, text: str, *, confirm_model: str | None = None) -> dict:
+    """Send one direct message to an agent as a real Development turn.
+
+    The turn runs in the pane's own worktree (Development Mode rules apply:
+    execution gate, authorization, one active turn per session). Before and
+    after snapshots of the diff classify the result as conversation-only or
+    as code changes that still need verification.
+    """
+    from nexus.dev import executor, feature_gate
+
+    row = _require_pane(pane_id)
+    if not isinstance(text, str) or not text.strip():
+        raise DevServiceError("EMPTY_MESSAGE", "message must not be empty.", http_status=400)
+    if not feature_gate.execution_enabled():
+        raise DevServiceError("DEV_EXECUTION_DISABLED", "Development Mode execution is disabled on this server.", http_status=403)
+    latest = _latest_mission(_missions(row["dev_session_id"]))
+    if latest and latest["status"] in ACTIVE_MISSION_STATUSES:
+        raise DevServiceError("PANE_BUSY", "This agent is running a mission; wait for it to finish.", http_status=409)
+    by_plan = _authorize_use(row, confirm_model)
+    before = _snapshot(row["dev_session_id"])
+    message_id = store.add_pane_message(pane_id, text=text.strip(), model=row["model"], changes_before=before)
+    try:
+        turn = executor.run_dev_turn(row["dev_session_id"], _agent_context(row) + text.strip(), model=row["model"])
+    except DevServiceError:
+        store.finish_pane_message(message_id, outcome="failed", changes_after=None)
+        raise
+    store.set_pane_message_turn(message_id, turn["turn_id"])
+    store.record_event(pane_id, "MESSAGE_SENT", {"message_id": message_id, "model": row["model"], "authorized_by_plan": by_plan})
+    return get_pane(pane_id)
+
+
+TERMINAL_TURN_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "OUTCOME_UNKNOWN"})
+
+
+def pane_messages(row, limit: int = 20) -> list[dict]:
+    from nexus.dev import executor
+
+    out = []
+    for message in store.list_pane_messages(row["id"], limit=limit):
+        turn = None
+        if message["dev_turn_id"]:
+            try:
+                turn = executor.get_turn_detail(row["dev_session_id"], message["dev_turn_id"])
+            except DevServiceError:
+                turn = None
+        outcome = message["outcome"]
+        if outcome is None and turn is not None and turn["status"] in TERMINAL_TURN_STATUSES:
+            if turn["status"] == "COMPLETED":
+                after = _snapshot(row["dev_session_id"])
+                before = json.loads(message["changes_before_json"])
+                outcome = "conversation" if after == before else "code_changed"
+                store.finish_pane_message(message["id"], outcome=outcome, changes_after=after)
+            else:
+                outcome = "cancelled" if turn["status"] in {"CANCELLED", "INTERRUPTED"} else "failed"
+                store.finish_pane_message(message["id"], outcome=outcome, changes_after=None)
+        out.append({
+            "message_id": message["id"],
+            "text": message["text"],
+            "model": message["model"],
+            "status": turn["status"] if turn else ("FAILED" if outcome == "failed" else "PENDING"),
+            "response_text": turn["response_text"] if turn else None,
+            "error_code": turn["error_code"] if turn else None,
+            "outcome": outcome,
+            "created_at": message["created_at"],
+        })
+    return out
 
 
 def pane_history(pane_id: str) -> dict:

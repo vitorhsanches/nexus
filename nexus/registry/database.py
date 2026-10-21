@@ -471,3 +471,77 @@ def initialize_database() -> None:
                 ON workspace_pane_events(pane_id, id);
             """
         )
+
+        # Intelligent Maestro (P2A). A conversation is backed by exactly one
+        # read-only Nexus Chat session (the Codex thread holds the content);
+        # these rows keep the user's own words, the Maestro's parsed plan and
+        # the per-message state so a restart can resume reconciliation.
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_maestro_conversations (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                chat_session_id TEXT UNIQUE,
+                model TEXT,
+                planning_authorized_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_maestro_conversations_project
+                ON workspace_maestro_conversations(project_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS workspace_maestro_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                author TEXT NOT NULL,
+                text TEXT NOT NULL,
+                chat_turn_id TEXT UNIQUE,
+                status TEXT NOT NULL,
+                plan_id TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (conversation_id) REFERENCES workspace_maestro_conversations(id),
+                FOREIGN KEY (plan_id) REFERENCES workspace_plans(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_maestro_messages_conversation
+                ON workspace_maestro_messages(conversation_id, created_at);
+
+            -- Direct user -> agent messages. Each one is a real Development
+            -- turn in the pane's own worktree; changed-file snapshots taken
+            -- before and after classify it as conversation-only or as code
+            -- changes that still need verification.
+            CREATE TABLE IF NOT EXISTS workspace_pane_messages (
+                id TEXT PRIMARY KEY,
+                pane_id TEXT NOT NULL,
+                dev_turn_id TEXT UNIQUE,
+                text TEXT NOT NULL,
+                model TEXT,
+                changes_before_json TEXT NOT NULL,
+                changes_after_json TEXT,
+                outcome TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pane_id) REFERENCES workspace_panes(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_pane_messages_pane
+                ON workspace_pane_messages(pane_id, created_at);
+            """
+        )
+        plan_cols = [r[1] for r in connection.execute("PRAGMA table_info(workspace_plans)").fetchall()]
+        for column, ddl in (
+            ("source", "TEXT NOT NULL DEFAULT 'deterministic'"),
+            ("conversation_id", "TEXT"),
+            ("message_id", "TEXT"),
+            ("status", "TEXT NOT NULL DEFAULT 'PROPOSED'"),
+            ("approval_json", "TEXT"),
+            ("approved_at", "TEXT"),
+        ):
+            if column not in plan_cols:
+                connection.execute(f"ALTER TABLE workspace_plans ADD COLUMN {column} {ddl}")
+        pane_cols = [r[1] for r in connection.execute("PRAGMA table_info(workspace_panes)").fetchall()]
+        for column in ("plan_agent_key", "brief_json"):
+            if column not in pane_cols:
+                connection.execute(f"ALTER TABLE workspace_panes ADD COLUMN {column} TEXT")
