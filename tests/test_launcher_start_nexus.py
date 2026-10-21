@@ -29,6 +29,32 @@ def _run_launcher(*args, env=None):
     )
 
 
+def _launcher_env(repo, *, install_codex):
+    """Project venv, OmniRoute profile and an isolated LOCALAPPDATA.
+
+    Codex is placed only where Nexus resolves it at runtime
+    (%LOCALAPPDATA%\\OpenAI\\Codex\\bin\\<build>\\codex.exe), never on PATH.
+    """
+    venv.EnvBuilder(with_pip=False).create(Path(repo) / ".venv")
+    env = os.environ.copy()
+    python_paths = [str(ROOT), *site.getsitepackages()]
+    if env.get("PYTHONPATH"):
+        python_paths.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(python_paths)
+    local_app_data = Path(repo) / "localappdata"
+    local_app_data.mkdir()
+    if install_codex:
+        build_dir = local_app_data / "OpenAI" / "Codex" / "bin" / "test-build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "codex.exe").write_bytes(b"")
+    env["LOCALAPPDATA"] = str(local_app_data)
+    omni_profile = Path(repo) / "omni-profile"
+    omni_profile.mkdir()
+    (omni_profile / "config.toml").write_text("model_provider = \"omniroute\"\n", encoding="utf-8")
+    env["NEXUS_OMNIROUTE_CODEX_HOME"] = str(omni_profile)
+    return env
+
+
 class StartNexusLauncherTests(unittest.TestCase):
     def test_missing_project_venv_fails_clearly_without_starting_anything(self):
         with tempfile.TemporaryDirectory() as empty_repo:
@@ -40,20 +66,7 @@ class StartNexusLauncherTests(unittest.TestCase):
 
     def test_unreachable_omniroute_without_command_fails_before_starting_nexus(self):
         with tempfile.TemporaryDirectory() as repo:
-            venv.EnvBuilder(with_pip=False).create(Path(repo) / ".venv")
-            env = os.environ.copy()
-            python_paths = [str(ROOT), *site.getsitepackages()]
-            if env.get("PYTHONPATH"):
-                python_paths.append(env["PYTHONPATH"])
-            env["PYTHONPATH"] = os.pathsep.join(python_paths)
-            command_dir = Path(repo) / "commands"
-            command_dir.mkdir()
-            (command_dir / "codex.cmd").write_text("@exit /b 0\n", encoding="utf-8")
-            env["PATH"] = str(command_dir) + os.pathsep + env.get("PATH", "")
-            omni_profile = Path(repo) / "omni-profile"
-            omni_profile.mkdir()
-            (omni_profile / "config.toml").write_text("model_provider = \"omniroute\"\n", encoding="utf-8")
-            env["NEXUS_OMNIROUTE_CODEX_HOME"] = str(omni_profile)
+            env = _launcher_env(repo, install_codex=True)
             result = _run_launcher(
                 "-RepoRoot", repo,
                 "-OmniRoutePort", "20999",
@@ -63,7 +76,21 @@ class StartNexusLauncherTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 1)
         self.assertIn("NEXUS STARTUP FAILED", result.stdout)
+        self.assertIn("Codex CLI available", result.stdout)
         self.assertIn("is not available", result.stdout)
+        self.assertNotIn("Control Center started", result.stdout)
+
+    def test_codex_only_on_path_is_rejected_because_nexus_cannot_launch_it(self):
+        with tempfile.TemporaryDirectory() as repo:
+            env = _launcher_env(repo, install_codex=False)
+            command_dir = Path(repo) / "commands"
+            command_dir.mkdir()
+            (command_dir / "codex.cmd").write_text("@exit /b 0\n", encoding="utf-8")
+            env["PATH"] = str(command_dir) + os.pathsep + env.get("PATH", "")
+            result = _run_launcher("-RepoRoot", repo, "-OmniRoutePort", "20999", "-NoBrowser", env=env)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Codex CLI was not found where Nexus launches it", result.stdout)
+        self.assertNotIn("Codex CLI available", result.stdout)
         self.assertNotIn("Control Center started", result.stdout)
 
     def test_launcher_does_not_hardcode_the_repository_path(self):
