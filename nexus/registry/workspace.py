@@ -224,14 +224,18 @@ def get_conversation(conversation_id: str):
         ).fetchone()
 
 
-def authorize_conversation(conversation_id: str, *, chat_session_id: str, model: str) -> None:
+def authorize_conversation(
+    conversation_id: str, *, chat_session_id: str, model: str,
+    cost_confirmed_model: str | None = None,
+) -> None:
     now = _now()
     with get_connection() as connection:
         connection.execute(
             """UPDATE workspace_maestro_conversations
-               SET chat_session_id = ?, model = ?, planning_authorized_at = ?, updated_at = ?
+               SET chat_session_id = ?, model = ?, planning_authorized_at = ?,
+                   cost_confirmed_model = ?, updated_at = ?
                WHERE id = ?""",
-            (chat_session_id, model, now, now, conversation_id),
+            (chat_session_id, model, now, cost_confirmed_model, now, conversation_id),
         )
 
 

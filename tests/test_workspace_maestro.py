@@ -27,6 +27,9 @@ from nexus.workspace import maestro, maestro_plan, service
 
 FREE = {"id": "free/model", "cost_status": "free"}
 STANDARD = {"id": "std/model", "cost_status": "standard"}
+LOW = {"id": "low/model", "cost_status": "low_cost"}
+PREMIUM = {"id": "premium/model", "cost_status": "premium"}
+UNKNOWN = {"id": "unknown/model", "cost_status": "unknown"}
 MODELS = [FREE, STANDARD]
 
 
@@ -190,6 +193,50 @@ def test_planning_authorization_requires_cost_confirmation_and_approved_route(en
     assert state["planning"] == {**state["planning"], "authorized": True, "model": "std/model", "cost_status": "standard", "mode": "read-only"}
 
 
+@pytest.mark.parametrize("route", [LOW, PREMIUM, UNKNOWN, {"id": "unclassified/model"}])
+def test_only_explicitly_free_route_can_plan_without_cost_consent(env, route):
+    env["catalog"]["models"].append(route)
+    with pytest.raises(DevServiceError) as blocked:
+        maestro.authorize_planning("demo", route["id"], confirm_cost=False)
+    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED" and env["sent"] == []
+    state = maestro.authorize_planning("demo", route["id"], confirm_cost=True)
+    assert state["planning"]["authorized"] is True
+    assert store.get_conversation(state["conversation_id"])["cost_confirmed_model"] == route["id"]
+
+
+def test_legacy_maestro_paid_session_needs_reconfirmation_without_losing_thread(env):
+    env["catalog"]["models"].append(LOW)
+    original = maestro.authorize_planning("demo", "low/model", confirm_cost=True)
+    conversation_id = original["conversation_id"]
+    session_id = store.get_conversation(conversation_id)["chat_session_id"]
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_maestro_conversations SET cost_confirmed_model=NULL WHERE id=?", (conversation_id,))
+    assert maestro.conversation_state("demo")["planning"]["authorized"] is False
+    with pytest.raises(DevServiceError) as blocked:
+        maestro.send_message("demo", "continue")
+    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED" and env["sent"] == []
+    restored = maestro.authorize_planning("demo", "low/model", confirm_cost=True)
+    assert store.get_conversation(conversation_id)["chat_session_id"] == session_id
+    assert restored["planning"]["authorized"] is True
+    maestro.send_message("demo", "continue")
+    assert len(env["sent"]) == 1
+
+
+def test_legacy_maestro_table_migrates_without_inventing_cost_consent(env):
+    env["catalog"]["models"].append(LOW)
+    original = maestro.authorize_planning("demo", "low/model", confirm_cost=True)
+    conversation_id = original["conversation_id"]
+    with database.get_connection() as connection:
+        connection.execute("ALTER TABLE workspace_maestro_conversations DROP COLUMN cost_confirmed_model")
+    database.initialize_database()
+    record = store.get_conversation(conversation_id)
+    assert record["model"] == "low/model" and record["cost_confirmed_model"] is None
+    assert maestro.conversation_state("demo")["planning"]["authorized"] is False
+    with pytest.raises(DevServiceError) as blocked:
+        maestro.send_message("demo", "continue")
+    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED" and env["sent"] == []
+
+
 def test_llm_conversation_persists_plans_corrections_and_survives_restart(env):
     maestro.authorize_planning("demo", "free/model", confirm_cost=False)
     state = _ask("Implemente multiply.")
@@ -324,6 +371,100 @@ def test_explicit_model_change_at_approval_is_recorded_not_silent(env):
     assert choice == {"model": "std/model", "cost_status": "standard", "recommended": "free/model", "changed_by_user": True}
 
 
+def test_low_cost_plan_needs_consent_and_legacy_approval_cannot_launch(env):
+    env["catalog"]["models"].append(LOW)
+    plan = _llm_plan(env, SIMPLE)
+    with pytest.raises(DevServiceError) as unpaid:
+        service.approve_plan(plan["plan_id"], agent_models={"impl": "low/model"}, max_turns_per_agent=2,
+                             mission_timeout_seconds=600, confirm_costs=False)
+    assert unpaid.value.code == "COST_CONFIRMATION_REQUIRED"
+    result = service.approve_plan(plan["plan_id"], agent_models={"impl": "low/model"}, max_turns_per_agent=2,
+                                  mission_timeout_seconds=600, confirm_costs=True)
+    pane = result["panes"][0]
+    assert result["plan"]["approval"]["cost_confirmed_for"] == ["low/model"]
+    assert pane["brief"]["authorization"]["applies"] is True
+    with database.get_connection() as connection:
+        approval = result["plan"]["approval"]
+        approval["cost_confirmed_for"] = []  # persisted by the old low_cost policy
+        connection.execute("UPDATE workspace_plans SET approval_json=? WHERE id=?", (json.dumps(approval), plan["plan_id"]))
+    assert service.get_pane(pane["pane_id"])["brief"]["authorization"]["applies"] is False
+    with pytest.raises(DevServiceError) as blocked:
+        service.send_pane_message(pane["pane_id"], "continue", confirm_model="low/model")
+    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED" and env["dev_turns"] == []
+    service.send_pane_message(pane["pane_id"], "continue", confirm_model="low/model", confirm_cost=True)
+    assert len(env["dev_turns"]) == 1
+
+
+def test_confirmed_ids_cover_same_model_twice_but_not_different_model(env):
+    env["catalog"]["models"].extend([LOW, PREMIUM])
+    plan = _llm_plan(env, MULTI)
+    choices = {"api": "low/model", "ui": "low/model", "qa": "free/model"}
+    with pytest.raises(DevServiceError) as blocked:
+        service.approve_plan(plan["plan_id"], agent_models=choices, max_turns_per_agent=2,
+                             mission_timeout_seconds=600, confirm_costs=False)
+    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED"
+    result = service.approve_plan(plan["plan_id"], agent_models=choices, max_turns_per_agent=2,
+                                  mission_timeout_seconds=600, confirm_costs=True)
+    assert result["plan"]["approval"]["cost_confirmed_for"] == ["low/model"]
+    ui = next(pane for pane in result["panes"] if pane["plan_agent_key"] == "ui")
+    assert ui["brief"]["authorization"]["applies"] is True
+    api = next(pane for pane in result["panes"] if pane["plan_agent_key"] == "api")
+    service.update_pane(api["pane_id"], model="premium/model")
+    assert service.get_pane(api["pane_id"])["brief"]["authorization"]["applies"] is False
+    with pytest.raises(DevServiceError) as unpaid:
+        service.send_pane_message(api["pane_id"], "continue", confirm_model="premium/model")
+    assert unpaid.value.code == "COST_CONFIRMATION_REQUIRED"
+
+
+def test_two_distinct_paid_models_record_distinct_ids(env):
+    env["catalog"]["models"].extend([LOW, PREMIUM])
+    plan = _llm_plan(env, MULTI)
+    choices = {"api": "low/model", "ui": "premium/model", "qa": "free/model"}
+    result = service.approve_plan(plan["plan_id"], agent_models=choices, max_turns_per_agent=1,
+                                  mission_timeout_seconds=900, confirm_costs=True)
+    assert result["plan"]["approval"]["cost_confirmed_for"] == ["low/model", "premium/model"]
+    assert all(pane["brief"]["authorization"]["applies"] for pane in result["panes"])
+
+
+def test_paid_plan_does_not_accept_a_different_persisted_model_id(env):
+    env["catalog"]["models"].append(LOW)
+    plan = _llm_plan(env, SIMPLE)
+    result = service.approve_plan(plan["plan_id"], agent_models={"impl": "low/model"}, max_turns_per_agent=1,
+                                  mission_timeout_seconds=300, confirm_costs=True)
+    pane_id = result["panes"][0]["pane_id"]
+    approval = result["plan"]["approval"]
+    approval["cost_confirmed_for"] = ["std/model"]
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plans SET approval_json=? WHERE id=?", (json.dumps(approval), plan["plan_id"]))
+    assert service.get_pane(pane_id)["brief"]["authorization"]["applies"] is False
+    with pytest.raises(DevServiceError) as blocked:
+        service.send_pane_message(pane_id, "work", confirm_model="low/model")
+    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED" and env["dev_turns"] == []
+
+
+def test_direct_api_requires_financial_consent_separately_for_paid_pane(env, monkeypatch):
+    env["catalog"]["models"].append(LOW)
+    pane = service.create_pane("demo", role="implementer", model="low/model")
+    starts = []
+    monkeypatch.setattr("nexus.dev.mission_runner.start_mission", lambda *args, **kwargs: starts.append((args, kwargs)) or {
+        "mission_id": "SIMULATED", "status": "PENDING",
+    })
+    client = _client()
+    mission_url = f"/api/workspace/panes/{pane['pane_id']}/missions"
+    payload = {"description": "work", "test_profile": "unit", "confirm_model": "low/model"}
+    denied = client.post(mission_url, json=payload)
+    assert denied.status_code == 400 and denied.json()["detail"]["code"] == "COST_CONFIRMATION_REQUIRED"
+    assert starts == []
+    accepted = client.post(mission_url, json={**payload, "confirm_cost": True})
+    assert accepted.status_code == 200 and len(starts) == 1
+    message_url = f"/api/workspace/panes/{pane['pane_id']}/messages"
+    denied = client.post(message_url, json={"text": "explain", "confirm_model": "low/model"})
+    assert denied.status_code == 400 and denied.json()["detail"]["code"] == "COST_CONFIRMATION_REQUIRED"
+    assert env["dev_turns"] == []
+    accepted = client.post(message_url, json={"text": "explain", "confirm_model": "low/model", "confirm_cost": True})
+    assert accepted.status_code == 200 and len(env["dev_turns"]) == 1
+
+
 def test_approval_respects_open_pane_limit(env, monkeypatch):
     monkeypatch.setenv("NEXUS_WORKSPACE_MAX_PANES", "2")
     plan = _llm_plan(env, MULTI)
@@ -430,7 +571,7 @@ def test_messages_are_refused_while_a_mission_runs_and_model_change_applies_to_f
     _finish_dev_turn(env, 0, "olá")
     message = service.get_pane(pane["pane_id"])["messages"][0]
     assert message["model"] == "free/model" and env["dev_turns"][0]["model"] == "free/model"
-    service.send_pane_message(pane["pane_id"], "de novo", confirm_model="std/model")
+    service.send_pane_message(pane["pane_id"], "de novo", confirm_model="std/model", confirm_cost=True)
     assert env["dev_turns"][1]["model"] == "std/model"
 
 

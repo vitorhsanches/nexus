@@ -21,6 +21,7 @@ from nexus.workspace import policy, service
 
 FREE = {"id": "free/model", "cost_status": "free"}
 STANDARD = {"id": "std/model", "cost_status": "standard"}
+LOW = {"id": "low/model", "cost_status": "low_cost"}
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -95,6 +96,7 @@ def test_policy_never_suggests_a_paid_route_without_flagging_cost_authorization(
     assert proposal["panes"][0]["cost_authorization_required"] is True
     empty = policy.propose("implemente algo", [])
     assert empty["panes"][0]["model"] is None
+    assert policy.suggest_model([LOW, STANDARD])["model"] is None
 
 
 # ── Panes: real sessions, isolation, persistence ────────────────────────
@@ -205,7 +207,10 @@ def test_pane_mission_uses_pane_session_and_requires_exact_model_confirmation(ws
         service.start_pane_mission(pane["pane_id"], "do it", confirm_model="free/model", test_profile="unit")
     assert unconfirmed.value.code == "MODEL_NOT_CONFIRMED" and calls == []
 
-    result = service.start_pane_mission(pane["pane_id"], "  do it  ", confirm_model="std/model", test_profile="unit")
+    with pytest.raises(DevServiceError) as unpaid:
+        service.start_pane_mission(pane["pane_id"], "do it", confirm_model="std/model", test_profile="unit")
+    assert unpaid.value.code == "COST_CONFIRMATION_REQUIRED" and calls == []
+    result = service.start_pane_mission(pane["pane_id"], "  do it  ", confirm_model="std/model", confirm_cost=True, test_profile="unit")
     session_id, description, kwargs = calls[0]
     assert session_id == pane["session"]["session_id"]
     assert description.endswith("do it") and "QA" in description

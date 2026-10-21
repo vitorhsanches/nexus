@@ -38,7 +38,7 @@ function makeDocument() {
 function pane(overrides = {}) {
   return {
     pane_id: "PANE-A", project_id: "demo", plan_id: null, origin: "manual", role: "implementer",
-    role_label: "Implementação", title: "Agente A", model: "free/model",
+    role_label: "Implementação", title: "Agente A", model: "free/model", cost_status: "free",
     layout: { position: 0, collapsed: false, expanded: false, hidden: false },
     session: { session_id: "DEV-A", status: "ACTIVE", branch: "nexus/dev/DEV-A", worktree_path: "C:/wt/DEV-A", base_sha: "abc" },
     mission_count: 0, latest_mission: null, busy: false, brief: null, dependencies: [], messages: [],
@@ -47,7 +47,8 @@ function pane(overrides = {}) {
   };
 }
 
-const MODELS = [{ id: "free/model", cost_status: "free" }, { id: "std/model", cost_status: "standard" }];
+const MODELS = [{ id: "free/model", cost_status: "free" }, { id: "std/model", cost_status: "standard" },
+  { id: "low/model", cost_status: "low_cost" }, { id: "unknown/model", cost_status: "unknown" }];
 
 function plan(overrides = {}) {
   return {
@@ -149,6 +150,63 @@ test("approval payload needs every model and explicit cost confirmation for paid
   assert.deepEqual(ok.payload, { agent_models: { api: "free/model", ui: "std/model" }, max_turns_per_agent: 2, mission_timeout_seconds: 600, confirm_costs: true });
   const free = ws.approvalPayload(p, { models: { api: "free/model", ui: "free/model" }, maxTurns: 1, timeoutMinutes: 15 }, MODELS);
   assert.equal(free.payload.confirm_costs, false);
+  for (const model of ["low/model", "unknown/model"]) {
+    const selection = { api: "free/model", ui: model };
+    assert.match(ws.approvalPayload(p, { models: selection, maxTurns: 2, timeoutMinutes: 10 }, MODELS).error, /Confirme o custo/);
+    assert.equal(ws.approvalPayload(p, { models: selection, maxTurns: 2, timeoutMinutes: 10, confirmCosts: true }, MODELS).payload.confirm_costs, true);
+  }
+});
+
+test("manual non-free model needs separate route and financial consent", () => {
+  const paid = pane({ model: "low/model", cost_status: "low_cost" });
+  const mission = { description: "implement", testProfile: "unit", confirmed: true };
+  assert.match(ws.missionPayload(paid, mission).error, /Confirme o custo/);
+  assert.deepEqual(ws.missionPayload(paid, { ...mission, confirmCost: true }).payload,
+    { description: "implement", test_profile: "unit", confirm_model: "low/model", confirm_cost: true });
+  assert.match(ws.messagePayload(paid, { text: "oi", confirmed: true }).error, /Confirme o custo/);
+  assert.deepEqual(ws.messagePayload(paid, { text: "oi", confirmed: true, confirmCost: true }).payload,
+    { text: "oi", confirm_model: "low/model", confirm_cost: true });
+  assert.match(ws.missionPayload(pane({ model: "unknown/model", cost_status: null }), mission).error, /Confirme o custo/);
+});
+
+test("low-cost planning and agent controls remain unchecked after reload", async () => {
+  const box = { state: stateWith([pane({ model: "low/model", cost_status: "low_cost" })]),
+    maestro: maestroState([], { planning: { authorized: false, model: null, cost_status: null, mode: "read-only" } }) };
+  for (let reload = 0; reload < 2; reload++) {
+    const { app, doc } = harness(baseRoutes(box));
+    await app.init();
+    const planning = doc.byId["ws-maestro-planning"];
+    const select = planning.all().find((node) => node.tagName === "SELECT");
+    select.value = "low/model";
+    await select.dispatch("change");
+    const cost = doc.byId["ws-maestro-planning"].all().find((node) => node.className === "ws-check");
+    assert.equal(cost.hidden, false);
+    assert.match(cost.text(), /low\/model.*baixo custo.*apenas para planejar/);
+    assert.equal(cost.children[0].checked, false);
+    const labels = doc.byId["ws-grid"].all().filter((node) => node.className === "ws-check" && !node.hidden);
+    assert.ok(labels.some((node) => /Confirmo o uso de low\/model/.test(node.text())));
+    assert.ok(labels.some((node) => /Autorizo o custo de low\/model/.test(node.text())));
+    assert.ok(labels.every((node) => node.children[0].checked === false));
+  }
+});
+
+test("changing a plan model clears the prior cost checkbox", async () => {
+  const box = { state: stateWith([]), maestro: maestroState([
+    { message_id: "m", author: "maestro", text: "Plano", status: "COMPLETED", plan: plan() },
+  ]) };
+  const { app, doc } = harness(baseRoutes(box));
+  await app.init();
+  let log = doc.byId["ws-maestro-log"];
+  let cost = log.all().find((node) => node.className === "ws-check" && /modelos não gratuitos/.test(node.text()));
+  cost.children[0].checked = true;
+  await cost.children[0].dispatch("change");
+  const select = log.all().find((node) => node.getAttribute("aria-label") === "Modelo de Tela");
+  select.value = "low/model";
+  await select.dispatch("change");
+  log = doc.byId["ws-maestro-log"];
+  cost = log.all().find((node) => node.className === "ws-check" && /modelos não gratuitos/.test(node.text()));
+  assert.match(cost.text(), /low\/model/);
+  assert.equal(cost.children[0].checked, false);
 });
 
 test("untrusted text is never rendered as HTML and no apply/merge/delete call exists", () => {
@@ -338,7 +396,7 @@ test("a transient model-discovery failure is retried on refresh so plans become 
   assert.equal(attempts, 3);
   assert.doesNotMatch(doc.byId["ws-gates"].text(), /unavailable/);
   const select = doc.byId["ws-maestro-log"].all().find((node) => node.tagName === "SELECT" && /Modelo de API/.test(node.getAttribute("aria-label") || ""));
-  assert.equal(select.children.length, 3);
+  assert.equal(select.children.length, MODELS.length + 1);
 });
 
 function approvedPlan(overrides = {}) {
