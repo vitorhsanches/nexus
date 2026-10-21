@@ -30,7 +30,7 @@ from nexus.dev.service import DevServiceError
 from nexus.registry import workspace as store
 from nexus.workspace import maestro_plan, policy
 
-FREE_COSTS = frozenset({"free", "low_cost"})
+FREE_COSTS = frozenset({"free"})
 PENDING_TURN_STATUSES = frozenset({"PENDING", "RUNNING"})
 
 
@@ -81,13 +81,21 @@ def authorize_planning(project_id: str, model: str, *, confirm_cost: bool) -> di
             http_status=400,
         )
     conversation = _conversation(project_id)
-    try:
-        # Chat's own catalog never knows prices; the confirmation above is
-        # what authorizes an unknown/standard cost route for planning.
-        session = chat_service.create_session(project_id, model, allow_unknown_cost=True)
-    except chat_service.ChatError as error:
-        raise _chat_error(error) from error
-    store.authorize_conversation(conversation["id"], chat_session_id=session["session_id"], model=model)
+    if conversation["chat_session_id"] and conversation["model"] == model:
+        # Reconfirmation of a legacy route retains the existing Chat thread.
+        session_id = conversation["chat_session_id"]
+    else:
+        try:
+            # Chat's own catalog never knows prices; the confirmation above
+            # authorizes the exact non-free route for planning only.
+            session = chat_service.create_session(project_id, model, allow_unknown_cost=True)
+        except chat_service.ChatError as error:
+            raise _chat_error(error) from error
+        session_id = session["session_id"]
+    store.authorize_conversation(
+        conversation["id"], chat_session_id=session_id, model=model,
+        cost_confirmed_model=model if row.get("cost_status") != "free" and confirm_cost else None,
+    )
     return conversation_state(project_id)
 
 
@@ -105,6 +113,18 @@ def send_message(project_id: str, text: str) -> dict:
         raise DevServiceError("MAESTRO_BUSY", "The Maestro is still answering the previous message.", http_status=409)
 
     catalog = _catalog()
+    selected = next((item for item in catalog["models"] if item["id"] == conversation["model"]), None)
+    if conversation["chat_session_id"] and (
+        selected is None or (
+            selected.get("cost_status") != "free"
+            and conversation["cost_confirmed_model"] != conversation["model"]
+        )
+    ):
+        raise DevServiceError(
+            "COST_CONFIRMATION_REQUIRED",
+            "Reauthorize this exact planning model with explicit cost confirmation before another turn.",
+            http_status=403,
+        )
     limit = policy.max_auto_panes()
     # The user message is stored first (PENDING); every path below finishes
     # it through one atomic _answer(). An interruption anywhere in between
@@ -272,7 +292,10 @@ def conversation_state(project_id: str) -> dict:
         "conversation_id": conversation["id"],
         "project_id": project_id,
         "planning": {
-            "authorized": bool(conversation["chat_session_id"]),
+            "authorized": bool(conversation["chat_session_id"]) and model_row is not None and (
+                model_row.get("cost_status") == "free"
+                or conversation["cost_confirmed_model"] == conversation["model"]
+            ),
             "model": conversation["model"],
             "cost_status": (model_row or {}).get("cost_status") if conversation["model"] else None,
             "model_available": model_row is not None if conversation["model"] else None,

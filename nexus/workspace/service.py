@@ -15,8 +15,8 @@ Invariants:
   enforces it in the database as well.
 * A pane's model only applies to missions started after the change; an
   active mission keeps the route it was started with.
-* Every mission needs the caller to re-confirm the pane's exact route, so
-  a cost-bearing route never runs implicitly.
+* Every unplanned paid use needs the exact route and explicit cost consent;
+  a plan covers only its persisted, approved model IDs and turn limits.
 * Hiding a pane is layout state; its session and history are kept.
 """
 
@@ -146,12 +146,33 @@ def _plan_authorized_uses(pane_id: str) -> int:
     )
 
 
+def _plan_cost_confirmed(row, model: str) -> bool:
+    """Only an approval for this pane's exact model can cover charged uses."""
+    if not row["plan_id"] or not row["plan_agent_key"]:
+        return False
+    plan = store.get_plan(row["plan_id"])
+    if plan is None or plan["status"] not in {"APPROVED", "APPROVED_PARTIAL"} or not plan["approval_json"]:
+        return False
+    try:
+        approval = json.loads(plan["approval_json"])
+        choice = (approval.get("agent_models") or {}).get(row["plan_agent_key"]) or {}
+        confirmed = approval.get("cost_confirmed_for") or []
+        return isinstance(confirmed, list) and choice.get("model") == model and model in confirmed
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _brief_view(row) -> dict | None:
     brief = _brief(row)
     if brief is None:
         return None
     authorization = brief.get("authorization") or {}
     used = _plan_authorized_uses(row["id"])
+    model = row["model"]
+    approved = next((item for item in _catalog()["models"] if item["id"] == model), None) if model else None
+    cost_authorized = approved is not None and (
+        approved.get("cost_status") == "free" or _plan_cost_confirmed(row, model)
+    )
     return {
         "task": brief.get("task"),
         "acceptance_criteria": brief.get("acceptance_criteria") or [],
@@ -163,7 +184,7 @@ def _brief_view(row) -> dict | None:
             "max_turns": authorization.get("max_turns"),
             "turns_used": used,
             "mission_timeout_seconds": authorization.get("mission_timeout_seconds"),
-            "applies": bool(authorization) and authorization.get("model") == row["model"]
+            "applies": bool(authorization) and authorization.get("model") == model and cost_authorized
             and used < int(authorization.get("max_turns") or 0),
         },
     }
@@ -336,7 +357,7 @@ def approve_plan(
             "recommended": agent.get("model"),
             "changed_by_user": model != agent.get("model"),
         }
-    paid = sorted({item["model"] for item in chosen.values() if item["cost_status"] not in {"free", "low_cost"}})
+    paid = sorted({item["model"] for item in chosen.values() if item["cost_status"] != "free"})
     if paid and not confirm_costs:
         raise DevServiceError(
             "COST_CONFIRMATION_REQUIRED",
@@ -390,7 +411,7 @@ def approve_plan(
         created.append(pane)
     status = "APPROVED" if not approval["errors"] else ("APPROVED_PARTIAL" if created else "APPROVAL_FAILED")
     store.finish_plan_approval(plan_id, status, approval)
-    return {"plan": plan_view(store.get_plan(plan_id)), "panes": created}
+    return {"plan": plan_view(store.get_plan(plan_id)), "panes": [get_pane(pane["pane_id"]) for pane in created]}
 
 
 def list_panes(project_id: str, *, include_hidden: bool = False) -> list[dict]:
@@ -434,13 +455,14 @@ def update_pane(pane_id: str, *, title: str | None = None, model: str | None = N
     return get_pane(pane_id)
 
 
-def _authorize_use(row, confirm_model: str | None) -> bool:
+def _authorize_use(row, confirm_model: str | None, confirm_cost: bool = False) -> bool:
     """Return True when the plan authorization covers this use.
 
     Otherwise the caller must re-confirm the pane's exact current model.
     """
     if not row["model"]:
         raise DevServiceError("MODEL_REQUIRED", "Choose a model for this pane first.", http_status=400)
+    current = _require_approved_model(row["model"])
     brief = _brief_view(row)
     if brief and brief["authorization"]["applies"] and confirm_model in (None, row["model"]):
         return True
@@ -448,6 +470,12 @@ def _authorize_use(row, confirm_model: str | None) -> bool:
         raise DevServiceError(
             "MODEL_NOT_CONFIRMED",
             "Confirm the pane's exact current model (no plan authorization covers this use).",
+            http_status=400,
+        )
+    if current.get("cost_status") != "free" and not confirm_cost:
+        raise DevServiceError(
+            "COST_CONFIRMATION_REQUIRED",
+            f"Confirm the cost of {row['model']} explicitly for this use.",
             http_status=400,
         )
     return False
@@ -482,7 +510,7 @@ def _pane_is_executing(pane_row) -> bool:
     return dev_sessions.get_active_turn_for_session(pane_row["dev_session_id"]) is not None
 
 
-def _check_execution_gates(row, confirm_model: str | None) -> bool:
+def _check_execution_gates(row, confirm_model: str | None, confirm_cost: bool = False) -> bool:
     """Every write-capable action (mission or direct message) passes here.
 
     1. Dependencies of a planned agent must be READY_FOR_REVIEW.
@@ -511,12 +539,14 @@ def _check_execution_gates(row, confirm_model: str | None) -> bool:
                 "Agents of this plan run one at a time; wait for: " + ", ".join(busy),
                 http_status=409,
             )
-    return _authorize_use(row, confirm_model)
+    return _authorize_use(row, confirm_model, confirm_cost)
 
 
-def _run_gated(row, confirm_model: str | None, start: Callable[[bool], dict]) -> tuple[bool, dict]:
+def _run_gated(
+    row, confirm_model: str | None, start: Callable[[bool], dict], *, confirm_cost: bool = False,
+) -> tuple[bool, dict]:
     with _execution_lock(row):
-        by_plan = _check_execution_gates(row, confirm_model)
+        by_plan = _check_execution_gates(row, confirm_model, confirm_cost)
         return by_plan, start(by_plan)
 
 
@@ -538,6 +568,7 @@ def start_pane_mission(
     confirm_model: str | None,
     test_profile: str,
     timeout_seconds: int | None = None,
+    confirm_cost: bool = False,
 ) -> dict:
     """Start one mission in the pane's own session with the pane's model.
 
@@ -582,7 +613,7 @@ def start_pane_mission(
             timeout_seconds=effective,
         )
 
-    by_plan, mission = _run_gated(row, confirm_model, start)
+    by_plan, mission = _run_gated(row, confirm_model, start, confirm_cost=confirm_cost)
     store.record_event(
         pane_id,
         "MISSION_STARTED",
@@ -602,7 +633,9 @@ def _snapshot(dev_session_id: str) -> list:
     return sorted([file["path"], file["status"], file.get("content_sha256")] for file in diff.get("files", []))
 
 
-def send_pane_message(pane_id: str, text: str, *, confirm_model: str | None = None) -> dict:
+def send_pane_message(
+    pane_id: str, text: str, *, confirm_model: str | None = None, confirm_cost: bool = False,
+) -> dict:
     """Send one direct message to an agent as a real Development turn.
 
     The turn runs in the pane's own worktree (Development Mode rules apply:
@@ -628,7 +661,7 @@ def send_pane_message(pane_id: str, text: str, *, confirm_model: str | None = No
             store.finish_pane_message(holder["message_id"], outcome="failed", changes_after=None)
             raise
 
-    by_plan, turn = _run_gated(row, confirm_model, start)
+    by_plan, turn = _run_gated(row, confirm_model, start, confirm_cost=confirm_cost)
     message_id = holder["message_id"]
     store.set_pane_message_turn(message_id, turn["turn_id"])
     store.record_event(pane_id, "MESSAGE_SENT", {"message_id": message_id, "model": row["model"], "authorized_by_plan": by_plan})

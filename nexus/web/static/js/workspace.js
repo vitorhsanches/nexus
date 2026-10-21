@@ -39,7 +39,7 @@
     }
   }
 
-  function isFree(costStatus) { return costStatus === "free" || costStatus === "low_cost"; }
+  function isFree(costStatus) { return costStatus === "free"; }
 
   function paneStatus(pane) {
     if (!pane.session) return { label: "Sessão ausente", tone: "bad" };
@@ -93,9 +93,12 @@
     if (!form.testProfile) return { error: "Escolha um perfil de teste confiável." };
     const authorized = planAuthorized(pane);
     if (!authorized && !form.confirmed) return { error: `Confirme o uso de ${pane.model}.` };
+    if (!authorized && !isFree(form.costStatus || pane.cost_status) && !form.confirmCost)
+      return { error: `Confirme o custo de ${pane.model}.` };
     const payload = { test_profile: form.testProfile };
     if (description) payload.description = description;
     if (!authorized) payload.confirm_model = pane.model;
+    if (!authorized && !isFree(form.costStatus || pane.cost_status)) payload.confirm_cost = true;
     return { payload };
   }
 
@@ -105,7 +108,10 @@
     if (!pane.model) return { error: "Escolha um modelo para este agente." };
     if (planAuthorized(pane)) return { payload: { text } };
     if (!form.confirmed) return { error: `Confirme o uso de ${pane.model}.` };
-    return { payload: { text, confirm_model: pane.model } };
+    if (!isFree(form.costStatus || pane.cost_status) && !form.confirmCost)
+      return { error: `Confirme o custo de ${pane.model}.` };
+    return { payload: { text, confirm_model: pane.model,
+      ...(!isFree(form.costStatus || pane.cost_status) ? { confirm_cost: true } : {}) } };
   }
 
   function canStartMission(pane, state) {
@@ -316,7 +322,7 @@
       if (editable) {
         const select = el("select", { attrs: { "aria-label": `Modelo de ${agent.title}` } });
         modelOptions(select, draft.models[agent.key] || "", true);
-        select.addEventListener("change", () => { draft.models[agent.key] = select.value; renderMaestro(); });
+        select.addEventListener("change", () => { draft.models[agent.key] = select.value; draft.confirmCosts = false; renderMaestro(); });
         const recommended = agent.model ? `recomendado: ${agent.model}` : "sem recomendação gratuita";
         row.appendChild(el("div", { className: "ws-agent-model" }, select,
           chip(draft.models[agent.key] ? costLabel(modelCost(draft.models[agent.key])) : recommended,
@@ -469,11 +475,14 @@
       input.value = draft.message || "";
       input.addEventListener("input", () => { state.drafts[pane.pane_id] = { ...state.drafts[pane.pane_id], message: input.value }; });
       const authorized = planAuthorized(pane);
-      const confirm = checkbox(pane.model ? `Confirmo o uso de ${pane.model} (${costLabel(modelCost(pane.model))})` : "Escolha um modelo em Configurar", false, () => {});
+      const confirm = checkbox(pane.model ? `Confirmo o uso de ${pane.model}` : "Escolha um modelo em Configurar", false, () => {});
       confirm.label.hidden = authorized || !pane.model;
+      const cost = checkbox(`Autorizo o custo de ${pane.model} (${costLabel(modelCost(pane.model))})`, false, () => {});
+      cost.label.hidden = authorized || !pane.model || isFree(modelCost(pane.model));
       const disabled = !(state.workspace && state.workspace.execution_enabled) || pane.busy || !pane.model;
       const send = button("Enviar", async () => {
-        const result = messagePayload(pane, { text: input.value, confirmed: confirm.input.checked });
+        const result = messagePayload(pane, { text: input.value, confirmed: confirm.input.checked,
+          confirmCost: cost.input.checked, costStatus: modelCost(pane.model) });
         if (result.error) { showError(result.error); return; }
         send.disabled = true;
         try {
@@ -486,7 +495,7 @@
           send.disabled = false;
         }
       }, { className: "ws-button-small", disabled });
-      section.append(list, el("div", { className: "ws-pane-form" }, input, confirm.label, send),
+      section.append(list, el("div", { className: "ws-pane-form" }, input, confirm.label, cost.label, send),
         el("p", { className: "ws-msg-meta", text: "Mensagens rodam no worktree isolado deste agente. Se alterarem código, a mudança fica marcada para verificação." }));
       return section;
     }
@@ -506,10 +515,13 @@
       if (state.profiles.length) profile.value = draft.testProfile || state.profiles[0].id;
       profile.addEventListener("change", () => { state.drafts[pane.pane_id] = { ...state.drafts[pane.pane_id], testProfile: profile.value }; });
       const authorized = planAuthorized(pane);
-      const confirm = checkbox(pane.model ? `Confirmo o uso de ${pane.model} (${costLabel(modelCost(pane.model))})` : "Escolha um modelo em Configurar", false, () => {});
+      const confirm = checkbox(pane.model ? `Confirmo o uso de ${pane.model}` : "Escolha um modelo em Configurar", false, () => {});
       confirm.label.hidden = authorized || !pane.model;
+      const cost = checkbox(`Autorizo o custo de ${pane.model} (${costLabel(modelCost(pane.model))})`, false, () => {});
+      cost.label.hidden = authorized || !pane.model || isFree(modelCost(pane.model));
       const start = button(planned ? "Executar tarefa" : "Iniciar missão", async () => {
-        const result = missionPayload(pane, { description: description.value, testProfile: profile.value, confirmed: confirm.input.checked });
+        const result = missionPayload(pane, { description: description.value, testProfile: profile.value,
+          confirmed: confirm.input.checked, confirmCost: cost.input.checked, costStatus: modelCost(pane.model) });
         if (result.error) { showError(result.error); return; }
         start.disabled = true;
         try {
@@ -522,7 +534,7 @@
           start.disabled = false;
         }
       }, { className: "ws-button-primary", disabled: !canStartMission(pane, state.workspace || {}) || !state.profiles.length });
-      details.appendChild(el("div", { className: "ws-pane-form" }, description, profile, confirm.label, start));
+      details.appendChild(el("div", { className: "ws-pane-form" }, description, profile, confirm.label, cost.label, start));
       return details;
     }
 

@@ -1,7 +1,6 @@
 import sqlite3
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
 STORAGE_DIR = ROOT_DIR / "nexus" / "storage"
 DATABASE_PATH = STORAGE_DIR / "nexus.db"
@@ -484,6 +483,7 @@ def initialize_database() -> None:
                 chat_session_id TEXT UNIQUE,
                 model TEXT,
                 planning_authorized_at TEXT,
+                cost_confirmed_model TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (project_id) REFERENCES projects(id)
@@ -530,6 +530,13 @@ def initialize_database() -> None:
                 ON workspace_pane_messages(pane_id, created_at);
             """
         )
+        conversation_cols = {row["name"] for row in connection.execute(
+            "PRAGMA table_info(workspace_maestro_conversations)"
+        )}
+        if "cost_confirmed_model" not in conversation_cols:
+            connection.execute(
+                "ALTER TABLE workspace_maestro_conversations ADD COLUMN cost_confirmed_model TEXT"
+            )
         plan_cols = [r[1] for r in connection.execute("PRAGMA table_info(workspace_plans)").fetchall()]
         for column, ddl in (
             ("source", "TEXT NOT NULL DEFAULT 'deterministic'"),

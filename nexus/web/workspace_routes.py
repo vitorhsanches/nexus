@@ -48,6 +48,7 @@ class PaneMissionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     description: str | None = Field(default=None, max_length=100_000)
     confirm_model: str | None = Field(default=None, min_length=1, max_length=128)
+    confirm_cost: bool = False
     test_profile: str = Field(min_length=1, max_length=128)
     timeout_seconds: int | None = Field(default=None, ge=5, le=3600)
 
@@ -56,6 +57,7 @@ class PaneMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=100_000)
     confirm_model: str | None = Field(default=None, min_length=1, max_length=128)
+    confirm_cost: bool = False
 
 
 class MaestroAuthorizeRequest(BaseModel):
@@ -165,6 +167,7 @@ def start_pane_mission(pane_id: str, request: PaneMissionRequest):
         pane_id,
         request.description,
         confirm_model=request.confirm_model,
+        confirm_cost=request.confirm_cost,
         test_profile=request.test_profile,
         timeout_seconds=request.timeout_seconds,
     )
@@ -174,7 +177,10 @@ def start_pane_mission(pane_id: str, request: PaneMissionRequest):
 def send_pane_message(pane_id: str, request: PaneMessageRequest):
     from nexus.workspace import service
 
-    return _call(service.send_pane_message, pane_id, request.text, confirm_model=request.confirm_model)
+    return _call(
+        service.send_pane_message, pane_id, request.text,
+        confirm_model=request.confirm_model, confirm_cost=request.confirm_cost,
+    )
 
 
 @router.get("/maestro")
