@@ -24,6 +24,7 @@ from nexus.registry.database import initialize_database
 from nexus.registry.projects import sync_projects
 from nexus.web import services
 from nexus.web.routes import router
+from nexus.web.workspace_routes import router as workspace_router
 
 try:
     from importlib.metadata import version
@@ -115,7 +116,7 @@ def create_app():
         # requests from a different origin before any route of either is
         # reached -- the same loopback-authority + same-origin check,
         # reused rather than re-implemented for /api/dev/.
-        if request.url.path.startswith("/api/chat/") or request.url.path.startswith("/api/dev/"):
+        if request.url.path.startswith(("/api/chat/", "/api/dev/", "/api/workspace/")):
             hosts = request.headers.getlist("host")
             authority = _loopback_authority(hosts[0]) if len(hosts) == 1 else None
             origins = request.headers.getlist("origin")
@@ -131,6 +132,7 @@ def create_app():
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(router)
+    app.include_router(workspace_router)
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     async def board(request: Request):
@@ -150,6 +152,15 @@ def create_app():
         return templates.TemplateResponse(
             request=request,
             name="nexus.html",
+            context={"app_version": APP_VERSION, "asset_version": _static_asset_version()},
+        )
+
+    @app.get("/nexus/workspace", response_class=HTMLResponse, include_in_schema=False)
+    async def workspace(request: Request):
+        """Render the multi-pane agent workspace (P1)."""
+        return templates.TemplateResponse(
+            request=request,
+            name="workspace.html",
             context={"app_version": APP_VERSION, "asset_version": _static_asset_version()},
         )
 

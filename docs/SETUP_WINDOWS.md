@@ -99,3 +99,20 @@ the operator already set `NEXUS_DEV_EXECUTION_ENABLED=1` in that process
 environment. Model selection in Development Mode is limited to routes that are
 both advertised live by OmniRoute and approved in Nexus for coding. Free and
 low-cost routes are listed first; Nexus never substitutes a different route.
+
+## Agent workspace (P1)
+
+Open `http://127.0.0.1:8000/nexus/workspace` for the multi-pane workspace. The
+existing Control Center stays at `/nexus` (linked as "Avançado").
+
+- The Maestro turns a task into an auditable pane proposal
+  (`workspace-policy/1`, deterministic, no model call). Panes are created only
+  when you click "Criar".
+- Every pane owns one real Development session and therefore one isolated
+  worktree. Hiding a pane keeps its session and history.
+- A pane's model applies to future missions only, and every mission must
+  re-confirm the exact route. When no free route exists the Maestro does not
+  pre-select a model.
+- Limits: `NEXUS_WORKSPACE_MAX_PANES` (open panes per project, default 6, max 8)
+  and `NEXUS_WORKSPACE_MAX_AUTO_PANES` (panes per proposal, default 3, max 4).
+- Apply, merge and push remain manual, in the Development view.
