@@ -418,5 +418,56 @@ def initialize_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_dev_mission_test_runs_mission
                 ON dev_mission_test_runs(mission_id, started_at);
+
+            -- Multi-pane workspace (P1). A plan is one auditable Maestro
+            -- proposal for a task; a pane is one agent identity bound to
+            -- exactly one Development session (and therefore one isolated
+            -- worktree). Hiding a pane is layout state only: the session,
+            -- its turns and missions are never deleted with it.
+            CREATE TABLE IF NOT EXISTS workspace_plans (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                task_text TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                complexity TEXT NOT NULL,
+                proposal_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_plans_project
+                ON workspace_plans(project_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS workspace_panes (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                dev_session_id TEXT NOT NULL UNIQUE,
+                plan_id TEXT,
+                origin TEXT NOT NULL,
+                role TEXT NOT NULL,
+                title TEXT NOT NULL,
+                model TEXT,
+                position INTEGER NOT NULL DEFAULT 0,
+                collapsed INTEGER NOT NULL DEFAULT 0,
+                expanded INTEGER NOT NULL DEFAULT 0,
+                hidden INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id),
+                FOREIGN KEY (dev_session_id) REFERENCES dev_sessions(id),
+                FOREIGN KEY (plan_id) REFERENCES workspace_plans(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_panes_project
+                ON workspace_panes(project_id, hidden, position);
+
+            CREATE TABLE IF NOT EXISTS workspace_pane_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pane_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                detail_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pane_id) REFERENCES workspace_panes(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_pane_events_pane
+                ON workspace_pane_events(pane_id, id);
             """
         )

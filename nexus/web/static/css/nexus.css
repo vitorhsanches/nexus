@@ -1312,3 +1312,17 @@ html, body {
 .run-btn:focus-visible {
   box-shadow: var(--focus-ring);
 }
+
+/* Entry point to the multi-pane agent workspace (P1). */
+.workspace-entry {
+  display: block;
+  margin: 0 var(--space-4, 12px) var(--space-4, 12px);
+  padding: 8px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  color: var(--accent-hl);
+  font-size: 12px;
+  text-decoration: none;
+}
+.workspace-entry:hover,
+.workspace-entry:focus-visible { background: var(--bg-2); outline: none; }
