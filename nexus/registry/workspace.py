@@ -268,32 +268,73 @@ def set_message_turn(message_id: str, chat_turn_id: str) -> None:
         )
 
 
-def claim_pending_message(message_id: str) -> bool:
-    """PENDING -> PROCESSING exactly once, so a plan is never created twice."""
-    with get_connection() as connection:
-        cursor = connection.execute(
-            """UPDATE workspace_maestro_messages SET status = 'PROCESSING', updated_at = ?
-               WHERE id = ? AND status = 'PENDING'""",
-            (_now(), message_id),
-        )
-        return cursor.rowcount == 1
-
-
-def finish_message(
-    message_id: str,
+def record_maestro_answer(
+    user_message_id: str,
     *,
-    status: str,
-    plan_id: str | None = None,
+    project_id: str,
+    task_text: str,
+    plan: dict,
+    policy_version: str,
+    reply: str,
+    user_status: str,
     error_code: str | None = None,
     error_message: str | None = None,
-) -> None:
+) -> str | None:
+    """Atomically store the plan, the Maestro reply and the user message's
+    final state -- all or nothing, exactly once per user message.
+
+    Idempotent: a message that is already final is left untouched. A plan
+    already stored for this message (left by an interrupted older
+    transition sequence) is reused, and its missing reply is repaired,
+    instead of creating a duplicate. Returns the plan id, or None when the
+    message no longer exists.
+    """
+    now = _now()
     with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        message = connection.execute(
+            "SELECT * FROM workspace_maestro_messages WHERE id = ?", (user_message_id,)
+        ).fetchone()
+        if message is None:
+            return None
+        if message["status"] not in {"PENDING", "PROCESSING"}:
+            return message["plan_id"]
+        existing = connection.execute(
+            "SELECT id FROM workspace_plans WHERE message_id = ?", (user_message_id,)
+        ).fetchone()
+        if existing is not None:
+            plan_id = existing["id"]
+        else:
+            plan_id = f"WSPLAN-{uuid4().hex[:8].upper()}"
+            connection.execute(
+                "UPDATE workspace_plans SET status = 'SUPERSEDED' WHERE conversation_id = ? AND status = 'PROPOSED'",
+                (message["conversation_id"],),
+            )
+            connection.execute(
+                """INSERT INTO workspace_plans
+                   (id, project_id, task_text, policy_version, complexity, proposal_json, created_at,
+                    source, conversation_id, message_id, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PROPOSED')""",
+                (plan_id, project_id, task_text, policy_version, plan["complexity"], json.dumps(plan), now,
+                 plan["source"], message["conversation_id"], user_message_id),
+            )
+        has_reply = connection.execute(
+            "SELECT 1 FROM workspace_maestro_messages WHERE author = 'maestro' AND plan_id = ?", (plan_id,)
+        ).fetchone()
+        if has_reply is None:
+            connection.execute(
+                """INSERT INTO workspace_maestro_messages
+                   (id, conversation_id, author, text, status, plan_id, created_at, updated_at)
+                   VALUES (?, ?, 'maestro', ?, 'COMPLETED', ?, ?, ?)""",
+                (f"MMSG-{uuid4().hex[:10].upper()}", message["conversation_id"], reply, plan_id, now, now),
+            )
         connection.execute(
             """UPDATE workspace_maestro_messages
-               SET status = ?, plan_id = COALESCE(?, plan_id), error_code = ?, error_message = ?, updated_at = ?
+               SET status = ?, plan_id = ?, error_code = ?, error_message = ?, updated_at = ?
                WHERE id = ?""",
-            (status, plan_id, error_code, error_message, _now(), message_id),
+            (user_status, plan_id, error_code, error_message, now, user_message_id),
         )
+    return plan_id
 
 
 def list_messages(conversation_id: str, limit: int = 200) -> list:

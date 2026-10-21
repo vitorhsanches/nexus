@@ -24,6 +24,7 @@ confirmed for planning never authorizes any pane or mission.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 from nexus.dev.service import DevServiceError
 from nexus.registry import workspace as store
@@ -105,14 +106,15 @@ def send_message(project_id: str, text: str) -> dict:
 
     catalog = _catalog()
     limit = policy.max_auto_panes()
+    # The user message is stored first (PENDING); every path below finishes
+    # it through one atomic _answer(). An interruption anywhere in between
+    # is recovered by reconcile() on the next read.
+    message_id = store.add_message(conversation["id"], author="user", text=text, status="PENDING")
     if not conversation["chat_session_id"]:
-        message_id = store.add_message(conversation["id"], author="user", text=text, status="COMPLETED")
         plan = maestro_plan.deterministic(text, models=catalog["models"], limit=limit, reason=None)
-        _store_plan(project_id, conversation["id"], message_id, text, plan,
-                    reply="O planejamento por IA ainda não foi autorizado. Esta é a proposta determinística (palavras-chave, sem IA).")
+        _answer(project_id, message_id, text, plan, reply=NOT_AUTHORIZED_REPLY, user_status="COMPLETED")
         return conversation_state(project_id)
 
-    message_id = store.add_message(conversation["id"], author="user", text=text, status="PENDING")
     previous = _latest_plan_summary(conversation["id"])
     prompt = maestro_plan.build_prompt(
         user_text=text,
@@ -125,10 +127,9 @@ def send_message(project_id: str, text: str) -> dict:
     try:
         turn = chat_service.send_turn(conversation["chat_session_id"], prompt, idempotency_key=message_id)
     except chat_service.ChatError as error:
-        store.finish_message(message_id, status="FAILED", error_code=error.code, error_message=str(error)[:1000])
         plan = maestro_plan.deterministic(text, models=catalog["models"], limit=limit, reason=f"Maestro indisponível ({error.code})")
-        _store_plan(project_id, conversation["id"], message_id, text, plan,
-                    reply="Não consegui falar com o modelo do Maestro. Mostro a proposta determinística como alternativa.")
+        _answer(project_id, message_id, text, plan, reply=UNREACHABLE_REPLY, user_status="FAILED",
+                error_code=error.code, error_message=str(error)[:1000])
         return conversation_state(project_id)
     store.set_message_turn(message_id, turn["turn_id"])
     return conversation_state(project_id)
@@ -143,62 +144,103 @@ def _latest_plan_summary(conversation_id: str) -> str | None:
     return None
 
 
-def _store_plan(project_id: str, conversation_id: str, user_message_id: str, task_text: str, plan: dict, *, reply: str) -> str:
-    plan_id = store.create_plan(
-        project_id,
-        task_text,
+NOT_AUTHORIZED_REPLY = "O planejamento por IA ainda não foi autorizado. Esta é a proposta determinística (palavras-chave, sem IA)."
+UNREACHABLE_REPLY = "Não consegui falar com o modelo do Maestro. Mostro a proposta determinística como alternativa."
+INVALID_REPLY = "A resposta do Maestro não passou na validação e não será usada. Mostro a proposta determinística como alternativa."
+FAILED_REPLY = "O modelo do Maestro falhou nesta mensagem. Mostro a proposta determinística como alternativa."
+INTERRUPTED_REPLY = "O envio desta mensagem ao Maestro foi interrompido. Mostro a proposta determinística como alternativa."
+# A PENDING message without a Chat turn after this long was never sent
+# (the process stopped between storing it and sending it).
+SEND_GRACE_SECONDS = 60
+
+
+def _answer(project_id: str, message_id: str, task_text: str, plan: dict, *, reply: str, user_status: str,
+            error_code: str | None = None, error_message: str | None = None) -> str | None:
+    return store.record_maestro_answer(
+        message_id,
+        project_id=project_id,
+        task_text=task_text,
+        plan=plan,
         policy_version=plan.get("policy_version") or plan["schema_version"],
-        complexity=plan["complexity"],
-        proposal=plan,
-        source=plan["source"],
-        conversation_id=conversation_id,
-        message_id=user_message_id,
+        reply=reply,
+        user_status=user_status,
+        error_code=error_code,
+        error_message=error_message,
     )
-    store.add_message(conversation_id, author="maestro", text=reply, status="COMPLETED", plan_id=plan_id)
-    return plan_id
+
+
+def _age_seconds(created_at: str) -> float:
+    try:
+        created = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return float("inf")
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - created).total_seconds()
 
 
 def reconcile(conversation_id: str) -> None:
-    """Turn finished Maestro Chat turns into validated (or fallback) plans."""
+    """Finish every unanswered user message exactly once.
+
+    Handles a finished Chat turn (validated plan or labelled fallback), a
+    failed/cancelled turn, and interruptions: a message whose turn id was
+    never recorded is re-linked through its idempotency key; one that was
+    never sent at all gets a labelled fallback after SEND_GRACE_SECONDS;
+    one stuck in the legacy PROCESSING state is simply finished again. The
+    final write is a single transaction, so nothing is duplicated.
+    """
     from nexus.registry import chat_sessions
 
+    conversation = store.get_conversation(conversation_id)
     catalog = None
+    limit = policy.max_auto_panes()
     for row in store.list_messages(conversation_id):
-        if row["author"] != "user" or row["status"] != "PENDING" or not row["chat_turn_id"]:
+        if row["author"] != "user" or row["status"] not in {"PENDING", "PROCESSING"}:
             continue
-        turn = chat_sessions.get_turn(row["chat_turn_id"])
-        if turn is None or turn["status"] in PENDING_TURN_STATUSES:
-            continue
+        project_id = conversation["project_id"]
+        turn_id = row["chat_turn_id"]
+        if not turn_id and conversation["chat_session_id"]:
+            found = chat_sessions.get_turn_by_idempotency_key(conversation["chat_session_id"], row["id"])
+            if found is not None:
+                turn_id = found["id"]
+                store.set_message_turn(row["id"], turn_id)
         if catalog is None:
             catalog = _catalog()
+        if not turn_id:
+            if not conversation["chat_session_id"]:
+                plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit, reason=None)
+                _answer(project_id, row["id"], row["text"], plan, reply=NOT_AUTHORIZED_REPLY, user_status="COMPLETED")
+            elif _age_seconds(row["created_at"]) >= SEND_GRACE_SECONDS:
+                plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit,
+                                                  reason="Envio ao Maestro interrompido")
+                _answer(project_id, row["id"], row["text"], plan, reply=INTERRUPTED_REPLY, user_status="FAILED",
+                        error_code="MAESTRO_SEND_INTERRUPTED")
+            continue
+        turn = chat_sessions.get_turn(turn_id)
+        if turn is None or turn["status"] in PENDING_TURN_STATUSES:
+            continue
         if turn["status"] == "COMPLETED" and not catalog["models"] and catalog.get("catalog_error"):
             # Transient discovery failure: retry on a later read instead of
             # rejecting a possibly valid plan.
             continue
-        if not store.claim_pending_message(row["id"]):
-            continue
-        conversation = store.get_conversation(conversation_id)
-        limit = policy.max_auto_panes()
         if turn["status"] == "COMPLETED":
             try:
                 plan = maestro_plan.parse(turn["response_text"] or "", models=catalog["models"], limit=limit)
                 reply = plan["explanation"]
                 if plan["needs_clarification"]:
                     reply = f"{reply}\n\n{plan['needs_clarification']}".strip()
-                store.finish_message(row["id"], status="COMPLETED")
+                _answer(project_id, row["id"], row["text"], plan, reply=reply, user_status="COMPLETED")
             except maestro_plan.PlanValidationError as error:
                 plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit,
                                                   reason=f"Resposta do Maestro inválida: {error}")
-                reply = ("A resposta do Maestro não passou na validação e não será usada. "
-                         "Mostro a proposta determinística como alternativa.")
-                store.finish_message(row["id"], status="COMPLETED", error_code="INVALID_MAESTRO_PLAN", error_message=str(error)[:1000])
+                _answer(project_id, row["id"], row["text"], plan, reply=INVALID_REPLY, user_status="COMPLETED",
+                        error_code="INVALID_MAESTRO_PLAN", error_message=str(error)[:1000])
         else:
             code = turn["error_code"] or turn["status"]
             plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit,
                                               reason=f"Maestro indisponível ({code})")
-            reply = "O modelo do Maestro falhou nesta mensagem. Mostro a proposta determinística como alternativa."
-            store.finish_message(row["id"], status="FAILED", error_code=code, error_message=(turn["error_message"] or "")[:1000])
-        _store_plan(conversation["project_id"], conversation_id, row["id"], row["text"], plan, reply=reply)
+            _answer(project_id, row["id"], row["text"], plan, reply=FAILED_REPLY, user_status="FAILED",
+                    error_code=code, error_message=(turn["error_message"] or "")[:1000])
 
 
 def conversation_state(project_id: str) -> dict:

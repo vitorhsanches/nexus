@@ -23,6 +23,9 @@ Invariants:
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Callable
+from contextlib import contextmanager
 
 from nexus.dev.service import DevServiceError
 from nexus.registry import workspace as store
@@ -121,7 +124,7 @@ def pane_view(row) -> dict:
         },
         "mission_count": len(missions),
         "latest_mission": latest,
-        "busy": bool(latest and latest["status"] in ACTIVE_MISSION_STATUSES),
+        "busy": _pane_is_executing(row),
         "plan_agent_key": row["plan_agent_key"],
         "brief": _brief_view(row),
         "dependencies": _dependency_status(row),
@@ -450,6 +453,73 @@ def _authorize_use(row, confirm_model: str | None) -> bool:
     return False
 
 
+# Serializes "check gates, then start" for panes of the same plan (and for
+# each unplanned pane on its own), so two requests cannot both pass the
+# sequential check before either has registered its mission or turn. The
+# Development executor already enforces one active turn per session and a
+# global turn limit; this only adds the per-plan exclusion on top.
+_gate_locks: dict[str, threading.Lock] = {}
+_gate_locks_guard = threading.Lock()
+
+
+@contextmanager
+def _execution_lock(row):
+    key = f"plan:{row['plan_id']}" if row["plan_id"] else f"pane:{row['id']}"
+    with _gate_locks_guard:
+        lock = _gate_locks.setdefault(key, threading.Lock())
+    with lock:
+        yield
+
+
+def _pane_is_executing(pane_row) -> bool:
+    """A pane executes while its latest mission is active (including the
+    TESTING phase, which has no turn) or while it has an active turn."""
+    from nexus.registry import dev_sessions
+
+    latest = _latest_mission(_missions(pane_row["dev_session_id"]))
+    if latest and latest["status"] in ACTIVE_MISSION_STATUSES:
+        return True
+    return dev_sessions.get_active_turn_for_session(pane_row["dev_session_id"]) is not None
+
+
+def _check_execution_gates(row, confirm_model: str | None) -> bool:
+    """Every write-capable action (mission or direct message) passes here.
+
+    1. Dependencies of a planned agent must be READY_FOR_REVIEW.
+    2. maestro-plan/1 declares sequential execution: no other agent of the
+       same plan may be executing, with or without explicit depends_on.
+    3. The plan authorization or an explicit model confirmation must cover
+       the use (returns True when the plan authorization is used).
+    """
+    if _pane_is_executing(row):
+        raise DevServiceError("PANE_BUSY", "This agent is already executing; wait for it to finish.", http_status=409)
+    if any(not item["ready"] for item in _dependency_status(row)):
+        raise DevServiceError(
+            "DEPENDENCY_PENDING",
+            "This agent depends on agents whose work is not ready for review yet.",
+            http_status=409,
+        )
+    if row["plan_id"]:
+        busy = [
+            other["title"]
+            for other in store.panes_for_plan(row["plan_id"])
+            if other["id"] != row["id"] and _pane_is_executing(other)
+        ]
+        if busy:
+            raise DevServiceError(
+                "PLAN_AGENT_RUNNING",
+                "Agents of this plan run one at a time; wait for: " + ", ".join(busy),
+                http_status=409,
+            )
+    return _authorize_use(row, confirm_model)
+
+
+def _run_gated(row, confirm_model: str | None, start: Callable[[bool], dict]) -> tuple[bool, dict]:
+    with _execution_lock(row):
+        by_plan = _check_execution_gates(row, confirm_model)
+        return by_plan, start(by_plan)
+
+
 def _agent_context(row) -> str:
     lines = [f"[Workspace agent: {row['title']} - role {policy.ROLES.get(row['role'], row['role'])}]"]
     brief = _brief(row)
@@ -479,29 +549,40 @@ def start_pane_mission(
     from nexus.dev.mission_runner import start_mission
 
     row = _require_pane(pane_id)
-    if any(not item["ready"] for item in _dependency_status(row)):
-        raise DevServiceError(
-            "DEPENDENCY_PENDING",
-            "This agent depends on agents whose work is not ready for review yet.",
-            http_status=409,
-        )
-    by_plan = _authorize_use(row, confirm_model)
     brief = _brief(row)
     text = (description or "").strip()
     if not text and brief:
         text = "Execute the planned task above and satisfy every acceptance criterion."
     if not text:
         raise DevServiceError("EMPTY_MISSION", "description must not be empty.", http_status=400)
-    if timeout_seconds is None:
-        timeout_seconds = int(((brief or {}).get("authorization") or {}).get("mission_timeout_seconds") or 900)
-    mission = start_mission(
-        row["dev_session_id"],
-        _agent_context(row) + text,
-        model=row["model"],
-        allowed_models=[row["model"]],
-        test_profile=test_profile,
-        timeout_seconds=timeout_seconds,
-    )
+
+    def start(by_plan: bool) -> dict:
+        approved = int(((brief or {}).get("authorization") or {}).get("mission_timeout_seconds") or 0)
+        effective = timeout_seconds
+        if by_plan:
+            # The approved duration is a ceiling: a longer mission needs a new
+            # explicit authorization (an explicit model confirmation once the
+            # plan authorization no longer applies, or a new plan).
+            if effective is None:
+                effective = approved
+            elif effective > approved:
+                raise DevServiceError(
+                    "TIMEOUT_EXCEEDS_AUTHORIZATION",
+                    f"The plan authorized at most {approved} seconds per mission.",
+                    http_status=403,
+                )
+        elif effective is None:
+            effective = approved or 900
+        return start_mission(
+            row["dev_session_id"],
+            _agent_context(row) + text,
+            model=row["model"],
+            allowed_models=[row["model"]],
+            test_profile=test_profile,
+            timeout_seconds=effective,
+        )
+
+    by_plan, mission = _run_gated(row, confirm_model, start)
     store.record_event(
         pane_id,
         "MISSION_STARTED",
@@ -536,17 +617,19 @@ def send_pane_message(pane_id: str, text: str, *, confirm_model: str | None = No
         raise DevServiceError("EMPTY_MESSAGE", "message must not be empty.", http_status=400)
     if not feature_gate.execution_enabled():
         raise DevServiceError("DEV_EXECUTION_DISABLED", "Development Mode execution is disabled on this server.", http_status=403)
-    latest = _latest_mission(_missions(row["dev_session_id"]))
-    if latest and latest["status"] in ACTIVE_MISSION_STATUSES:
-        raise DevServiceError("PANE_BUSY", "This agent is running a mission; wait for it to finish.", http_status=409)
-    by_plan = _authorize_use(row, confirm_model)
-    before = _snapshot(row["dev_session_id"])
-    message_id = store.add_pane_message(pane_id, text=text.strip(), model=row["model"], changes_before=before)
-    try:
-        turn = executor.run_dev_turn(row["dev_session_id"], _agent_context(row) + text.strip(), model=row["model"])
-    except DevServiceError:
-        store.finish_pane_message(message_id, outcome="failed", changes_after=None)
-        raise
+    holder: dict = {}
+
+    def start(_by_plan: bool) -> dict:
+        before = _snapshot(row["dev_session_id"])
+        holder["message_id"] = store.add_pane_message(pane_id, text=text.strip(), model=row["model"], changes_before=before)
+        try:
+            return executor.run_dev_turn(row["dev_session_id"], _agent_context(row) + text.strip(), model=row["model"])
+        except DevServiceError:
+            store.finish_pane_message(holder["message_id"], outcome="failed", changes_after=None)
+            raise
+
+    by_plan, turn = _run_gated(row, confirm_model, start)
+    message_id = holder["message_id"]
     store.set_pane_message_turn(message_id, turn["turn_id"])
     store.record_event(pane_id, "MESSAGE_SENT", {"message_id": message_id, "model": row["model"], "authorized_by_plan": by_plan})
     return get_pane(pane_id)

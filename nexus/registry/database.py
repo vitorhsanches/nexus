@@ -541,6 +541,12 @@ def initialize_database() -> None:
         ):
             if column not in plan_cols:
                 connection.execute(f"ALTER TABLE workspace_plans ADD COLUMN {column} {ddl}")
+        # One plan per Maestro user message: the database refuses a duplicate
+        # even if two reconciliations race.
+        connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_plans_message
+               ON workspace_plans(message_id) WHERE message_id IS NOT NULL"""
+        )
         pane_cols = [r[1] for r in connection.execute("PRAGMA table_info(workspace_panes)").fetchall()]
         for column in ("plan_agent_key", "brief_json"):
             if column not in pane_cols:

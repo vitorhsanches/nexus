@@ -10,14 +10,18 @@ and the real SQLite registry. Nothing here calls a model.
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
+import threading
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from nexus.dev.service import DevServiceError
-from nexus.registry import chat_sessions, database, dev_sessions
+from nexus.registry import chat_sessions, database, dev_missions, dev_sessions
 from nexus.registry import workspace as store
 from nexus.workspace import maestro, maestro_plan, service
 
@@ -483,3 +487,257 @@ def test_messages_are_refused_without_a_record_when_execution_is_disabled(env, m
         service.send_pane_message(pane["pane_id"], "oi", confirm_model="free/model")
     assert error.value.code == "DEV_EXECUTION_DISABLED"
     assert env["dev_turns"] == [] and service.get_pane(pane["pane_id"])["messages"] == []
+
+
+# ── P2A.1: shared execution gate ────────────────────────────────────────
+
+ALL_FREE = {"api": "free/model", "ui": "free/model", "qa": "free/model"}
+
+
+def _approved_multi(env, *, timeout=300, turns=2):
+    plan = _llm_plan(env, MULTI)
+    result = service.approve_plan(plan["plan_id"], agent_models=ALL_FREE, max_turns_per_agent=turns,
+                                  mission_timeout_seconds=timeout, confirm_costs=False)
+    return {pane["plan_agent_key"]: pane for pane in result["panes"]}
+
+
+def _real_mission_start(calls, delay=0.0):
+    """Persist a real PENDING mission row (what start_mission does first)."""
+    def start(session_id, description, **kwargs):
+        if delay:
+            time.sleep(delay)
+        mission_id = dev_missions.create_mission(session_id, description, requested_model=kwargs["model"],
+                                                 allowed_models=kwargs["allowed_models"], test_profile=kwargs["test_profile"])
+        calls.append((session_id, kwargs, mission_id))
+        return {"mission_id": mission_id, "status": "PENDING"}
+    return start
+
+
+def test_dependent_agent_cannot_run_a_direct_write_turn_before_release(env):
+    panes = _approved_multi(env)
+    with pytest.raises(DevServiceError) as error:
+        service.send_pane_message(panes["ui"]["pane_id"], "comece a tela")
+    assert error.value.code == "DEPENDENCY_PENDING"
+    assert env["dev_turns"] == [] and service.get_pane(panes["ui"]["pane_id"])["messages"] == []
+    with pytest.raises(DevServiceError) as confirmed:
+        service.send_pane_message(panes["ui"]["pane_id"], "comece", confirm_model="free/model")
+    assert confirmed.value.code == "DEPENDENCY_PENDING", "explicit confirmation never bypasses dependencies"
+
+
+def test_plan_authorized_mission_cannot_exceed_the_approved_duration(env, monkeypatch):
+    panes = _approved_multi(env, timeout=300, turns=3)
+    calls = []
+    monkeypatch.setattr("nexus.dev.mission_runner.start_mission", _real_mission_start(calls))
+    api = panes["api"]["pane_id"]
+    with pytest.raises(DevServiceError) as error:
+        service.start_pane_mission(api, None, confirm_model=None, test_profile="unit", timeout_seconds=301)
+    assert error.value.code == "TIMEOUT_EXCEEDS_AUTHORIZATION" and calls == []
+    with pytest.raises(DevServiceError) as confirmed:
+        # Re-confirming the model while the plan authorization applies is
+        # still a plan-authorized use: the ceiling holds.
+        service.start_pane_mission(api, None, confirm_model="free/model", test_profile="unit", timeout_seconds=3600)
+    assert confirmed.value.code == "TIMEOUT_EXCEEDS_AUTHORIZATION" and calls == []
+    assert service.get_pane(api)["brief"]["authorization"]["turns_used"] == 0
+    service.start_pane_mission(api, None, confirm_model=None, test_profile="unit", timeout_seconds=120)
+    assert calls[-1][1]["timeout_seconds"] == 120
+
+
+def test_approved_duration_is_the_default_and_extension_needs_explicit_authorization(env, monkeypatch):
+    panes = _approved_multi(env, timeout=300, turns=1)
+    calls = []
+    monkeypatch.setattr("nexus.dev.mission_runner.start_mission", _real_mission_start(calls))
+    api = panes["api"]
+    service.start_pane_mission(api["pane_id"], None, confirm_model=None, test_profile="unit")
+    assert calls[-1][1]["timeout_seconds"] == 300
+    dev_missions.update_status(calls[-1][2], "READY_FOR_REVIEW")
+    # Plan authorization exhausted: a longer mission is a new, explicit authorization.
+    with pytest.raises(DevServiceError) as unconfirmed:
+        service.start_pane_mission(api["pane_id"], "again", confirm_model=None, test_profile="unit", timeout_seconds=900)
+    assert unconfirmed.value.code == "MODEL_NOT_CONFIRMED"
+    service.start_pane_mission(api["pane_id"], "again", confirm_model="free/model", test_profile="unit", timeout_seconds=900)
+    assert calls[-1][1]["timeout_seconds"] == 900
+
+
+def test_agents_of_one_plan_never_execute_at_the_same_time_even_without_dependencies(env, monkeypatch):
+    panes = _approved_multi(env)
+    api, qa = panes["api"], panes["qa"]
+    assert qa["brief"]["depends_on"] == []  # independent on paper
+    calls = []
+    monkeypatch.setattr("nexus.dev.mission_runner.start_mission", _real_mission_start(calls))
+    service.start_pane_mission(api["pane_id"], None, confirm_model=None, test_profile="unit")
+    with pytest.raises(DevServiceError) as mission:
+        service.start_pane_mission(qa["pane_id"], None, confirm_model=None, test_profile="unit")
+    assert mission.value.code == "PLAN_AGENT_RUNNING" and "API" in str(mission.value)
+    with pytest.raises(DevServiceError) as message:
+        service.send_pane_message(qa["pane_id"], "oi")
+    assert message.value.code == "PLAN_AGENT_RUNNING" and env["dev_turns"] == []
+    with pytest.raises(DevServiceError) as own:
+        service.send_pane_message(api["pane_id"], "oi")
+    assert own.value.code == "PANE_BUSY"
+
+    # Once the running agent finishes, the next one may run...
+    dev_missions.update_status(calls[0][2], "READY_FOR_REVIEW")
+    service.send_pane_message(qa["pane_id"], "oi")
+    # ...and an active direct-message turn blocks the rest of the plan too.
+    with pytest.raises(DevServiceError) as by_turn:
+        service.start_pane_mission(api["pane_id"], "x", confirm_model="free/model", test_profile="unit")
+    assert by_turn.value.code == "PLAN_AGENT_RUNNING"
+    # A manual pane outside the plan is not affected by the plan's exclusion.
+    manual = service.create_pane("demo", role="tester", model="free/model")
+    service.send_pane_message(manual["pane_id"], "oi", confirm_model="free/model")
+    assert len(env["dev_turns"]) == 2
+
+
+def test_concurrent_starts_in_one_plan_admit_exactly_one(env, monkeypatch):
+    panes = _approved_multi(env)
+    calls = []
+    monkeypatch.setattr("nexus.dev.mission_runner.start_mission", _real_mission_start(calls, delay=0.2))
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def run(key):
+        barrier.wait()
+        try:
+            service.start_pane_mission(panes[key]["pane_id"], None, confirm_model=None, test_profile="unit")
+            outcomes.append("started")
+        except DevServiceError as error:
+            outcomes.append(error.code)
+
+    threads = [threading.Thread(target=run, args=(key,)) for key in ("api", "qa")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert sorted(outcomes) == ["PLAN_AGENT_RUNNING", "started"] and len(calls) == 1
+
+
+# ── P2A.1: Maestro recovery ─────────────────────────────────────────────
+
+
+def _plans_for(message_id):
+    with database.get_connection() as connection:
+        return connection.execute("SELECT id FROM workspace_plans WHERE message_id = ?", (message_id,)).fetchall()
+
+
+def _replies(conversation_id):
+    return [row for row in store.list_messages(conversation_id) if row["author"] == "maestro"]
+
+
+def _pending_message(env):
+    maestro.authorize_planning("demo", "free/model", confirm_cost=False)
+    _ask("Implemente multiply.")
+    conversation = store.get_conversation_for_project("demo")
+    message = next(row for row in store.list_messages(conversation["id"]) if row["author"] == "user")
+    return conversation, message
+
+
+def test_message_stuck_in_processing_is_finished_once(env):
+    conversation, message = _pending_message(env)
+    _complete_last(env, _answer(SIMPLE))
+    with database.get_connection() as connection:  # interrupted right after the old "claim" step
+        connection.execute("UPDATE workspace_maestro_messages SET status = 'PROCESSING' WHERE id = ?", (message["id"],))
+    state = maestro.conversation_state("demo")
+    assert state["busy"] is False and state["messages"][-1]["plan"]["source"] == "llm"
+    maestro.conversation_state("demo")
+    assert len(_plans_for(message["id"])) == 1 and len(_replies(conversation["id"])) == 1
+
+
+def test_plan_stored_but_reply_missing_is_repaired_without_duplicates(env):
+    conversation, message = _pending_message(env)
+    _complete_last(env, _answer(SIMPLE))
+    # Interrupted after the old create_plan step, before the reply was written.
+    orphan = store.create_plan("demo", message["text"], policy_version="maestro-plan/1", complexity="simple",
+                               proposal=maestro_plan.parse(_answer(SIMPLE), models=MODELS, limit=3), source="llm",
+                               conversation_id=conversation["id"], message_id=message["id"])
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_maestro_messages SET status = 'PROCESSING' WHERE id = ?", (message["id"],))
+    state = maestro.conversation_state("demo")
+    assert [row["id"] for row in _plans_for(message["id"])] == [orphan]
+    replies = _replies(conversation["id"])
+    assert len(replies) == 1 and replies[0]["plan_id"] == orphan
+    assert state["messages"][-1]["plan"]["plan_id"] == orphan and state["busy"] is False
+
+
+def test_turn_id_never_recorded_is_relinked_through_the_idempotency_key(env, monkeypatch):
+    maestro.authorize_planning("demo", "free/model", confirm_cost=False)
+    original = env["sent"]
+
+    def send_then_crash(session_id, text, *, idempotency_key=None):
+        turn_id, _created = chat_sessions.create_turn_if_absent(session_id, idempotency_key, text)
+        original.append({"session_id": session_id, "text": text, "turn_id": turn_id})
+        raise KeyboardInterrupt  # process dies before set_message_turn
+
+    monkeypatch.setattr("nexus.chat.service.send_turn", send_then_crash)
+    with pytest.raises(KeyboardInterrupt):
+        _ask("Implemente multiply.")
+    conversation = store.get_conversation_for_project("demo")
+    message = next(row for row in store.list_messages(conversation["id"]) if row["author"] == "user")
+    assert message["chat_turn_id"] is None
+    assert maestro.conversation_state("demo")["busy"] is True  # still running, now linked
+    assert store.list_messages(conversation["id"])[0]["chat_turn_id"] == original[-1]["turn_id"]
+    _complete_last(env, _answer(SIMPLE))
+    assert maestro.conversation_state("demo")["messages"][-1]["plan"]["source"] == "llm"
+
+
+def test_message_never_sent_gets_a_labelled_fallback_only_after_the_grace_period(env, monkeypatch):
+    maestro.authorize_planning("demo", "free/model", confirm_cost=False)
+
+    def crash(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("nexus.chat.service.send_turn", crash)
+    with pytest.raises(KeyboardInterrupt):
+        _ask("Implemente multiply.")
+    conversation = store.get_conversation_for_project("demo")
+    assert maestro.conversation_state("demo")["busy"] is True  # fresh: maybe still being sent
+    old = (datetime.now(UTC) - timedelta(seconds=maestro.SEND_GRACE_SECONDS + 1)).isoformat()
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_maestro_messages SET created_at = ? WHERE conversation_id = ?", (old, conversation["id"]))
+    state = maestro.conversation_state("demo")
+    assert state["busy"] is False
+    assert state["messages"][0]["status"] == "FAILED" and state["messages"][0]["error_code"] == "MAESTRO_SEND_INTERRUPTED"
+    assert state["messages"][-1]["plan"]["source"] == "deterministic-fallback"
+    assert service.list_panes("demo", include_hidden=True) == []
+
+
+def test_unauthorized_answer_interrupted_before_the_plan_is_recovered(env):
+    conversation = store.get_conversation(store.create_conversation("demo"))
+    message_id = store.add_message(conversation["id"], author="user", text="Implemente multiply.", status="PENDING")
+    state = maestro.conversation_state("demo")
+    assert state["busy"] is False and state["messages"][-1]["plan"]["source"] == "deterministic"
+    assert len(_plans_for(message_id)) == 1
+
+
+def test_concurrent_reconciliation_and_repeated_answers_never_duplicate(env):
+    conversation, message = _pending_message(env)
+    _complete_last(env, _answer(SIMPLE))
+    barrier = threading.Barrier(4)
+    errors = []
+
+    def run():
+        barrier.wait()
+        try:
+            maestro.reconcile(conversation["id"])
+        except Exception as error:  # noqa: BLE001 - surface any failure
+            errors.append(error)
+
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert errors == []
+    assert len(_plans_for(message["id"])) == 1 and len(_replies(conversation["id"])) == 1
+    plan = maestro_plan.parse(_answer(SIMPLE), models=MODELS, limit=3)
+    again = store.record_maestro_answer(message["id"], project_id="demo", task_text="x", plan=plan,
+                                        policy_version="maestro-plan/1", reply="dup", user_status="COMPLETED")
+    assert again == _plans_for(message["id"])[0]["id"] and len(_replies(conversation["id"])) == 1
+
+
+def test_database_refuses_a_second_plan_for_the_same_message(env):
+    conversation, message = _pending_message(env)
+    store.create_plan("demo", "x", policy_version="v", complexity="simple", proposal={"agents": []},
+                      conversation_id=conversation["id"], message_id=message["id"])
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_plan("demo", "x", policy_version="v", complexity="simple", proposal={"agents": []},
+                          conversation_id=conversation["id"], message_id=message["id"])
