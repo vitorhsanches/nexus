@@ -83,13 +83,25 @@ if ($importExit -ne 0) {
     Stop-Launch "Nexus failed to import with the project environment:" @($python)
 }
 
-$codex = Get-Command "codex" -ErrorAction SilentlyContinue
-if (-not $codex) {
-    Stop-Launch "Codex CLI is not available on PATH." @(
-        "Install or expose Codex CLI before starting model-backed Development missions."
+# Use the same discovery Nexus uses at runtime (nexus.dispatchers.manager._find_codex),
+# so the pre-check never passes on a PATH-only Codex that Nexus cannot launch.
+Push-Location $root
+try {
+    # The probe reports failure only through its exit code: under
+    # ErrorActionPreference=Stop, native stderr would abort the launcher silently.
+    $codexPath = & $python -c "import sys`ntry:`n    from nexus.dispatchers.manager import _find_codex`n    print(_find_codex())`nexcept Exception:`n    sys.exit(1)"
+    $codexExit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($codexExit -ne 0 -or -not $codexPath) {
+    Stop-Launch "Codex CLI was not found where Nexus launches it." @(
+        "Expected: %LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe",
+        "Install Codex before starting model-backed Development missions."
     )
 }
 Write-Ok "Codex CLI available"
+Write-Info "$codexPath"
 
 $omniProfileRoot = if ($env:NEXUS_OMNIROUTE_CODEX_HOME) {
     $env:NEXUS_OMNIROUTE_CODEX_HOME
