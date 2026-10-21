@@ -6,8 +6,31 @@ import json
 import os
 import socket
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from nexus.registry.database import get_connection
+
+LEASE_SECONDS = 30
+
+
+class OwnershipLost(RuntimeError):
+    """The worker no longer holds an unexpired fenced lease."""
+
+
+def _cutoff(seconds: int = LEASE_SECONDS) -> str:
+    return (datetime.now(UTC) - timedelta(seconds=seconds)).isoformat()
+
+
+def _require_owner(connection, plan_id: str, owner_token: str) -> None:
+    # Serialize the fence check and the following mutation with takeover.
+    connection.execute("BEGIN IMMEDIATE")
+    row = connection.execute(
+        """SELECT 1 FROM workspace_plan_executions
+           WHERE plan_id = ? AND owner_token = ? AND lease_renewed_at > ?
+             AND status = 'RUNNING'""", (plan_id, owner_token, _cutoff()),
+    ).fetchone()
+    if row is None:
+        raise OwnershipLost(plan_id)
 
 EXECUTION_STATUSES = frozenset({
     "AWAITING_EXECUTION",
@@ -113,41 +136,56 @@ def create_execution(
     return row, True
 
 
-def claim_execution(plan_id: str) -> bool:
+def claim_execution(plan_id: str) -> str | None:
     """Atomically claim an awaiting plan for this process."""
     now = _now()
+    token = uuid4().hex
     with get_connection() as connection:
         cursor = connection.execute(
             """UPDATE workspace_plan_executions
                SET status = 'RUNNING', owner_host = ?, owner_pid = ?, owner_acquired_at = ?,
-                   started_at = COALESCE(started_at, ?), updated_at = ?
+                   started_at = COALESCE(started_at, ?), updated_at = ?,
+                   owner_token = ?, lease_renewed_at = ?
                WHERE plan_id = ? AND status = 'AWAITING_EXECUTION'""",
-            (socket.gethostname(), os.getpid(), now, now, now, plan_id),
+            (socket.gethostname(), os.getpid(), now, now, now, token, now, plan_id),
         )
-        return cursor.rowcount == 1
+        return token if cursor.rowcount == 1 else None
 
 
-def claim_recovery(plan_id: str, stale_after_seconds: int = 30) -> bool:
+def claim_recovery(plan_id: str, stale_after_seconds: int = LEASE_SECONDS) -> str | None:
     """Take over a durable worker only after its lease is stale."""
     now = datetime.now(UTC)
     cutoff = (now - timedelta(seconds=stale_after_seconds)).isoformat()
     stamp = now.isoformat()
+    token = uuid4().hex
     with get_connection() as connection:
         cursor = connection.execute(
             """UPDATE workspace_plan_executions
-               SET owner_host = ?, owner_pid = ?, owner_acquired_at = ?, updated_at = ?
+               SET owner_host = ?, owner_pid = ?, owner_acquired_at = ?, updated_at = ?,
+                   owner_token = ?, lease_renewed_at = ?
                WHERE plan_id = ? AND status = 'RUNNING'
-                 AND (owner_acquired_at IS NULL OR owner_acquired_at < ?)
-                 AND NOT (owner_host = ? AND owner_pid = ?)""",
-            (socket.gethostname(), os.getpid(), stamp, stamp, plan_id, cutoff,
-             socket.gethostname(), os.getpid()),
+                 AND (COALESCE(lease_renewed_at, owner_acquired_at) IS NULL
+                      OR COALESCE(lease_renewed_at, owner_acquired_at) <= ?)""",
+            (socket.gethostname(), os.getpid(), stamp, stamp, token, stamp, plan_id, cutoff),
+        )
+        return token if cursor.rowcount == 1 else None
+
+
+def renew_lease(plan_id: str, owner_token: str) -> bool:
+    now = _now()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """UPDATE workspace_plan_executions SET lease_renewed_at = ?
+               WHERE plan_id = ? AND owner_token = ? AND status = 'RUNNING'
+                 AND lease_renewed_at > ?""", (now, plan_id, owner_token, _cutoff()),
         )
         return cursor.rowcount == 1
 
 
 def update_execution(plan_id: str, status: str, *, current_index: int | None = None,
                      interrupt_requested: bool | None = None, error_code: str | None = None,
-                     error_message: str | None = None, result: dict | None = None) -> None:
+                     error_message: str | None = None, result: dict | None = None,
+                     owner_token: str) -> None:
     if status not in EXECUTION_STATUSES:
         raise ValueError(f"unknown execution status: {status!r}")
     fields = ["status = ?", "updated_at = ?"]
@@ -166,12 +204,13 @@ def update_execution(plan_id: str, status: str, *, current_index: int | None = N
         fields.append("finished_at = COALESCE(finished_at, ?)"); params.append(_now())
     params.append(plan_id)
     with get_connection() as connection:
+        _require_owner(connection, plan_id, owner_token)
         connection.execute(f"UPDATE workspace_plan_executions SET {', '.join(fields)} WHERE plan_id = ?", params)
 
 
 def update_step(plan_id: str, agent_key: str, status: str, *, mission_id: str | None = None,
                 result: dict | None = None, error_code: str | None = None,
-                error_message: str | None = None) -> None:
+                error_message: str | None = None, owner_token: str) -> None:
     if status not in STEP_STATUSES:
         raise ValueError(f"unknown step status: {status!r}")
     fields = ["status = ?", "updated_at = ?"]
@@ -190,6 +229,7 @@ def update_step(plan_id: str, agent_key: str, status: str, *, mission_id: str | 
         fields.append("finished_at = COALESCE(finished_at, ?)"); params.append(_now())
     params.extend([plan_id, agent_key])
     with get_connection() as connection:
+        _require_owner(connection, plan_id, owner_token)
         connection.execute(
             f"UPDATE workspace_plan_execution_steps SET {', '.join(fields)} WHERE plan_id = ? AND agent_key = ?",
             params,
@@ -220,6 +260,7 @@ def view(plan_id: str) -> dict | None:
         "error_code": row["error_code"], "error_message": row["error_message"],
         "result": _json(row["result_json"], None),
         "owner": {"host": row["owner_host"], "pid": row["owner_pid"]} if row["owner_pid"] else None,
+        "lease_renewed_at": row["lease_renewed_at"],
         "created_at": row["created_at"], "started_at": row["started_at"],
         "finished_at": row["finished_at"], "updated_at": row["updated_at"],
         "steps": [{

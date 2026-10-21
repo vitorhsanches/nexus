@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+import multiprocessing
+import threading
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from nexus.dev.service import DevServiceError
 from nexus.registry import database, dev_missions
 from nexus.registry import workspace as store
+from nexus.registry import workspace_execution as executions
 from nexus.workspace import coordinator
 
 FREE = {"id": "free/model", "cost_status": "free"}
@@ -61,6 +67,9 @@ def coord_env(tmp_path, monkeypatch):
                 (pane_id, session_id, plan_id, "backend" if key == "api" else "tester", key, index, key, json.dumps(brief)),
             )
     yield {"plan_id": plan_id, "calls": [], "tmp": tmp_path}
+    for worker in list(coordinator._workers.values()):
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "simulated worker leaked past fixture teardown"
     with coordinator._workers_lock:
         coordinator._workers.clear()
     database.DATABASE_PATH, database.STORAGE_DIR = original_db, original_storage
@@ -153,3 +162,266 @@ def test_unknown_mission_outcome_is_not_replayed(coord_env, monkeypatch):
     state = _wait(env["plan_id"], {"RESULT_UNCERTAIN"})
     coordinator.start(env["plan_id"])
     assert state["status"] == "RESULT_UNCERTAIN" and len(calls) == 1
+
+# P2B.1A: exercise SQLite fences, launch crash boundaries and real processes.
+
+
+def _stale(plan_id):
+    stamp = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plan_executions SET lease_renewed_at=?, owner_acquired_at=? WHERE plan_id=?", (stamp, stamp, plan_id))
+
+
+def _existing(env, status="READY_FOR_REVIEW", *, starting=False):
+    _authorize(env)
+    token = executions.claim_execution(env["plan_id"])
+    mission_id = dev_missions.create_mission("DEV-API", "api", requested_model="free/model", allowed_models=["free/model"], test_profile="unit")
+    dev_missions.update_status(mission_id, status, result={"changed_files": [{"path": "api.py"}]})
+    executions.update_step(env["plan_id"], "api", "STARTING" if starting else "RUNNING", mission_id=mission_id, owner_token=token)
+    _stale(env["plan_id"])
+    return token, mission_id
+
+
+def _claim_in_process(db_path, plan_id, ready, results):
+    from pathlib import Path
+    database.DATABASE_PATH = Path(db_path)
+    database.STORAGE_DIR = database.DATABASE_PATH.parent
+    ready.wait(10)
+    token = executions.claim_recovery(plan_id)
+    results.put(token)
+
+
+def _heartbeat_in_process(db_path, plan_id, ready, stop):
+    from pathlib import Path
+    database.DATABASE_PATH = Path(db_path)
+    database.STORAGE_DIR = database.DATABASE_PATH.parent
+    token = executions.claim_execution(plan_id)
+    ready.put(token)
+    while not stop.wait(0.1):
+        if not executions.renew_lease(plan_id, token):
+            return
+
+
+def test_state_during_live_starting_is_read_only(coord_env, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+
+    def fake_start(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        mission_id = dev_missions.create_mission("DEV-API", "api", requested_model="free/model", allowed_models=["free/model"], test_profile="unit")
+        dev_missions.update_status(mission_id, "READY_FOR_REVIEW", result={"changed_files": [{"path": "api.py"}]})
+        return {"mission": {"mission_id": mission_id}}
+
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", fake_start)
+    _authorize(coord_env)
+    coordinator.start(coord_env["plan_id"])
+    assert entered.wait(3)
+    try:
+        for _ in range(10):
+            snapshot = coordinator.state(coord_env["plan_id"])
+            assert snapshot["status"] == "RUNNING"
+            assert snapshot["steps"][0]["status"] == "STARTING"
+            coordinator.recover(coord_env["plan_id"])
+        assert executions.get_execution(coord_env["plan_id"])["error_code"] is None
+    finally:
+        release.set()
+    assert _wait(coord_env["plan_id"], {"BLOCKED"})["status"] == "BLOCKED"
+
+
+def test_crash_before_mission_id_is_uncertain_without_replay(coord_env, monkeypatch):
+    _authorize(coord_env)
+    token = executions.claim_execution(coord_env["plan_id"])
+    executions.update_step(coord_env["plan_id"], "api", "STARTING", owner_token=token)
+    _stale(coord_env["plan_id"])
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", lambda *_a, **_kw: pytest.fail("replayed uncertain launch"))
+    assert coordinator.state(coord_env["plan_id"])["status"] == "RUNNING"
+    coordinator.recover(coord_env["plan_id"])
+    snapshot = _wait(coord_env["plan_id"], {"RESULT_UNCERTAIN"})
+    assert snapshot["status"] == "RESULT_UNCERTAIN"
+    assert snapshot["error_code"] == "COORDINATOR_START_INTERRUPTED"
+    coordinator.start(coord_env["plan_id"])
+    coordinator.recover(coord_env["plan_id"])
+    assert executions.get_steps(coord_env["plan_id"])[0]["mission_id"] is None
+
+
+@pytest.mark.parametrize(("mission_status", "expected"), [
+    ("READY_FOR_REVIEW", "BLOCKED"), ("CANCELLED", "INTERRUPTED"),
+    ("OUTCOME_UNKNOWN", "RESULT_UNCERTAIN"), ("FAILED", "FAILED"),
+])
+def test_recovery_reconciles_existing_terminal_mission_without_replay(coord_env, monkeypatch, mission_status, expected):
+    _existing(coord_env, mission_status)
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", lambda *_a, **_kw: pytest.fail("mission replayed"))
+    coordinator.recover(coord_env["plan_id"])
+    snapshot = _wait(coord_env["plan_id"], {expected})
+    assert snapshot["status"] == expected
+    assert len(dev_missions.list_missions("DEV-API")) == 1
+    coordinator.recover(coord_env["plan_id"])
+    coordinator.start(coord_env["plan_id"])
+    assert len(dev_missions.list_missions("DEV-API")) == 1
+
+
+def test_restart_after_mission_id_in_starting_reconciles_existing_record(coord_env, monkeypatch):
+    _existing(coord_env, starting=True)
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", lambda *_a, **_kw: pytest.fail("mission replayed"))
+    coordinator.recover(coord_env["plan_id"])
+    assert _wait(coord_env["plan_id"], {"BLOCKED"})["status"] == "BLOCKED"
+    assert executions.get_steps(coord_env["plan_id"])[0]["status"] == "READY_FOR_REVIEW"
+
+
+def test_recovery_monitors_running_mission_and_interrupts_same_session(coord_env, monkeypatch):
+    _, mission_id = _existing(coord_env, "RUNNING")
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", lambda *_a, **_kw: pytest.fail("mission replayed"))
+    calls = []
+
+    def interrupt(session_id, ident):
+        calls.append((session_id, ident))
+        dev_missions.update_status(ident, "CANCELLED")
+
+    monkeypatch.setattr("nexus.dev.mission_runner.interrupt_mission", interrupt)
+    coordinator.recover(coord_env["plan_id"])
+    assert coordinator.state(coord_env["plan_id"])["status"] == "RUNNING"
+    coordinator.interrupt(coord_env["plan_id"])
+    assert _wait(coord_env["plan_id"], {"INTERRUPTED"})["status"] == "INTERRUPTED"
+    assert calls == [("DEV-API", mission_id)]
+
+
+def test_lost_owner_cannot_renew_write_or_launch(coord_env, monkeypatch):
+    old, _ = _existing(coord_env)
+    new = executions.claim_recovery(coord_env["plan_id"])
+    assert new and new != old
+    assert not executions.renew_lease(coord_env["plan_id"], old)
+    with pytest.raises(executions.OwnershipLost):
+        executions.update_step(coord_env["plan_id"], "api", "STARTING", owner_token=old)
+    with pytest.raises(executions.OwnershipLost):
+        executions.update_execution(coord_env["plan_id"], "FAILED", owner_token=old)
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", lambda *_a, **_kw: pytest.fail("old owner launched"))
+    coordinator._run(coord_env["plan_id"], old)
+    assert executions.get_execution(coord_env["plan_id"])["status"] == "RUNNING"
+
+
+def test_two_processes_cannot_claim_same_stale_execution(coord_env):
+    old, _ = _existing(coord_env)
+    context = multiprocessing.get_context("spawn")
+    ready, results = context.Event(), context.Queue()
+    processes = [context.Process(target=_claim_in_process, args=(str(database.DATABASE_PATH), coord_env["plan_id"], ready, results)) for _ in range(2)]
+    try:
+        for process in processes:
+            process.start()
+        ready.set()
+        claims = [results.get(timeout=15) for _ in processes]
+        assert sum(bool(token) for token in claims) == 1
+        assert not executions.renew_lease(coord_env["plan_id"], old)
+    finally:
+        for process in processes:
+            process.join(10)
+            if process.is_alive():
+                process.terminate()
+                process.join()
+        results.close()
+    assert all(process.exitcode == 0 for process in processes)
+
+
+def test_live_process_renews_beyond_thirty_seconds_and_dead_owner_is_recoverable(coord_env):
+    _authorize(coord_env)
+    context = multiprocessing.get_context("spawn")
+    ready, stop = context.Queue(), context.Event()
+    process = context.Process(target=_heartbeat_in_process, args=(str(database.DATABASE_PATH), coord_env["plan_id"], ready, stop))
+    process.start()
+    try:
+        token = ready.get(timeout=15)
+        assert token
+        initial = executions.get_execution(coord_env["plan_id"])["lease_renewed_at"]
+        # Keep the real process and SQLite heartbeat active past the lease TTL.
+        deadline = time.monotonic() + 31
+        while time.monotonic() < deadline:
+            assert not executions.claim_recovery(coord_env["plan_id"])
+            time.sleep(0.25)
+        assert executions.get_execution(coord_env["plan_id"])["lease_renewed_at"] > initial
+        assert not executions.claim_recovery(coord_env["plan_id"])
+    finally:
+        stop.set()
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+        ready.close()
+    assert process.exitcode == 0
+    _stale(coord_env["plan_id"])
+    assert executions.claim_recovery(coord_env["plan_id"])
+    assert not executions.renew_lease(coord_env["plan_id"], token)
+
+
+def test_heartbeat_protects_slow_launcher_and_old_worker_stops_after_takeover(coord_env, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def slow_start(*_a, **_kw):
+        calls.append("launch")
+        entered.set()
+        assert release.wait(8)
+        mission_id = dev_missions.create_mission("DEV-API", "api", requested_model="free/model", allowed_models=["free/model"], test_profile="unit")
+        dev_missions.update_status(mission_id, "READY_FOR_REVIEW")
+        return {"mission": {"mission_id": mission_id}}
+
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", slow_start)
+    _authorize(coord_env)
+    coordinator.start(coord_env["plan_id"])
+    assert entered.wait(3)
+    original = executions.get_execution(coord_env["plan_id"])
+    try:
+        time.sleep(2.3)
+        assert executions.get_execution(coord_env["plan_id"])["lease_renewed_at"] > original["lease_renewed_at"]
+        _stale(coord_env["plan_id"])
+        coordinator.recover(coord_env["plan_id"])
+        assert _wait(coord_env["plan_id"], {"RESULT_UNCERTAIN"})["status"] == "RESULT_UNCERTAIN"
+    finally:
+        release.set()
+    time.sleep(0.3)
+    assert calls == ["launch"]
+    assert coordinator.state(coord_env["plan_id"])["status"] == "RESULT_UNCERTAIN"
+
+
+def test_review_result_preserves_human_integration_approval(coord_env, monkeypatch):
+    _existing(coord_env)
+    with database.get_connection() as connection:
+        connection.execute("DELETE FROM workspace_plan_execution_steps WHERE plan_id=? AND agent_key='tests'", (coord_env["plan_id"],))
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", lambda *_a, **_kw: pytest.fail("mission replayed"))
+    coordinator.recover(coord_env["plan_id"])
+    snapshot = _wait(coord_env["plan_id"], {"AWAITING_REVIEW"})
+    assert snapshot["status"] == "AWAITING_REVIEW"
+    assert snapshot["result"] == {"human_approval_required": True, "integration_applied": False}
+    tree = ast.parse(inspect.getsource(coordinator))
+    forbidden = {"apply", "apply_changes", "merge", "push", "run_dev_turn", "start_mission"}
+    calls = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+    assert not calls.intersection(forbidden)
+
+
+def test_recovery_never_invokes_launcher_for_a_persisted_mission(coord_env, monkeypatch):
+    _authorize(coord_env)
+    executions.claim_execution(coord_env["plan_id"])
+    mission_id = dev_missions.create_mission("DEV-API", "api", requested_model="free/model", allowed_models=["free/model"], test_profile="unit")
+    dev_missions.update_status(mission_id, "READY_FOR_REVIEW", result={"changed_files": [{"path": "api.py"}]})
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plan_execution_steps SET status='RUNNING', mission_id=? WHERE plan_id=? AND agent_key='api'", (mission_id, coord_env["plan_id"]))
+        connection.execute("UPDATE workspace_plan_executions SET owner_pid=999999 WHERE plan_id=?", (coord_env["plan_id"],))
+    _stale(coord_env["plan_id"])
+    launches = []
+
+    def record_launch(*_a, **_kw):
+        launches.append(mission_id)
+        return {"mission": {"mission_id": mission_id}}
+
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", record_launch)
+    coordinator.recover(coord_env["plan_id"])
+    snapshot = _wait(coord_env["plan_id"], {"BLOCKED"})
+    assert launches == []
+    assert snapshot["status"] == "BLOCKED"
+
+
+def test_recent_renewal_blocks_takeover_of_old_acquisition(coord_env):
+    _authorize(coord_env)
+    executions.claim_execution(coord_env["plan_id"])
+    old = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plan_executions SET owner_pid=999999, owner_acquired_at=? WHERE plan_id=?", (old, coord_env["plan_id"]))
+    assert not executions.claim_recovery(coord_env["plan_id"])

@@ -9,8 +9,6 @@ with an explicit handoff block because P2B.1 has no safe transfer mechanism.
 from __future__ import annotations
 
 import json
-import os
-import socket
 import threading
 import time
 from collections.abc import Iterable
@@ -125,111 +123,152 @@ def _step_result(mission) -> dict:
         return {}
 
 
-def _run(plan_id: str) -> None:
+def _heartbeat(plan_id: str, token: str, stop: threading.Event, lost: threading.Event) -> None:
+    while not stop.wait(2):
+        try:
+            if not execution_store.renew_lease(plan_id, token):
+                lost.set()
+                return
+        except Exception:  # noqa: BLE001 - fail closed on storage failure
+            lost.set()
+            return
+
+
+def _run(plan_id: str, token: str) -> None:
     from nexus.workspace import service
 
+    stop = threading.Event()
+    lost = threading.Event()
+    heartbeat = threading.Thread(target=_heartbeat, args=(plan_id, token, stop, lost), daemon=True)
+    heartbeat.start()
+
+    def check_owner():
+        if lost.is_set() or not execution_store.renew_lease(plan_id, token):
+            raise execution_store.OwnershipLost(plan_id)
+
+    def update(status, **kwargs):
+        execution_store.update_execution(plan_id, status, owner_token=token, **kwargs)
+
+    def step_update(key, status, **kwargs):
+        execution_store.update_step(plan_id, key, status, owner_token=token, **kwargs)
+
     try:
+        check_owner()
         execution = execution_store.view(plan_id)
-        if execution is None:
-            return
         for index, step in enumerate(execution["steps"]):
-            if _is_interrupted(plan_id):
-                execution_store.update_execution(plan_id, "INTERRUPTED", current_index=index)
-                return
+            check_owner()
             persisted = execution_store.get_steps(plan_id)[index]
-            if persisted["status"] in {"READY_FOR_REVIEW", "BLOCKED", "FAILED", "INTERRUPTED", "RESULT_UNCERTAIN"}:
-                if persisted["status"] != "READY_FOR_REVIEW":
-                    return
+            if persisted["status"] == "READY_FOR_REVIEW":
                 continue
-            if index:
-                previous = execution_store.get_steps(plan_id)[index - 1]
-                previous_mission = _mission_for(previous)
-                if previous["status"] != "READY_FOR_REVIEW":
-                    execution_store.update_execution(plan_id, "WAITING_DEPENDENCY", current_index=index)
-                    return
-                if _changed_files(previous_mission):
-                    message = "Dependência concluída em outro worktree; transferência de alterações não é suportada nesta fase."
-                    execution_store.update_step(plan_id, step["agent_key"], "BLOCKED", error_code="DEPENDENCY_WORKTREE_NOT_TRANSFERRED", error_message=message)
-                    execution_store.update_execution(plan_id, "BLOCKED", current_index=index, error_code="DEPENDENCY_WORKTREE_NOT_TRANSFERRED", error_message=message)
-                    return
-            execution_store.update_execution(plan_id, "RUNNING", current_index=index)
-            execution_store.update_step(plan_id, step["agent_key"], "STARTING")
-            try:
-                result = service.start_pane_mission(
-                    step["pane_id"], None, confirm_model=None,
-                    test_profile=step["test_profile"], timeout_seconds=None,
-                )
-            except DevServiceError as error:
-                execution_store.update_step(plan_id, step["agent_key"], "BLOCKED" if error.code in {"DEPENDENCY_PENDING", "PANE_BUSY", "TEST_PROFILE_NOT_FOUND"} else "FAILED", error_code=error.code, error_message=str(error))
-                execution_store.update_execution(plan_id, "BLOCKED" if error.code in {"DEPENDENCY_PENDING", "PANE_BUSY", "TEST_PROFILE_NOT_FOUND"} else "FAILED", current_index=index, error_code=error.code, error_message=str(error))
+            if persisted["status"] in {"BLOCKED", "FAILED", "INTERRUPTED", "RESULT_UNCERTAIN"}:
+                update(persisted["status"], current_index=index)
                 return
-            mission_id = result["mission"]["mission_id"]
-            execution_store.update_step(plan_id, step["agent_key"], "RUNNING", mission_id=mission_id)
-            while True:
+            mission_id = persisted["mission_id"]
+            # A durable mission id is authoritative even if the step status
+            # lags. Recovery only observes it and never calls the launcher.
+            if not mission_id:
+                if persisted["status"] != "PENDING":
+                    message = "Launch was interrupted before its mission id was recorded; it was not replayed."
+                    step_update(step["agent_key"], "RESULT_UNCERTAIN", error_code="COORDINATOR_START_INTERRUPTED", error_message=message)
+                    update("RESULT_UNCERTAIN", current_index=index, error_code="COORDINATOR_START_INTERRUPTED", error_message=message)
+                    return
                 if _is_interrupted(plan_id):
+                    step_update(step["agent_key"], "INTERRUPTED")
+                    update("INTERRUPTED", current_index=index)
+                    return
+                if index:
+                    previous = execution_store.get_steps(plan_id)[index - 1]
+                    if previous["status"] != "READY_FOR_REVIEW":
+                        update("BLOCKED", current_index=index, error_code="DEPENDENCY_PENDING")
+                        return
+                    if _changed_files(_mission_for(previous)):
+                        message = "Dependência concluída em outro worktree; transferência de alterações não é suportada nesta fase."
+                        step_update(step["agent_key"], "BLOCKED", error_code="DEPENDENCY_WORKTREE_NOT_TRANSFERRED", error_message=message)
+                        update("BLOCKED", current_index=index, error_code="DEPENDENCY_WORKTREE_NOT_TRANSFERRED", error_message=message)
+                        return
+                update("RUNNING", current_index=index)
+                # Persist the launch barrier before any external side effect.
+                # If ownership changes during the call, recovery stops here as
+                # uncertain and the old token cannot write or advance again.
+                step_update(step["agent_key"], "STARTING")
+                check_owner()
+                try:
+                    result = service.start_pane_mission(
+                        step["pane_id"], None, confirm_model=None,
+                        test_profile=step["test_profile"], timeout_seconds=None,
+                    )
+                except DevServiceError as error:
+                    status = "BLOCKED" if error.code in {"DEPENDENCY_PENDING", "PANE_BUSY", "TEST_PROFILE_NOT_FOUND"} else "FAILED"
+                    step_update(step["agent_key"], status, error_code=error.code, error_message=str(error))
+                    update(status, current_index=index, error_code=error.code, error_message=str(error))
+                    return
+                mission_id = result["mission"]["mission_id"]
+                step_update(step["agent_key"], "RUNNING", mission_id=mission_id)
+            while True:
+                check_owner()
+                mission = dev_missions.get_mission(mission_id)
+                if mission is None:
+                    step_update(step["agent_key"], "RESULT_UNCERTAIN", error_code="MISSION_RECORD_MISSING")
+                    update("RESULT_UNCERTAIN", current_index=index, error_code="MISSION_RECORD_MISSING")
+                    return
+                if _is_interrupted(plan_id) and mission["status"] in ACTIVE_MISSION_STATUSES:
                     try:
                         from nexus.dev import mission_runner
-                        mission_runner.interrupt_mission(
-                            result["pane"]["session"]["session_id"], mission_id
-                        )
+                        check_owner()
+                        mission_runner.interrupt_mission(mission["dev_session_id"], mission_id)
                     except DevServiceError:
                         pass
-                mission = dev_missions.get_mission(mission_id)
-                if mission is None or mission["status"] in ACTIVE_MISSION_STATUSES:
+                if mission["status"] in ACTIVE_MISSION_STATUSES:
                     time.sleep(0.2)
                     continue
                 status = mission["status"]
                 if status == "READY_FOR_REVIEW":
-                    execution_store.update_step(plan_id, step["agent_key"], status, result=_step_result(mission))
+                    step_update(step["agent_key"], status, result=_step_result(mission))
+                    if _is_interrupted(plan_id):
+                        update("INTERRUPTED", current_index=index + 1)
+                        return
                     break
-                if status in {"CANCELLED", "INTERRUPTED"}:
-                    execution_store.update_step(plan_id, step["agent_key"], "INTERRUPTED", result=_step_result(mission), error_code=mission["error_code"], error_message=mission["error_message"])
-                    execution_store.update_execution(plan_id, "INTERRUPTED", current_index=index, error_code="MISSION_INTERRUPTED", error_message=mission["error_message"])
-                    return
-                if status == "OUTCOME_UNKNOWN":
-                    execution_store.update_step(plan_id, step["agent_key"], status, result=_step_result(mission), error_code=mission["error_code"], error_message=mission["error_message"])
-                    execution_store.update_execution(plan_id, "RESULT_UNCERTAIN", current_index=index, error_code="MISSION_OUTCOME_UNKNOWN", error_message="Mission outcome is unknown; it was not replayed.")
-                    return
-                execution_store.update_step(plan_id, step["agent_key"], "FAILED", result=_step_result(mission), error_code=mission["error_code"], error_message=mission["error_message"])
-                execution_store.update_execution(plan_id, "FAILED", current_index=index, error_code=mission["error_code"] or "MISSION_FAILED", error_message=mission["error_message"])
+                terminal = "INTERRUPTED" if status in {"CANCELLED", "INTERRUPTED"} else "RESULT_UNCERTAIN" if status == "OUTCOME_UNKNOWN" else "FAILED"
+                step_update(step["agent_key"], terminal, result=_step_result(mission), error_code=mission["error_code"], error_message=mission["error_message"])
+                update(terminal, current_index=index, error_code=mission["error_code"] or f"MISSION_{terminal}", error_message=mission["error_message"])
                 return
-        execution_store.update_execution(plan_id, "AWAITING_REVIEW", current_index=len(execution["steps"]), result={"human_approval_required": True, "integration_applied": False})
+        update("AWAITING_REVIEW", current_index=len(execution["steps"]), result={"human_approval_required": True, "integration_applied": False})
+    except execution_store.OwnershipLost:
+        # No unfenced cleanup: the new owner is solely responsible for state.
+        return
     except Exception as error:  # noqa: BLE001 - durable failure boundary
-        execution_store.update_execution(plan_id, "RESULT_UNCERTAIN", error_code="COORDINATOR_INTERRUPTED", error_message=str(error))
+        try:
+            update("RESULT_UNCERTAIN", error_code="COORDINATOR_INTERRUPTED", error_message=str(error))
+        except execution_store.OwnershipLost:
+            pass
     finally:
+        stop.set()
+        heartbeat.join(timeout=3)
         with _workers_lock:
-            _workers.pop(plan_id, None)
+            if _workers.get(plan_id) is threading.current_thread():
+                _workers.pop(plan_id, None)
+
+
+def _spawn(plan_id: str, token: str) -> None:
+    with _workers_lock:
+        worker = threading.Thread(target=_run, args=(plan_id, token), daemon=True, name=f"nexus-plan-{plan_id}")
+        _workers[plan_id] = worker
+        worker.start()
 
 
 def start(plan_id: str) -> dict:
-    execution = execution_store.view(plan_id)
-    if execution is None:
-        _fail("EXECUTION_NOT_AUTHORIZED", "Authorize this plan before starting it.")
+    execution = state(plan_id)
     if execution["status"] == "AWAITING_EXECUTION":
-        if not execution_store.claim_execution(plan_id):
-            return execution_store.view(plan_id)
-    elif execution["status"] != "RUNNING":
-        return execution
-    else:
-        owner = execution.get("owner") or {}
-        current_owner = {"host": socket.gethostname(), "pid": os.getpid()}
-        if owner and owner != current_owner:
-            # A different process may still own the durable worker. Fail closed
-            # instead of creating a second monitor that could advance the plan.
-            return execution
-    with _workers_lock:
-        worker = _workers.get(plan_id)
-        if worker is None or not worker.is_alive():
-            worker = threading.Thread(target=_run, args=(plan_id,), daemon=True, name=f"nexus-plan-{plan_id}")
-            _workers[plan_id] = worker
-            worker.start()
+        token = execution_store.claim_execution(plan_id)
+        if token:
+            _spawn(plan_id, token)
+    # Duplicate start requests do not attach or spawn workers. Recovery owns
+    # the separate, stale-lease-only takeover path.
     return execution_store.view(plan_id)
 
 
 def interrupt(plan_id: str) -> dict:
-    execution = execution_store.view(plan_id)
-    if execution is None:
-        _fail("EXECUTION_NOT_AUTHORIZED", "This plan has no execution authorization.")
+    execution = state(plan_id)
     if execution["status"] in {"AWAITING_REVIEW", "BLOCKED", "FAILED", "INTERRUPTED", "RESULT_UNCERTAIN"}:
         return execution
     execution_store.request_interrupt(plan_id)
@@ -237,39 +276,21 @@ def interrupt(plan_id: str) -> dict:
 
 
 def recover(plan_id: str) -> dict:
-    """Resume a stale durable worker without replaying an identified mission."""
+    """Atomically take a stale lease and reconcile without replaying a launch."""
     execution = state(plan_id)
     if execution["status"] != "RUNNING":
         return execution
-    if not execution_store.claim_recovery(plan_id):
-        return execution_store.view(plan_id)
-    with _workers_lock:
-        worker = _workers.get(plan_id)
-        if worker is None or not worker.is_alive():
-            worker = threading.Thread(target=_run, args=(plan_id,), daemon=True, name=f"nexus-plan-{plan_id}")
-            _workers[plan_id] = worker
-            worker.start()
+    token = execution_store.claim_recovery(plan_id)
+    if token:
+        _spawn(plan_id, token)
     return execution_store.view(plan_id)
 
 
 def state(plan_id: str) -> dict:
+    """A state query is strictly read-only, including during STARTING."""
     execution = execution_store.view(plan_id)
     if execution is None:
         _fail("EXECUTION_NOT_AUTHORIZED", "This plan has no execution authorization.")
-    # STARTING is a deliberate crash boundary: no mission id means the
-    # process could have died before the Mission Runner accepted the launch.
-    # Marking it uncertain prevents a restart from replaying the agent turn.
-    for step in execution["steps"]:
-        if step["status"] == "STARTING" and not step["mission_id"]:
-            message = "Coordinator stopped before the mission was durably identified; it was not replayed."
-            execution_store.update_step(plan_id, step["agent_key"], "RESULT_UNCERTAIN",
-                                        error_code="COORDINATOR_START_INTERRUPTED", error_message=message)
-            execution_store.update_execution(plan_id, "RESULT_UNCERTAIN",
-                                             current_index=step["ordinal"],
-                                             error_code="COORDINATOR_START_INTERRUPTED",
-                                             error_message=message)
-            break
-    execution = execution_store.view(plan_id)
     return execution
 
 

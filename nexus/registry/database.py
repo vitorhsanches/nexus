@@ -607,3 +607,7 @@ def initialize_database() -> None:
                 ON workspace_plan_execution_steps(plan_id, status, ordinal);
             """
         )
+        execution_cols = {row[1] for row in connection.execute("PRAGMA table_info(workspace_plan_executions)")}
+        for column in ("owner_token", "lease_renewed_at"):
+            if column not in execution_cols:
+                connection.execute(f"ALTER TABLE workspace_plan_executions ADD COLUMN {column} TEXT")
