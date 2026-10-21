@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -72,12 +73,32 @@ def live_other_pid():
     """A genuinely different, genuinely alive PID (not this test process's
     own -- classify_ownership special-cases owner_pid == current_pid() as
     "current_process", not "live_same_host")."""
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; print('READY', flush=True); sys.stdin.buffer.read(1)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
+    )
+    ready = threading.Event()
+    greeting = []
+
+    def read_ready():
+        greeting.append(process.stdout.readline().strip())
+        ready.set()
+
+    reader = threading.Thread(target=read_ready, daemon=True)
+    reader.start()
     try:
+        assert ready.wait(10), "child did not report readiness"
+        assert greeting == ["READY"] and process.poll() is None, "child exited before ownership assertion"
         yield process.pid
     finally:
-        process.kill()
+        if process.poll() is None:
+            process.kill()
         process.wait()
+        reader.join(timeout=2)
+        process.stdin.close()
+        process.stdout.close()
+        process.stderr.close()
 
 
 # ---------------------------------------------------------------------------
