@@ -28,6 +28,11 @@
     PROPOSED: "Proposto", SUPERSEDED: "Substituído por um plano mais novo", APPROVING: "Criando agentes…",
     APPROVED: "Aprovado — agentes criados", APPROVED_PARTIAL: "Aprovado parcialmente", APPROVAL_FAILED: "Falha ao criar agentes",
   };
+  const EXECUTION_STATUS_LABELS = {
+    AWAITING_EXECUTION: "Aguardando início", RUNNING: "Executando sequência",
+    WAITING_DEPENDENCY: "Aguardando dependência", AWAITING_REVIEW: "Aguardando revisão humana",
+    BLOCKED: "Bloqueado", FAILED: "Falhou", INTERRUPTED: "Interrompido", RESULT_UNCERTAIN: "Resultado incerto",
+  };
 
   function costLabel(costStatus) {
     switch (costStatus) {
@@ -141,6 +146,53 @@
       },
       paid: [...new Set(paid)],
     };
+  }
+
+  function approvedExecutionLimits(plan) {
+    const approval = plan.approval || {};
+    const turns = approval.max_turns_per_agent;
+    const seconds = approval.mission_timeout_seconds;
+    if (plan.status !== "APPROVED" || !Number.isInteger(turns) || turns < 1 || turns > 6 ||
+        !Number.isInteger(seconds) || seconds < 60 || seconds > 3600) {
+      return { error: "Aprovação persistida incompleta. Revise a aprovação antes de executar a sequência." };
+    }
+    return { max_turns_per_agent: turns, mission_timeout_seconds: seconds };
+  }
+
+  function chargedExecutionModels(plan, models) {
+    const approval = plan.approval || {};
+    const choices = Object.values(approval.agent_models || {});
+    return [...new Set(choices.filter((choice) => {
+      const live = models && models.find((item) => item.id === choice.model);
+      return !isFree(live ? live.cost_status : models ? undefined : choice.cost_status);
+    }).map((choice) => choice.model))];
+  }
+
+  function persistedCostConfirmed(plan, models) {
+    const paid = chargedExecutionModels(plan, models);
+    const approval = plan.approval || {};
+    const confirmed = new Set(approval.cost_confirmed_for || []);
+    return plan.status === "APPROVED" && paid.length > 0 && paid.every((model) => confirmed.has(model));
+  }
+
+  function executionPayload(plan, form, models) {
+    const limits = approvedExecutionLimits(plan);
+    if (limits.error) return limits;
+    const testProfiles = {};
+    for (const agent of plan.agents) {
+      const profile = (form.profiles || {})[agent.key];
+      if (!profile) return { error: `Escolha o perfil de teste de ${agent.title}.` };
+      testProfiles[agent.key] = profile;
+    }
+    return { payload: {
+      agent_keys: plan.agents.map((agent) => agent.key),
+      test_profiles: testProfiles,
+      // The persisted approval is authoritative even if a local draft is
+      // stale or has been edited. The server independently enforces equality.
+      max_turns_per_agent: limits.max_turns_per_agent,
+      mission_timeout_seconds: limits.mission_timeout_seconds,
+      confirm_costs: Boolean(form.confirmCosts || persistedCostConfirmed(plan, models)),
+    } };
   }
 
   function planSourceLabel(plan) {
@@ -337,9 +389,18 @@
       if (!state.approvals[plan.plan_id]) {
         const models = {};
         plan.agents.forEach((agent) => { models[agent.key] = agent.model || ""; });
-        state.approvals[plan.plan_id] = { models, maxTurns: 1, timeoutMinutes: 15, confirmCosts: false };
+        state.approvals[plan.plan_id] = { models, profiles: {}, maxTurns: 1, timeoutMinutes: 15, confirmCosts: false };
       }
-      return state.approvals[plan.plan_id];
+      const draft = state.approvals[plan.plan_id];
+      if (plan.status === "APPROVED") {
+        const modelSignature = JSON.stringify((plan.approval || {}).agent_models || {});
+        if (draft.approvedModels && draft.approvedModels !== modelSignature) draft.confirmCosts = false;
+        draft.approvedModels = modelSignature;
+        const limits = approvedExecutionLimits(plan);
+        draft.maxTurns = limits.error ? null : limits.max_turns_per_agent;
+        draft.timeoutMinutes = limits.error ? null : limits.mission_timeout_seconds / 60;
+      }
+      return draft;
     }
 
     function renderPlan(plan) {
@@ -353,6 +414,38 @@
       const editable = plan.status === "PROPOSED" && Boolean(state.workspace);
       const draft = approvalDraft(plan);
       plan.agents.forEach((agent) => card.appendChild(renderAgentRow(plan, agent, draft, editable)));
+      if (plan.status === "APPROVED") {
+        const limits = approvedExecutionLimits(plan);
+        const execution = plan.execution;
+        if (execution) {
+          card.appendChild(el("div", { className: "ws-pane-section" },
+            el("h3", { text: EXECUTION_STATUS_LABELS[execution.status] || execution.status }),
+            el("div", { className: "ws-msg-meta", text: `${execution.current_index}/${execution.steps.length} agentes processados` }),
+            ...execution.steps.map((step) => el("div", { text: `${step.ordinal + 1}. ${step.agent_key}: ${step.status}${step.error_code ? ` · ${step.error_code}` : ""}` })),
+            execution.error_message ? el("div", { className: "ws-error", text: execution.error_message }) : null,
+            ["RUNNING", "WAITING_DEPENDENCY"].includes(execution.status)
+              ? button("Interromper sequência", () => interruptExecution(plan), { className: "ws-button-secondary" }) : null));
+          return card;
+        }
+        const profileControls = plan.agents.map((agent) => {
+          const select = el("select", { attrs: { "aria-label": `Perfil de teste de ${agent.title}` } },
+            ...state.profiles.map((profile) => el("option", { text: profile.name || profile.id, attrs: { value: profile.id } })));
+          select.value = draft.profiles[agent.key] || (state.profiles[0] && state.profiles[0].id) || "";
+          draft.profiles[agent.key] = select.value;
+          select.addEventListener("change", () => { draft.profiles[agent.key] = select.value; });
+          return el("label", { className: "ws-plan-limits" }, el("span", { text: `Teste · ${agent.title}` }), select);
+        });
+        const confirmed = new Set((plan.approval || {}).cost_confirmed_for || []);
+        const missing = chargedExecutionModels(plan, state.models).filter((model) => !confirmed.has(model));
+        card.append(
+          el("p", { className: limits.error ? "ws-error" : "ws-msg-meta", text: limits.error || `Limites aprovados: ${limits.max_turns_per_agent} turnos por agente · ${limits.mission_timeout_seconds} segundos por missão` }),
+          el("div", { className: "ws-plan-limits" }, ...profileControls));
+        if (missing.length) card.appendChild(checkbox(`Autorizo o custo destes modelos para a sequência: ${missing.join(", ")}`,
+          draft.confirmCosts, (value) => { draft.confirmCosts = value; }).label);
+        card.appendChild(
+          button("Autorizar e executar sequência", () => authorizeExecution(plan), { className: "ws-button-primary", disabled: !state.profiles.length || Boolean(limits.error) }));
+        return card;
+      }
       if (!editable) return card;
 
       const turns = el("select", { attrs: { "aria-label": "Turnos por agente" } },
@@ -375,6 +468,23 @@
         el("p", { className: "ws-msg-meta", text: "A aprovação cria os agentes e autoriza estes modelos dentro dos limites acima. Nenhuma missão começa sozinha; nada é aplicado ao projeto. Limites financeiros não são impostos pela infraestrutura." }),
         approve);
       return card;
+    }
+
+    async function authorizeExecution(plan) {
+      const draft = approvalDraft(plan);
+      const result = executionPayload(plan, draft, state.models);
+      if (result.error) { showError(result.error); return; }
+      try {
+        await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execute`, { method: "POST", body: result.payload });
+        showError("");
+      } catch (error) { showError(error.message); }
+      await refresh({ force: true });
+    }
+
+    async function interruptExecution(plan) {
+      try { await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/interrupt`, { method: "POST" }); showError(""); }
+      catch (error) { showError(error.message); }
+      await refresh({ force: true });
     }
 
     function renderMaestro() {
@@ -801,12 +911,12 @@
       await loadProject(initial);
     }
 
-    return { init, refresh, state, api, sendMaestro, approvePlan, authorizePlanning, patchPane, move, select };
+    return { init, refresh, state, api, sendMaestro, approvePlan, authorizeExecution, authorizePlanning, patchPane, move, select };
   }
 
   const exported = {
     createWorkspace, paneStatus, density, sortPanes, moveUpdates, missionPayload, messagePayload,
-    canStartMission, costLabel, approvalPayload, planSourceLabel, outcomeLabel, planAuthorized,
+    canStartMission, costLabel, approvalPayload, approvedExecutionLimits, executionPayload, planSourceLabel, outcomeLabel, planAuthorized,
   };
   global.NexusWorkspace = exported;
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
