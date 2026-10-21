@@ -441,7 +441,7 @@ test("approval with 2 turns and 1800 seconds survives full reload and sequence a
   const restored = second.app.state.approvals[proposed.plan_id];
   assert.equal(restored.maxTurns, 2);
   assert.equal(restored.timeoutMinutes, 30);
-  assert.equal(restored.confirmCosts, true, "only the recorded paid routes retain cost approval");
+  assert.equal(restored.confirmCosts, false, "a new form does not imply a new cost authorization");
   await second.app.authorizeExecution(box.maestro.messages[0].plan);
   const sent = second.calls.find((call) => call.url.endsWith("/execute"));
   assert.deepEqual(sent.body, {
@@ -506,6 +506,24 @@ test("recorded cost authorization never expands to a newly selected paid route",
   p.approval.agent_models.ui.model = "different/paid";
   const result = ws.executionPayload(p, { profiles: { api: "unit", ui: "unit" } });
   assert.equal(result.payload.confirm_costs, false);
+});
+
+test("legacy low cost sequence requires explicit confirmation and shows its exact model", async () => {
+  const p = approvedPlan({ approval: {
+    ...approvedPlan().approval,
+    agent_models: { api: { model: "low/model", cost_status: "low_cost" }, ui: { model: "free/model", cost_status: "free" } },
+    cost_confirmed_for: [],
+  } });
+  const routes = { ...baseRoutes(boxWithPlans(p)), "GET /api/dev/models": { models: [
+    { id: "free/model", cost_status: "free" }, { id: "low/model", cost_status: "low_cost" },
+  ] } };
+  const { app, doc } = harness(routes);
+  await app.init();
+  assert.equal(ws.executionPayload(p, { profiles: { api: "unit", ui: "unit" } }, app.state.models).payload.confirm_costs, false);
+  assert.match(doc.byId["ws-maestro-log"].text(), /Autorizo o custo destes modelos para a sequência: low\/model/);
+  const draft = app.state.approvals[p.plan_id];
+  draft.confirmCosts = true;
+  assert.equal(ws.executionPayload(p, draft, app.state.models).payload.confirm_costs, true);
 });
 
 test("proposed plans retain their original approval defaults and cannot execute yet", async () => {

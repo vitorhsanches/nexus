@@ -92,6 +92,71 @@ def _authorize(env):
     )
 
 
+def _set_models(env, monkeypatch, choices, confirmed=None):
+    catalog = [FREE, {"id": "low/model", "cost_status": "low_cost"},
+               {"id": "std/model", "cost_status": "standard"},
+               {"id": "other/model", "cost_status": "premium"}]
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: {"models": catalog, "catalog_error": None})
+    with database.get_connection() as connection:
+        plan = connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan_id"],)).fetchone()
+        approval = json.loads(plan["approval_json"])
+        approval["agent_models"] = {key: {"model": model, "cost_status": next(
+            item["cost_status"] for item in catalog if item["id"] == model)} for key, model in choices.items()}
+        if confirmed is not None:
+            approval["cost_confirmed_for"] = confirmed
+        connection.execute("UPDATE workspace_plans SET approval_json=? WHERE id=?", (json.dumps(approval), env["plan_id"]))
+        for key, model in choices.items():
+            connection.execute("UPDATE workspace_panes SET model=? WHERE plan_id=? AND plan_agent_key=?", (model, env["plan_id"], key))
+
+
+def test_execution_uses_exact_confirmed_model_ids_across_agents(coord_env, monkeypatch):
+    env = coord_env
+    _set_models(env, monkeypatch, {"api": "low/model", "tests": "std/model"}, ["low/model"])
+    with pytest.raises(DevServiceError) as error:
+        _authorize(env)
+    assert error.value.code == "COST_CONFIRMATION_REQUIRED"
+    assert executions.get_execution(env["plan_id"]) is None
+    with database.get_connection() as connection:
+        approval = json.loads(connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan_id"],)).fetchone()[0])
+    assert approval["cost_confirmed_for"] == ["low/model"]
+    result = coordinator.authorize_execution(
+        env["plan_id"], agent_keys=["api", "tests"], test_profiles={"api": "unit", "tests": "unit"},
+        max_turns_per_agent=1, mission_timeout_seconds=60, confirm_costs=True,
+    )
+    assert result["status"] == "AWAITING_EXECUTION"
+    with database.get_connection() as connection:
+        approval = json.loads(connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan_id"],)).fetchone()[0])
+    assert approval["cost_confirmed_for"] == ["low/model", "std/model"]
+    assert approval["execution_cost_confirmations"][0]["model_ids"] == ["std/model"]
+    assert _authorize(env)["status"] == "AWAITING_EXECUTION"
+
+
+def test_execution_legacy_low_cost_requires_new_recorded_consent(coord_env, monkeypatch):
+    env = coord_env
+    _set_models(env, monkeypatch, {"api": "low/model", "tests": "low/model"}, [])
+    with pytest.raises(DevServiceError) as error:
+        _authorize(env)
+    assert error.value.code == "COST_CONFIRMATION_REQUIRED"
+    coordinator.authorize_execution(
+        env["plan_id"], agent_keys=["api", "tests"], test_profiles={"api": "unit", "tests": "unit"},
+        max_turns_per_agent=1, mission_timeout_seconds=60, confirm_costs=True,
+    )
+    with database.get_connection() as connection:
+        approval = json.loads(connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan_id"],)).fetchone()[0])
+    assert approval["cost_confirmed_for"] == ["low/model"]
+    assert approval["execution_cost_confirmations"][0]["model_ids"] == ["low/model"]
+
+
+def test_execution_rejects_stale_or_unapproved_model_even_with_confirmation(coord_env, monkeypatch):
+    env = coord_env
+    _set_models(env, monkeypatch, {"api": "std/model", "tests": "free/model"}, ["std/model"])
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: {"models": [FREE], "catalog_error": None})
+    with pytest.raises(DevServiceError) as error:
+        _authorize(env)
+    assert error.value.code == "MODEL_NOT_AVAILABLE"
+    assert executions.get_execution(env["plan_id"]) is None
+
+
 def test_execution_requires_approved_plan_and_is_idempotent(coord_env):
     env = coord_env
     with database.get_connection() as connection:

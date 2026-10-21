@@ -91,6 +91,8 @@ def create_execution(
     *,
     max_turns_per_agent: int,
     mission_timeout_seconds: int,
+    confirmed_model_ids: list[str] | None = None,
+    expected_agent_models: dict | None = None,
 ) -> tuple[object, bool]:
     """Create the one execution authorization, or return the existing one.
 
@@ -103,6 +105,13 @@ def create_execution(
     profiles = {step["agent_key"]: step["test_profile"] for step in steps}
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if confirmed_model_ids:
+            plan = connection.execute(
+                "SELECT status, approval_json FROM workspace_plans WHERE id = ?", (plan_id,)
+            ).fetchone()
+            approval = _json(plan["approval_json"], {}) if plan is not None else {}
+            if plan is None or plan["status"] != "APPROVED" or approval.get("agent_models") != expected_agent_models:
+                raise ValueError("plan approval changed before cost confirmation")
         existing = connection.execute(
             "SELECT * FROM workspace_plan_executions WHERE plan_id = ?", (plan_id,)
         ).fetchone()
@@ -114,6 +123,8 @@ def create_execution(
                 or existing["mission_timeout_seconds"] != mission_timeout_seconds
             ):
                 raise ValueError("plan execution already has a different authorization")
+            if confirmed_model_ids:
+                _record_cost_confirmation(connection, plan_id, approval, confirmed_model_ids, now)
             return existing, False
         connection.execute(
             """INSERT INTO workspace_plan_executions
@@ -130,10 +141,25 @@ def create_execution(
                    VALUES (?, ?, ?, ?, ?, 'PENDING', ?)""",
                 (plan_id, step["agent_key"], step["ordinal"], step["pane_id"], step["test_profile"], now),
             )
+        if confirmed_model_ids:
+            _record_cost_confirmation(connection, plan_id, approval, confirmed_model_ids, now)
         row = connection.execute(
             "SELECT * FROM workspace_plan_executions WHERE plan_id = ?", (plan_id,)
         ).fetchone()
     return row, True
+
+
+def _record_cost_confirmation(connection, plan_id: str, approval: dict, model_ids: list[str], now: str) -> None:
+    confirmed = approval.get("cost_confirmed_for")
+    approval["cost_confirmed_for"] = sorted(set(confirmed if isinstance(confirmed, list) else []) | set(model_ids))
+    history = approval.get("execution_cost_confirmations")
+    if not isinstance(history, list):
+        history = []
+    history.append({"model_ids": model_ids, "confirmed_at": now})
+    approval["execution_cost_confirmations"] = history
+    connection.execute(
+        "UPDATE workspace_plans SET approval_json = ? WHERE id = ?", (json.dumps(approval), plan_id)
+    )
 
 
 def claim_execution(plan_id: str) -> str | None:

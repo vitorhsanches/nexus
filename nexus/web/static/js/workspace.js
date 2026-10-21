@@ -159,15 +159,23 @@
     return { max_turns_per_agent: turns, mission_timeout_seconds: seconds };
   }
 
-  function persistedCostConfirmed(plan) {
+  function chargedExecutionModels(plan, models) {
     const approval = plan.approval || {};
     const choices = Object.values(approval.agent_models || {});
-    const paid = choices.filter((choice) => !isFree(choice.cost_status));
-    const confirmed = new Set(approval.cost_confirmed_for || []);
-    return plan.status === "APPROVED" && paid.length > 0 && paid.every((choice) => confirmed.has(choice.model));
+    return [...new Set(choices.filter((choice) => {
+      const live = models && models.find((item) => item.id === choice.model);
+      return !isFree(live ? live.cost_status : models ? undefined : choice.cost_status);
+    }).map((choice) => choice.model))];
   }
 
-  function executionPayload(plan, form) {
+  function persistedCostConfirmed(plan, models) {
+    const paid = chargedExecutionModels(plan, models);
+    const approval = plan.approval || {};
+    const confirmed = new Set(approval.cost_confirmed_for || []);
+    return plan.status === "APPROVED" && paid.length > 0 && paid.every((model) => confirmed.has(model));
+  }
+
+  function executionPayload(plan, form, models) {
     const limits = approvedExecutionLimits(plan);
     if (limits.error) return limits;
     const testProfiles = {};
@@ -183,7 +191,7 @@
       // stale or has been edited. The server independently enforces equality.
       max_turns_per_agent: limits.max_turns_per_agent,
       mission_timeout_seconds: limits.mission_timeout_seconds,
-      confirm_costs: Boolean(form.confirmCosts || persistedCostConfirmed(plan)),
+      confirm_costs: Boolean(form.confirmCosts || persistedCostConfirmed(plan, models)),
     } };
   }
 
@@ -385,10 +393,12 @@
       }
       const draft = state.approvals[plan.plan_id];
       if (plan.status === "APPROVED") {
+        const modelSignature = JSON.stringify((plan.approval || {}).agent_models || {});
+        if (draft.approvedModels && draft.approvedModels !== modelSignature) draft.confirmCosts = false;
+        draft.approvedModels = modelSignature;
         const limits = approvedExecutionLimits(plan);
         draft.maxTurns = limits.error ? null : limits.max_turns_per_agent;
         draft.timeoutMinutes = limits.error ? null : limits.mission_timeout_seconds / 60;
-        draft.confirmCosts = Boolean(draft.confirmCosts || persistedCostConfirmed(plan));
       }
       return draft;
     }
@@ -425,9 +435,14 @@
           select.addEventListener("change", () => { draft.profiles[agent.key] = select.value; });
           return el("label", { className: "ws-plan-limits" }, el("span", { text: `Teste · ${agent.title}` }), select);
         });
+        const confirmed = new Set((plan.approval || {}).cost_confirmed_for || []);
+        const missing = chargedExecutionModels(plan, state.models).filter((model) => !confirmed.has(model));
         card.append(
           el("p", { className: limits.error ? "ws-error" : "ws-msg-meta", text: limits.error || `Limites aprovados: ${limits.max_turns_per_agent} turnos por agente · ${limits.mission_timeout_seconds} segundos por missão` }),
-          el("div", { className: "ws-plan-limits" }, ...profileControls),
+          el("div", { className: "ws-plan-limits" }, ...profileControls));
+        if (missing.length) card.appendChild(checkbox(`Autorizo o custo destes modelos para a sequência: ${missing.join(", ")}`,
+          draft.confirmCosts, (value) => { draft.confirmCosts = value; }).label);
+        card.appendChild(
           button("Autorizar e executar sequência", () => authorizeExecution(plan), { className: "ws-button-primary", disabled: !state.profiles.length || Boolean(limits.error) }));
         return card;
       }
@@ -457,7 +472,7 @@
 
     async function authorizeExecution(plan) {
       const draft = approvalDraft(plan);
-      const result = executionPayload(plan, draft);
+      const result = executionPayload(plan, draft, state.models);
       if (result.error) { showError(result.error); return; }
       try {
         await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execute`, { method: "POST", body: result.payload });

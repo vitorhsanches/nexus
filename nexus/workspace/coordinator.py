@@ -76,8 +76,16 @@ def authorize_execution(
     missing = sorted(set(test_profiles.values()) - available)
     if missing:
         _fail("TEST_PROFILE_NOT_FOUND", "Trusted test profile unavailable: " + ", ".join(missing), 409)
-    paid = [key for key, value in selected.items() if value.get("cost_status") not in {"free", "low_cost"}]
-    if paid and not (confirm_costs or set(paid).issubset(set(approval.get("cost_confirmed_for") or []))):
+    from nexus.dev.models import list_dev_models
+    catalog = {item["id"]: item for item in list_dev_models()["models"]}
+    selected_ids = {value.get("model") for value in selected.values() if isinstance(value, dict)}
+    if len(selected) != len(planned) or not selected_ids or any(model not in catalog for model in selected_ids):
+        _fail("MODEL_NOT_AVAILABLE", "An approved model is no longer available in the live catalog.", 409)
+    charged = {model for model in selected_ids if catalog[model].get("cost_status") != "free"}
+    confirmed = approval.get("cost_confirmed_for")
+    confirmed_ids = set(confirmed) if isinstance(confirmed, list) else set()
+    missing_consent = charged - confirmed_ids
+    if missing_consent and not confirm_costs:
         _fail("COST_CONFIRMATION_REQUIRED", "Execution needs explicit cost confirmation for the selected routes.", 400)
     steps = [
         {"agent_key": key, "ordinal": index, "pane_id": panes[key]["id"], "test_profile": test_profiles[key]}
@@ -88,6 +96,8 @@ def authorize_execution(
             plan_id, plan["project_id"], steps,
             max_turns_per_agent=max_turns_per_agent,
             mission_timeout_seconds=mission_timeout_seconds,
+            confirmed_model_ids=sorted(missing_consent) if confirm_costs else [],
+            expected_agent_models=selected,
         )
     except ValueError as error:
         _fail("EXECUTION_ALREADY_AUTHORIZED", str(error), 409)
