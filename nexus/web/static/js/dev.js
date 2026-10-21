@@ -25,7 +25,7 @@
   var state = {
     previousMode: null, previousView: null, previousNavId: null, previousFocus: null,
     allProjects: [], projects: [], sessions: [], session: null,
-    modelOptions: [], defaultModel: null,
+    modelOptions: [], defaultModel: null, testProfiles: [],
     selectedModel: null, selectedEffort: null,
     executionEnabled: false, executionStatusChecked: false,
     review: null, selectedReviewPath: null, reviewLoading: false,
@@ -227,7 +227,7 @@
     if (note) {
       note.textContent = state.projects.length
         ? ""
-        : "No registered project has Development Mode authorization (dev_enabled) yet.";
+        : "No project is authorized. Run .venv\\Scripts\\python -m nexus.dev.operator authorize <project-id> locally, then restart or refresh.";
     }
   }
 
@@ -237,7 +237,7 @@
       populateProjects(payload && payload.projects);
       return loadSessions();
     }).then(function () {
-      return request("/chat/models");
+      return request("/dev/models");
     }).then(function (models) {
       state.modelOptions = (models.models || []).filter(function (model) { return model.selectable === true && typeof model.id === "string"; });
       state.defaultModel = models.default_model;
@@ -245,7 +245,8 @@
       populateModelSelect();
       populateEffortSelect();
       updateMissionControls();
-      showStatus("Ready.", "ready");
+      if (models.catalog_error) showStatus(models.catalog_error, "error");
+      else showStatus("Ready.", "ready");
     }).catch(function (error) {
       showStatus("Could not load Development Mode data: " + error.message, "error");
     });
@@ -260,11 +261,11 @@
     });
     var visible = matches.slice(0, 50);
     select.replaceChildren();
-    var auto = document.createElement("option"); auto.value = ""; auto.textContent = "Auto — session default";
+    var auto = document.createElement("option"); auto.value = ""; auto.textContent = "Select an approved model…";
     select.appendChild(auto);
     visible.forEach(function (model) {
       var option = document.createElement("option"); option.value = model.id;
-      option.textContent = model.name + " · " + model.id;
+      option.textContent = model.name + " · " + model.id + " · cost: " + (model.cost_status || "unknown");
       select.appendChild(option);
     });
     var resultCount = $("dev-model-result-count");
@@ -329,12 +330,42 @@
     });
   }
 
+  function loadTestProfiles(projectId) {
+    state.testProfiles = [];
+    var select = $("dev-mission-test-profile");
+    if (select) {
+      select.replaceChildren();
+      var loading = document.createElement("option"); loading.value = ""; loading.textContent = projectId ? "Loading trusted profiles…" : "Select a project first";
+      select.appendChild(loading);
+    }
+    if (!projectId) { updateMissionControls(); return Promise.resolve(); }
+    return request("/dev/test-profiles?project_id=" + encodeURIComponent(projectId)).then(function (payload) {
+      state.testProfiles = (payload && payload.profiles) || [];
+      if (select) {
+        select.replaceChildren();
+        var prompt = document.createElement("option"); prompt.value = "";
+        prompt.textContent = state.testProfiles.length ? "Select a trusted profile…" : "No trusted profile configured for this project";
+        select.appendChild(prompt);
+        state.testProfiles.forEach(function (profile) {
+          var option = document.createElement("option"); option.value = profile.id;
+          option.textContent = profile.name + " · " + profile.id + " · " + profile.timeout_seconds + "s";
+          select.appendChild(option);
+        });
+      }
+      updateMissionControls();
+    }).catch(function (error) {
+      showStatus("Could not load trusted test profiles: " + error.message, "error");
+      updateMissionControls();
+    });
+  }
+
   function chooseProject(projectId) {
     state.session = null;
     renderMission(null);
     resetTurnView();
     var createButton = $("dev-create-session");
     if (createButton) createButton.disabled = !projectId;
+    loadTestProfiles(projectId);
     loadSessions();
   }
 
@@ -409,7 +440,8 @@
     var stop = $("dev-mission-stop");
     if (description) description.disabled = !hasSession || active || !state.executionEnabled;
     if (profile) profile.disabled = !hasSession || active || !state.executionEnabled;
-    if (start) start.disabled = !hasSession || active || !state.executionEnabled || !state.selectedModel;
+    var profileSelected = Boolean(profile && profile.value && state.testProfiles.some(function (item) { return item.id === profile.value; }));
+    if (start) start.disabled = !hasSession || active || !state.executionEnabled || !state.selectedModel || !profileSelected;
     if (stop) stop.disabled = !active;
   }
 
@@ -421,12 +453,24 @@
       else {
         var lines = [
           mission.mission_id + " · " + mission.status,
+          "Mission: " + mission.description,
+          "Model: " + mission.requested_model,
           "Attempts: " + mission.attempt_count + " / 2",
           "Test profile: " + mission.test_profile,
-          "Tests: " + ((mission.tests || []).map(function (test) { return "#" + test.attempt_number + " " + test.status; }).join(" · ") || "not started")
+          "Tests: " + ((mission.tests || []).map(function (test) {
+            return "#" + test.attempt_number + " " + test.status + (test.exit_code == null ? "" : " (exit " + test.exit_code + ")");
+          }).join(" · ") || "not started")
         ];
         if (mission.error_code) lines.push("Error: " + mission.error_code + " · " + (mission.error_message || ""));
-        if (mission.status === "READY_FOR_REVIEW") lines.push("Ready for human review. Integration was not applied.");
+        var failedTests = (mission.tests || []).filter(function (test) { return test.status !== "PASSED" && (test.stderr || test.stdout); });
+        failedTests.forEach(function (test) {
+          var evidence = String(test.stderr || test.stdout || "");
+          if (evidence.length > 1200) evidence = evidence.slice(0, 1200) + "\n[output shortened in UI]";
+          lines.push("Test #" + test.attempt_number + " evidence:\n" + evidence);
+        });
+        var changedFiles = mission.result && mission.result.changed_files;
+        if (Array.isArray(changedFiles)) lines.push("Changed files: " + (changedFiles.map(function (file) { return file.path; }).join(", ") || "none"));
+        if (mission.status === "READY_FOR_REVIEW") lines.push("Ready for human review. Review the diff below; integration was not applied.");
         output.textContent = redacted(lines.join("\n"));
       }
     }
@@ -462,6 +506,7 @@
     var profile = $("dev-mission-test-profile");
     var value = description ? description.value.trim() : "";
     if (!value) { showStatus("Describe the autonomous mission before starting it.", "error"); return; }
+    if (!profile || !profile.value) { showStatus("Select a trusted test profile before starting.", "error"); return; }
     request("/dev/sessions/" + encodeURIComponent(state.session.session_id) + "/missions", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ description: value, model: state.selectedModel, allowed_models: [state.selectedModel], test_profile: profile.value })
@@ -1122,6 +1167,7 @@
     var stopButton = $("dev-stop-button"); if (stopButton) stopButton.addEventListener("click", interruptTurn);
     var missionStart = $("dev-mission-start"); if (missionStart) missionStart.addEventListener("click", startAutonomousMission);
     var missionStop = $("dev-mission-stop"); if (missionStop) missionStop.addEventListener("click", interruptAutonomousMission);
+    var missionProfile = $("dev-mission-test-profile"); if (missionProfile) missionProfile.addEventListener("change", updateMissionControls);
     setComposerState(); updateReviewControls(); renderIntegrationSummary();
   });
 

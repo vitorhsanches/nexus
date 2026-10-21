@@ -65,7 +65,8 @@ function setup(options = {}) {
       { id: "demo", name: "Demo", path: "/repo/demo", enabled: 1, dev_enabled: 1 },
       { id: "no-dev", name: "NoDev", path: "/repo/nodev", enabled: 1, dev_enabled: 0 },
     ],
-    models: options.models || { models: [{ id: "cx/gpt-5.6-sol", name: "GPT-5.6 Sol", selectable: true, supported_efforts: ["low", "high"], default_effort: "high" }], default_model: "cx/gpt-5.6-sol" },
+    models: options.models || { models: [{ id: "cx/gpt-5.6-sol", name: "GPT-5.6 Sol", selectable: true, cost_status: "free", supported_efforts: ["low", "high"], default_effort: "high" }], default_model: "cx/gpt-5.6-sol", catalog_error: null },
+    profiles: options.profiles || [{ id: "nexus-f36b", name: "Nexus autonomous mission tests", timeout_seconds: 300, source: "builtin" }],
     executionEnabled: Boolean(options.executionEnabled),
     executionStatusFails: Boolean(options.executionStatusFails),
     sessions: options.sessions || [], turns: new Map(), nextSession: 1, nextTurn: 1,
@@ -85,7 +86,8 @@ function setup(options = {}) {
     const parsed = new URL(url, "http://nexus.test"); const method = opts.method || "GET";
     calls.push({ path: parsed.pathname + parsed.search, method, body: opts.body && JSON.parse(opts.body) });
     if (parsed.pathname === "/api/projects") return response({ projects: backend.projects });
-    if (parsed.pathname === "/api/chat/models") return response(backend.models);
+    if (parsed.pathname === "/api/dev/models") return response(backend.models);
+    if (parsed.pathname === "/api/dev/test-profiles") return response({ profiles: backend.profiles });
     if (parsed.pathname === "/api/dev/integration-status") return response({ integration_enabled: backend.integrationEnabled });
     if (parsed.pathname === "/api/dev/execution-status") {
       return backend.executionStatusFails ? response({ detail: { message: "status unavailable" } }, 500) : response({ execution_enabled: backend.executionEnabled });
@@ -214,6 +216,7 @@ test("autonomous mission posts bounded model and trusted profile then stops for 
   await flush();
   ui.elements["dev-mission-description"].value = "implement bounded feature";
   ui.elements["dev-mission-test-profile"].value = "nexus-f36b";
+  ui.elements["dev-mission-test-profile"].dispatch("change");
   ui.elements["dev-mission-start"].dispatch("click");
   await flush();
   const call = ui.calls.find((item) => item.method === "POST" && item.path === "/api/dev/sessions/DEV-1/missions");
@@ -464,7 +467,7 @@ test("stop button calls the interrupt endpoint for the active turn", async () =>
   assert.ok(ui.calls.some((call) => call.method === "POST" && call.path.startsWith("/api/dev/sessions/DEV-1/interrupt")));
 });
 
-test("model search narrows the compact model list reused from /api/chat/models", async () => {
+test("model search narrows the approved Development model list", async () => {
   const models = { models: Array.from({ length: 60 }, (_, i) => ({ id: "route-" + i, name: "Route " + i, selectable: true, supported_efforts: [] })), default_model: null };
   const ui = setup({ models });
   await ui.window.NexusDev.enter();

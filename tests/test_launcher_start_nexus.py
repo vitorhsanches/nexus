@@ -46,6 +46,14 @@ class StartNexusLauncherTests(unittest.TestCase):
             if env.get("PYTHONPATH"):
                 python_paths.append(env["PYTHONPATH"])
             env["PYTHONPATH"] = os.pathsep.join(python_paths)
+            command_dir = Path(repo) / "commands"
+            command_dir.mkdir()
+            (command_dir / "codex.cmd").write_text("@exit /b 0\n", encoding="utf-8")
+            env["PATH"] = str(command_dir) + os.pathsep + env.get("PATH", "")
+            omni_profile = Path(repo) / "omni-profile"
+            omni_profile.mkdir()
+            (omni_profile / "config.toml").write_text("model_provider = \"omniroute\"\n", encoding="utf-8")
+            env["NEXUS_OMNIROUTE_CODEX_HOME"] = str(omni_profile)
             result = _run_launcher(
                 "-RepoRoot", repo,
                 "-OmniRoutePort", "20999",

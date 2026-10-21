@@ -888,6 +888,35 @@ def list_dev_integrations(session_id: str):
         raise _dev_error_response(error) from error
 
 
+@router.get("/dev/models")
+def list_dev_models_route():
+    """Return live OmniRoute routes approved for Development coding."""
+    from nexus.dev.models import list_dev_models
+
+    return list_dev_models()
+
+
+@router.get("/dev/test-profiles")
+def list_dev_test_profiles(project_id: str = Query(min_length=1, max_length=128)):
+    """Return operator-owned verification profiles bound to one authorized project."""
+    from nexus.dev.service import DevServiceError, validate_dev_project
+    from nexus.dev.test_profiles import (
+        VerificationProfileConfigurationError,
+        list_test_profiles,
+    )
+
+    try:
+        validate_dev_project(project_id)
+        return {"profiles": list_test_profiles(project_id)}
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+    except VerificationProfileConfigurationError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TEST_PROFILE_CONFIG_INVALID", "message": str(error)},
+        ) from error
+
+
 @router.get("/dev/execution-status")
 def dev_execution_status():
     """Whether the server-side write-execution feature gate is enabled.

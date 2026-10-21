@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from unittest.mock import Mock
@@ -19,6 +20,15 @@ def mission_env(tmp_path, monkeypatch):
     database.DATABASE_PATH = database.STORAGE_DIR / "nexus.db"
     database.initialize_database()
     monkeypatch.setenv("NEXUS_DEV_EXECUTION_ENABLED", "1")
+    monkeypatch.setattr(
+        "nexus.dev.models.list_dev_models",
+        lambda: {"models": [{"id": "model-a"}], "default_model": None, "catalog_error": None},
+    )
+    monkeypatch.setattr(
+        mission_runner,
+        "resolve_test_profile",
+        lambda name, _project_id: None if name == "missing-profile" else ([sys.executable, "-m", "pytest", "-q"], 30),
+    )
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     with database.get_connection() as connection:
@@ -35,7 +45,7 @@ def mission_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         mission_runner,
         "_require_session_worktree",
-        lambda _session_id: ({"requested_model": "model-a"}, str(worktree)),
+        lambda _session_id: ({"requested_model": "model-a", "project_id": "demo"}, str(worktree)),
     )
     monkeypatch.setattr(mission_runner.executor, "changed_files", lambda _sid: [{"path": "changed.py", "status": "modified"}])
     monkeypatch.setattr(mission_runner.executor, "review_diff", lambda _sid: {"diff": "safe diff"})
@@ -190,7 +200,10 @@ def test_subprocess_launch_failure_preserves_test_record(mission_env, monkeypatc
     monkeypatch.setattr(mission_runner.subprocess, "Popen", Mock(side_effect=OSError("launch failed token=secret-value")))
     mission_id = dev_missions.create_mission("DEV-1", "test", requested_model="model-a", allowed_models=["model-a"], test_profile="nexus-f36b")
     with pytest.raises(DevServiceError) as error:
-        mission_runner._execute_test_profile(mission_id, 1, "nexus-f36b", str(mission_env), threading.Event(), time.monotonic() + 30)
+        mission_runner._execute_test_profile(
+            mission_id, 1, "nexus-f36b", "demo", str(mission_env),
+            threading.Event(), time.monotonic() + 30,
+        )
     assert error.value.code == "TEST_PROCESS_FAILED"
     rows = dev_missions.list_test_runs(mission_id)
     assert len(rows) == 1 and rows[0]["status"] == "FAILED"
