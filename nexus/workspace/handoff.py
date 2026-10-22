@@ -335,3 +335,113 @@ def history(plan_id: str) -> list[dict]:
     if panes.get_plan(plan_id) is None:
         _fail("PLAN_NOT_FOUND", "Plan was not found.", 404)
     return records.list_for_plan(plan_id)
+
+
+def verified_dependency(plan_id: str, source_step, target_step) -> dict:
+    """Read-only proof that the exact completed step reached the target intact.
+
+    This deliberately uses the persisted step mission, never the session's
+    latest mission. It is also called immediately before a resumed launch.
+    """
+    source = panes.get_pane(source_step["pane_id"])
+    target = panes.get_pane(target_step["pane_id"])
+    if source is None or target is None or not source_step["mission_id"]:
+        _fail("RESUME_DEPENDENCY_INVALID", "Dependency identity or mission is missing.")
+    if (source["plan_id"] != plan_id or target["plan_id"] != plan_id
+            or source["project_id"] != target["project_id"]
+            or source["plan_agent_key"] != source_step["agent_key"]
+            or target["plan_agent_key"] != target_step["agent_key"]):
+        _fail("RESUME_DEPENDENCY_INVALID", "Dependency does not belong to this plan.")
+    _identity(source["id"], target["id"])
+    mission = dev_missions.get_mission(source_step["mission_id"])
+    if (mission is None or mission["dev_session_id"] != source["dev_session_id"]
+            or mission["status"] != "READY_FOR_REVIEW" or mission["error_code"]
+            or source_step["status"] != "READY_FOR_REVIEW" or source_step["error_code"]):
+        _fail("RESUME_SOURCE_INVALID", "The persisted source mission is not conclusively ready.")
+    try:
+        record = records.latest_transfer(source_step["mission_id"], target["id"])
+    except (TypeError, ValueError, KeyError):
+        _fail("RESUME_EVIDENCE_INVALID", "Persisted handoff result cannot be decoded.")
+    if record is None or record["status"] != "TRANSFERRED":
+        _fail("DEPENDENCY_WORKTREE_NOT_TRANSFERRED", "The exact source mission has no completed handoff.")
+    try:
+        mission_result = json.loads(mission["result_json"] or "{}")
+        review_id = (mission_result.get("review") or {}).get("review_id")
+        changed = mission_result.get("changed_files") or []
+    except (TypeError, ValueError, AttributeError):
+        _fail("RESUME_EVIDENCE_INVALID", "Source mission review evidence is invalid.")
+    if not isinstance(review_id, str) or not review_id:
+        _fail("RESUME_EVIDENCE_INVALID", "Source mission has no durable review fingerprint.")
+    if mission_result.get("integration_applied") is True:
+        _fail("RESUME_SOURCE_INVALID", "Source mission was already integrated outside this sequence.")
+    source_session = dev_sessions.get_session(source["dev_session_id"])
+    target_session = dev_sessions.get_session(target["dev_session_id"])
+    if (not source_session or not target_session or source_session["status"] != "ACTIVE"
+            or target_session["status"] != "ACTIVE"
+            or records.target_has_unresolved_transfer(target_session["id"])):
+        _fail("RESUME_TARGET_UNCERTAIN", "The target transfer is unresolved.")
+    result = record["result"]
+    fingerprint = record["snapshot_fingerprint"]
+    if (record["project_id"] != source["project_id"] or record["plan_id"] != plan_id
+            or record["source_agent_key"] != source_step["agent_key"]
+            or record["target_agent_key"] != target_step["agent_key"]
+            or record["source_pane_id"] != source["id"] or record["target_pane_id"] != target["id"]
+            or record["source_session_id"] != source_session["id"]
+            or record["target_session_id"] != target_session["id"]
+            or record["source_base_sha"] != source_session["base_sha"]
+            or record["target_base_sha"] != target_session["base_sha"]
+            or record["source_base_sha"] != record["target_base_sha"]
+            or not record["approved_at"] or not record["finished_at"]
+            or not isinstance(fingerprint, str) or len(fingerprint) != 64
+            or record["error_code"] or not isinstance(result, dict)
+            or result.get("verified") is not True
+            or result.get("integration_applied") is not False
+            or result.get("files") != record["files"]):
+        _fail("RESUME_EVIDENCE_INVALID", "Persisted handoff evidence is incomplete or mismatched.")
+    snapshot_keys = (
+        "project_id", "plan_id", "source_agent_key", "target_agent_key",
+        "source_pane_id", "target_pane_id", "source_mission_id", "source_session_id",
+        "target_session_id", "source_base_sha", "source_head_sha",
+        "target_base_sha", "target_head_sha",
+    )
+    approved_snapshot = {key: record[key] for key in snapshot_keys}
+    approved_snapshot["files"] = record["files"]
+    fingerprint = _hash(json.dumps([approved_snapshot, review_id], sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    if fingerprint != record["snapshot_fingerprint"]:
+        _fail("RESUME_EVIDENCE_INVALID", "Handoff fingerprint no longer matches the source review.")
+    if not isinstance(record["files"], list) or not isinstance(changed, list):
+        _fail("RESUME_EVIDENCE_INVALID", "Changed-file evidence has an invalid shape.")
+    try:
+        expected_changes = {(item["path"], item["status"]) for item in record["files"]}
+        recorded_changes = {(item["path"], item["status"]) for item in changed}
+    except (TypeError, KeyError):
+        _fail("RESUME_EVIDENCE_INVALID", "Source mission changed-file list is invalid.")
+    if not expected_changes or len(changed) != len(record["files"]) or recorded_changes != expected_changes:
+        _fail("RESUME_EVIDENCE_INVALID", "Source mission change evidence differs from the handoff.")
+    project_path = validate_dev_project(source["project_id"])
+    try:
+        source_root = verify_dev_worktree(project_path, source_session["worktree_path"], source_session["id"])
+        target_root = verify_dev_worktree(project_path, target_session["worktree_path"], target_session["id"])
+        if read_worktree_head_sha(str(source_root)) != record["source_head_sha"]:
+            _fail("RESUME_SOURCE_INVALID", "Source Git HEAD changed after approval.")
+        if read_worktree_head_sha(str(target_root)) != record["target_head_sha"]:
+            _fail("RESUME_TARGET_DRIFT", "The target Git HEAD changed after transfer.")
+        source_diff = read_worktree_diff(str(source_root), source_session["base_sha"])
+        diff = read_worktree_diff(str(target_root), target_session["base_sha"])
+        if source_diff["truncated"] or source_diff["review_id"] != review_id:
+            _fail("RESUME_SOURCE_INVALID", "Source content no longer matches the approved mission review.")
+        source_files = {(item["path"], "added" if item["status"] == "untracked" else item["status"],
+                         item.get("content_sha256")) for item in source_diff["files"]}
+        expected = {(item["path"], item["status"], item["sha256"]) for item in record["files"]}
+        if source_files != expected or len(source_diff["files"]) != len(record["files"]):
+            _fail("RESUME_SOURCE_INVALID", "Source file hashes differ from the approved handoff.")
+        actual = {(item["path"], "added" if item["status"] == "untracked" else item["status"],
+                   item.get("content_sha256")) for item in diff["files"]}
+        if diff["truncated"] or len(actual) != len(record["files"]) or actual != expected:
+            _fail("RESUME_TARGET_DRIFT", "Target worktree differs from the approved transferred snapshot.")
+        for item in record["files"]:
+            if _hash(_bytes(_safe_path(target_root, item["path"], must_exist=True))) != item["sha256"]:
+                _fail("RESUME_TARGET_DRIFT", "A transferred file was modified or replaced.")
+    except (DevWorktreeError, OSError) as error:
+        _fail("RESUME_TARGET_DRIFT", f"Target worktree verification failed: {error}")
+    return record

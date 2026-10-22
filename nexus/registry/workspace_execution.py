@@ -5,12 +5,48 @@ from __future__ import annotations
 import json
 import os
 import socket
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from nexus.registry.database import get_connection
 
 LEASE_SECONDS = 30
+_launch: ContextVar[tuple[str, str, str] | None] = ContextVar("workspace_launch", default=None)
+
+
+@contextmanager
+def coordinated_launch(plan_id: str, agent_key: str, owner_token: str):
+    """Carry a private credential; the SQLite owner fence remains authoritative."""
+    reset = _launch.set((plan_id, agent_key, owner_token))
+    try:
+        yield
+    finally:
+        _launch.reset(reset)
+
+
+def current_launch() -> tuple[str, str, str] | None:
+    return _launch.get()
+
+
+def assert_manual_execution_allowed(pane) -> None:
+    """Friendly service-level gate; registry repeats it transactionally."""
+    if not pane["plan_id"]:
+        return
+    row = get_execution(pane["plan_id"])
+    if row is None:
+        return
+    context = current_launch()
+    if (row["status"] != "RUNNING" or context is None
+            or context != (pane["plan_id"], pane["plan_agent_key"], row["owner_token"])):
+        from nexus.dev.service import DevServiceError
+
+        raise DevServiceError(
+            "COORDINATED_EXECUTION_REQUIRED",
+            "This agent belongs to a durable sequence; use its coordinator and explicit resume.",
+            http_status=409,
+        )
 
 
 class OwnershipLost(RuntimeError):
@@ -197,6 +233,107 @@ def claim_recovery(plan_id: str, stale_after_seconds: int = LEASE_SECONDS) -> st
         return token if cursor.rowcount == 1 else None
 
 
+def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) -> str | None:
+    """Fence one explicitly approved BLOCKED -> RUNNING transition.
+
+    All durable identity and state predicates are checked under one SQLite
+    write reservation. Filesystem hashes are checked by the coordinator both
+    before this claim and immediately before launch.
+    """
+    now = _now()
+    token = uuid4().hex
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """SELECT e.*, p.status AS plan_status, p.approval_json
+               FROM workspace_plan_executions e JOIN workspace_plans p ON p.id=e.plan_id
+               WHERE e.plan_id=?""", (plan_id,),
+        ).fetchone()
+        if (row is None or row["status"] != "BLOCKED"
+                or row["error_code"] != "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+                or row["current_index"] != index or row["interrupt_requested"]
+                or row["plan_status"] != "APPROVED" or row["approval_json"] != approval_json):
+            return None
+        steps = connection.execute(
+            "SELECT * FROM workspace_plan_execution_steps WHERE plan_id=? ORDER BY ordinal", (plan_id,)
+        ).fetchall()
+        keys = _json(row["agent_keys_json"], [])
+        profiles = _json(row["test_profiles_json"], {})
+        approval = _json(approval_json, {})
+        if (not isinstance(keys, list) or not isinstance(profiles, dict)
+                or not isinstance(approval, dict)
+                or len(steps) != len(keys) or index < 1 or index >= len(steps)
+                or [step["agent_key"] for step in steps] != keys
+                or set(profiles) != set(keys)
+                or approval.get("max_turns_per_agent") != row["max_turns_per_agent"]
+                or approval.get("mission_timeout_seconds") != row["mission_timeout_seconds"]):
+            return None
+        pending = steps[index]
+        if (pending["status"] != "BLOCKED" or pending["error_code"] != row["error_code"]
+                or pending["mission_id"] or pending["started_at"] or pending["result_json"]
+                or any(step["status"] != "READY_FOR_REVIEW" or not step["mission_id"] or step["error_code"]
+                       for step in steps[:index])
+                or any(step["status"] != "PENDING" or step["mission_id"] for step in steps[index + 1:])):
+            return None
+        previous = steps[index - 1]
+        source = connection.execute("SELECT * FROM workspace_panes WHERE id=?", (previous["pane_id"],)).fetchone()
+        target = connection.execute("SELECT * FROM workspace_panes WHERE id=?", (pending["pane_id"],)).fetchone()
+        selected = approval.get("agent_models") or {}
+        if not isinstance(selected, dict) or any(not isinstance(selected.get(key), dict) for key in keys):
+            return None
+        if (source is None or target is None or source["plan_id"] != plan_id
+                or target["plan_id"] != plan_id or source["project_id"] != row["project_id"]
+                or target["project_id"] != row["project_id"]
+                or source["plan_agent_key"] != previous["agent_key"]
+                or target["plan_agent_key"] != pending["agent_key"]
+                or any((connection.execute(
+                    "SELECT model FROM workspace_panes WHERE id=?", (step["pane_id"],)
+                ).fetchone() or {"model": None})["model"] != (selected.get(step["agent_key"]) or {}).get("model")
+                    or step["test_profile"] != profiles[step["agent_key"]] for step in steps)):
+            return None
+        try:
+            dependencies = json.loads(target["brief_json"] or "{}").get("depends_on") or []
+        except (TypeError, ValueError):
+            return None
+        if dependencies != [previous["agent_key"]]:
+            return None
+        handoff = connection.execute("SELECT * FROM workspace_handoffs WHERE id=?", (handoff_id,)).fetchone()
+        if (handoff is None or handoff["status"] != "TRANSFERRED"
+                or handoff["plan_id"] != plan_id or handoff["project_id"] != row["project_id"]
+                or handoff["source_pane_id"] != source["id"] or handoff["target_pane_id"] != target["id"]
+                or handoff["source_mission_id"] != previous["mission_id"]
+                or connection.execute(
+                    """SELECT 1 FROM workspace_handoffs WHERE target_session_id=?
+                       AND status IN ('TRANSFERRING','RESULT_UNCERTAIN') LIMIT 1""",
+                    (target["dev_session_id"],),
+                ).fetchone()):
+            return None
+        try:
+            history = json.loads(row["resume_history_json"]) if row["resume_history_json"] else []
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(history, list):
+            return None
+        history.append({"at": now, "step": pending["agent_key"], "handoff_id": handoff_id,
+                        "previous_status": row["status"], "previous_error_code": row["error_code"],
+                        "previous_error_message": row["error_message"]})
+        connection.execute(
+            """UPDATE workspace_plan_execution_steps SET status='PENDING', error_code=NULL,
+               error_message=NULL, finished_at=NULL, updated_at=?
+               WHERE plan_id=? AND agent_key=? AND status='BLOCKED' AND mission_id IS NULL""",
+            (now, plan_id, pending["agent_key"]),
+        )
+        connection.execute(
+            """UPDATE workspace_plan_executions SET status='RUNNING', owner_host=?, owner_pid=?,
+               owner_acquired_at=?, owner_token=?, lease_renewed_at=?, updated_at=?,
+               error_code=NULL, error_message=NULL, finished_at=NULL, resume_history_json=?
+               WHERE plan_id=? AND status='BLOCKED'""",
+            (socket.gethostname(), os.getpid(), now, token, now, now,
+             json.dumps(history, ensure_ascii=False), plan_id),
+        )
+    return token
+
+
 def renew_lease(plan_id: str, owner_token: str) -> bool:
     now = _now()
     with get_connection() as connection:
@@ -286,6 +423,7 @@ def view(plan_id: str) -> dict | None:
         "current_index": row["current_index"],
         "interrupt_requested": bool(row["interrupt_requested"]),
         "error_code": row["error_code"], "error_message": row["error_message"],
+        "resume_history": _json(row["resume_history_json"], []),
         "result": _json(row["result_json"], None),
         "owner": {"host": row["owner_host"], "pid": row["owner_pid"]} if row["owner_pid"] else None,
         "lease_renewed_at": row["lease_renewed_at"],

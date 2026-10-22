@@ -3,7 +3,7 @@
 This module coordinates existing Development missions. It never implements a
 second executor and never transfers, applies, merges or pushes worktree data.
 When a dependency has changes in its isolated worktree, the next step stops
-with an explicit handoff block because P2B.1 has no safe transfer mechanism.
+until an operator approves a verified handoff and explicitly resumes it.
 """
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ def _approval(plan) -> dict:
 def _step_views(plan) -> list[dict]:
     panes = {pane["plan_agent_key"]: pane for pane in store.panes_for_plan(plan["id"])}
     proposal = json.loads(plan["proposal_json"])
+    if not isinstance(proposal, dict):
+        _fail("RESUME_AUTHORIZATION_INVALID", "Persisted plan proposal is invalid.")
     agents = proposal.get("agents") or []
     return [{"agent_key": agent["key"], "ordinal": index, "pane_id": panes[agent["key"]]["id"]}
             for index, agent in enumerate(agents) if agent["key"] in panes]
@@ -83,7 +85,7 @@ def authorize_execution(
         _fail("MODEL_NOT_AVAILABLE", "An approved model is no longer available in the live catalog.", 409)
     charged = {model for model in selected_ids if catalog[model].get("cost_status") != "free"}
     confirmed = approval.get("cost_confirmed_for")
-    confirmed_ids = set(confirmed) if isinstance(confirmed, list) else set()
+    confirmed_ids = {item for item in confirmed if isinstance(item, str)} if isinstance(confirmed, list) else set()
     missing_consent = charged - confirmed_ids
     if missing_consent and not confirm_costs:
         _fail("COST_CONFIRMATION_REQUIRED", "Execution needs explicit cost confirmation for the selected routes.", 400)
@@ -131,6 +133,107 @@ def _step_result(mission) -> dict:
         return json.loads(mission["result_json"] or "{}") if mission else {}
     except (TypeError, json.JSONDecodeError):
         return {}
+
+
+def _resume_evidence(plan_id: str, execution: dict) -> dict:
+    """Read-only eligibility for the one legacy handoff block we can resume."""
+    from nexus.dev.models import list_dev_models
+    from nexus.dev.test_profiles import list_test_profiles
+    from nexus.registry import workspace_handoff
+    from nexus.workspace import handoff, service
+
+    plan = store.get_plan(plan_id)
+    if plan is None:
+        _fail("PLAN_NOT_FOUND", "The plan no longer exists.", 404)
+    if plan["status"] != "APPROVED" or not plan["approval_json"]:
+        _fail("RESUME_AUTHORIZATION_INVALID", "The plan approval is no longer valid.")
+    steps = execution["steps"]
+    index = execution["current_index"]
+    if (execution["status"] != "BLOCKED"
+            or execution["error_code"] != "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+            or execution["interrupt_requested"] or not isinstance(index, int)
+            or index < 1 or index >= len(steps)):
+        _fail("RESUME_NOT_ALLOWED", "Only an unresolved handoff block can be resumed.")
+    pending = steps[index]
+    previous = steps[index - 1]
+    if (pending["status"] != "BLOCKED" or pending["error_code"] != execution["error_code"]
+            or pending["mission_id"] or pending["started_at"] or pending["result"] is not None
+            or any(step["status"] != "READY_FOR_REVIEW" or not step["mission_id"] or step["error_code"]
+                   for step in steps[:index])
+            or any(step["status"] != "PENDING" or step["mission_id"] for step in steps[index + 1:])):
+        _fail("RESUME_STEP_UNCERTAIN", "A step was started or its durable history is incomplete.")
+    if execution["agent_keys"] != [step["agent_key"] for step in steps]:
+        _fail("RESUME_AUTHORIZATION_INVALID", "Approved agent order changed.")
+    approval = _approval(plan)
+    try:
+        proposal = json.loads(plan["proposal_json"])
+    except (TypeError, ValueError):
+        _fail("RESUME_AUTHORIZATION_INVALID", "Persisted plan proposal is invalid.")
+    agents = proposal.get("agents") or []
+    if (not isinstance(agents, list) or any(not isinstance(agent, dict) for agent in agents)
+            or [agent.get("key") for agent in agents] != execution["agent_keys"]
+            or approval.get("max_turns_per_agent") != execution["max_turns_per_agent"]
+            or approval.get("mission_timeout_seconds") != execution["mission_timeout_seconds"]
+            or set(execution["test_profiles"]) != set(execution["agent_keys"])):
+        _fail("RESUME_AUTHORIZATION_INVALID", "Persisted execution no longer matches the plan approval.")
+    if (agents[index].get("depends_on") or []) != [previous["agent_key"]]:
+        _fail("RESUME_TOPOLOGY_UNSUPPORTED", "Resume supports one declared dependency on the previous agent.")
+    available_profiles = {item["id"] for item in list_test_profiles(plan["project_id"])}
+    if any(step["test_profile"] != execution["test_profiles"].get(step["agent_key"])
+           or step["test_profile"] not in available_profiles for step in steps):
+        _fail("RESUME_AUTHORIZATION_INVALID", "A trusted test profile changed or disappeared.")
+    catalog = {item["id"]: item for item in list_dev_models()["models"]}
+    selected = approval.get("agent_models") or {}
+    if not isinstance(selected, dict):
+        _fail("RESUME_AUTHORIZATION_INVALID", "Approved model map is invalid.")
+    confirmed = approval.get("cost_confirmed_for")
+    confirmed_ids = set(confirmed) if isinstance(confirmed, list) else set()
+    for step in steps:
+        pane = store.get_pane(step["pane_id"])
+        choice = selected.get(step["agent_key"])
+        model = choice.get("model") if isinstance(choice, dict) else None
+        if (pane is None or pane["plan_id"] != plan_id or pane["project_id"] != plan["project_id"]
+                or pane["plan_agent_key"] != step["agent_key"] or pane["model"] != model
+                or not isinstance(model, str)
+                or model not in catalog
+                or (catalog[model].get("cost_status") != "free" and model not in confirmed_ids)):
+            _fail("RESUME_AUTHORIZATION_INVALID", "An exact model or its cost consent is invalid.")
+    pending_pane = store.get_pane(pending["pane_id"])
+    try:
+        brief = service._brief_view(pending_pane)
+    except (TypeError, ValueError, KeyError):
+        _fail("RESUME_AUTHORIZATION_INVALID", "Pending agent authorization is invalid.")
+    if not brief or not brief["authorization"]["applies"]:
+        _fail("RESUME_AUTHORIZATION_INVALID", "The pending agent's plan authorization is exhausted.")
+    if workspace_handoff.target_has_unresolved_transfer(pending_pane["dev_session_id"]):
+        _fail("RESUME_TARGET_UNCERTAIN", "The destination has an unresolved transfer.")
+    record = handoff.verified_dependency(plan_id, previous, pending)
+    return {"eligible": True, "pending_agent": pending["agent_key"],
+            "completed_agent": previous["agent_key"], "handoff_id": record["handoff_id"]}
+
+
+def resume_eligibility(plan_id: str, execution: dict | None = None) -> dict:
+    """Status endpoint helper: inspect without reserving or launching work."""
+    execution = execution if execution is not None else execution_store.view(plan_id)
+    if execution is None:
+        return {"eligible": False, "code": "EXECUTION_NOT_AUTHORIZED"}
+    try:
+        return _resume_evidence(plan_id, execution)
+    except DevServiceError as error:
+        return {"eligible": False, "code": error.code, "message": str(error)}
+
+
+def resume(plan_id: str) -> dict:
+    execution = state(plan_id)
+    evidence = _resume_evidence(plan_id, execution)
+    plan = store.get_plan(plan_id)
+    token = execution_store.claim_resume(
+        plan_id, execution["current_index"], evidence["handoff_id"], plan["approval_json"]
+    )
+    if token is None:
+        _fail("RESUME_CONCURRENT", "The plan, approval or handoff changed before the resume claim.")
+    _spawn(plan_id, token)
+    return state(plan_id)
 
 
 def _heartbeat(plan_id: str, token: str, stop: threading.Event, lost: threading.Event) -> None:
@@ -192,10 +295,15 @@ def _run(plan_id: str, token: str) -> None:
                         update("BLOCKED", current_index=index, error_code="DEPENDENCY_PENDING")
                         return
                     if _changed_files(_mission_for(previous)):
-                        message = "Dependência concluída em outro worktree; transferência de alterações não é suportada nesta fase."
-                        step_update(step["agent_key"], "BLOCKED", error_code="DEPENDENCY_WORKTREE_NOT_TRANSFERRED", error_message=message)
-                        update("BLOCKED", current_index=index, error_code="DEPENDENCY_WORKTREE_NOT_TRANSFERRED", error_message=message)
-                        return
+                        from nexus.workspace import handoff
+                        try:
+                            handoff.verified_dependency(plan_id, previous, persisted)
+                        except DevServiceError as error:
+                            code = ("DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+                                    if error.code == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED" else error.code)
+                            step_update(step["agent_key"], "BLOCKED", error_code=code, error_message=str(error))
+                            update("BLOCKED", current_index=index, error_code=code, error_message=str(error))
+                            return
                 update("RUNNING", current_index=index)
                 # Persist the launch barrier before any external side effect.
                 # If ownership changes during the call, recovery stops here as
@@ -203,10 +311,11 @@ def _run(plan_id: str, token: str) -> None:
                 step_update(step["agent_key"], "STARTING")
                 check_owner()
                 try:
-                    result = service.start_pane_mission(
-                        step["pane_id"], None, confirm_model=None,
-                        test_profile=step["test_profile"], timeout_seconds=None,
-                    )
+                    with execution_store.coordinated_launch(plan_id, step["agent_key"], token):
+                        result = service.start_pane_mission(
+                            step["pane_id"], None, confirm_model=None,
+                            test_profile=step["test_profile"], timeout_seconds=None,
+                        )
                 except DevServiceError as error:
                     status = "BLOCKED" if error.code in {"DEPENDENCY_PENDING", "PANE_BUSY", "TEST_PROFILE_NOT_FOUND"} else "FAILED"
                     step_update(step["agent_key"], status, error_code=error.code, error_message=str(error))
@@ -301,6 +410,7 @@ def state(plan_id: str) -> dict:
     execution = execution_store.view(plan_id)
     if execution is None:
         _fail("EXECUTION_NOT_AUTHORIZED", "This plan has no execution authorization.")
+    execution["resume"] = resume_eligibility(plan_id, execution)
     return execution
 
 

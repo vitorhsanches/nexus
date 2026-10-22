@@ -19,7 +19,7 @@ class HandoffBlocked(RuntimeError):
     """A planned session cannot execute until dependency transfer is proven."""
 
 
-def assert_session_execution_allowed(connection, session_id: str) -> None:
+def assert_session_execution_allowed(connection, session_id: str, *, turn: bool = False) -> None:
     """Run inside the mission/turn BEGIN IMMEDIATE transaction.
 
     This closes direct Development API bypasses and serializes starts with
@@ -40,6 +40,34 @@ def assert_session_execution_allowed(connection, session_id: str) -> None:
     target = connection.execute(
         "SELECT * FROM workspace_panes WHERE dev_session_id = ?", (session_id,),
     ).fetchone()
+    if target is not None and target["plan_id"]:
+        from nexus.registry import workspace_execution
+
+        execution = connection.execute(
+            "SELECT * FROM workspace_plan_executions WHERE plan_id=?", (target["plan_id"],)
+        ).fetchone()
+        if execution is not None:
+            context = workspace_execution.current_launch()
+            step = connection.execute(
+                """SELECT * FROM workspace_plan_execution_steps
+                   WHERE plan_id=? AND agent_key=?""",
+                (target["plan_id"], target["plan_agent_key"]),
+            ).fetchone()
+            allowed = (execution["status"] == "RUNNING" and context is not None
+                       and context == (target["plan_id"], target["plan_agent_key"], execution["owner_token"])
+                       and execution["lease_renewed_at"] > workspace_execution._cutoff()
+                       and step is not None)
+            if turn:
+                active_mission = connection.execute(
+                    """SELECT 1 FROM dev_autonomous_missions WHERE dev_session_id=?
+                       AND status IN ('PENDING','RUNNING','TESTING','REPAIRING') LIMIT 1""",
+                    (session_id,),
+                ).fetchone()
+                allowed = allowed and step["status"] in {"STARTING", "RUNNING"} and active_mission is not None
+            else:
+                allowed = allowed and step["status"] == "STARTING" and step["mission_id"] is None
+            if not allowed:
+                raise HandoffBlocked("Durable sequence owns this pane; direct execution or replay is blocked.")
     if target is None or not target["plan_id"] or not target["brief_json"]:
         return
     try:

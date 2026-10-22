@@ -278,6 +278,14 @@ def recover_plan(plan_id: str):
     return _call(coordinator.recover, plan_id)
 
 
+@router.post("/plans/{plan_id}/resume")
+def resume_plan(plan_id: str):
+    """Explicit operator action; GET execution remains strictly read-only."""
+    from nexus.workspace import coordinator
+
+    return _call(coordinator.resume, plan_id)
+
+
 @router.post("/handoffs/preview")
 def preview_handoff(request: HandoffPreviewRequest):
     from nexus.workspace import handoff

@@ -253,6 +253,11 @@ def plan_view(row) -> dict:
         proposal.setdefault("explanation", "Proposta determinística por palavras-chave (P1, sem IA).")
     keys = row.keys()
     from nexus.registry import workspace_execution
+    from nexus.workspace import coordinator
+
+    execution = workspace_execution.view(row["id"])
+    if execution is not None:
+        execution["resume"] = coordinator.resume_eligibility(row["id"], execution)
 
     return {
         "plan_id": row["id"],
@@ -262,7 +267,7 @@ def plan_view(row) -> dict:
         **proposal,
         "status": row["status"] if "status" in keys else "PROPOSED",
         "approval": json.loads(row["approval_json"]) if "approval_json" in keys and row["approval_json"] else None,
-        "execution": workspace_execution.view(row["id"]),
+        "execution": execution,
     }
 
 
@@ -568,7 +573,9 @@ def _check_execution_gates(row, confirm_model: str | None, confirm_cost: bool = 
     3. The plan authorization or an explicit model confirmation must cover
        the use (returns True when the plan authorization is used).
     """
-    from nexus.registry import workspace_handoff
+    from nexus.registry import workspace_execution, workspace_handoff
+
+    workspace_execution.assert_manual_execution_allowed(row)
 
     if workspace_handoff.target_has_unresolved_transfer(row["dev_session_id"]):
         raise DevServiceError("HANDOFF_TARGET_UNCERTAIN", "Target has a transfer in progress or requiring human review.", http_status=409)
