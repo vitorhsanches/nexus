@@ -306,6 +306,9 @@ def create_turn(dev_session_id: str, prompt: str, *, requested_model: str | None
     turn_id = f"DEVTURN-{uuid4().hex[:8].upper()}"
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        from nexus.registry.workspace_handoff import assert_session_execution_allowed
+
+        assert_session_execution_allowed(connection, dev_session_id)
         active = connection.execute(
             """SELECT id FROM dev_turns
                WHERE dev_session_id = ? AND status IN ('PENDING', 'RUNNING')

@@ -37,6 +37,9 @@ def create_mission(
     mission_id = f"DEVMISSION-{uuid4().hex[:8].upper()}"
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        from nexus.registry.workspace_handoff import assert_session_execution_allowed
+
+        assert_session_execution_allowed(connection, dev_session_id)
         active = connection.execute(
             """SELECT id FROM dev_autonomous_missions
                WHERE dev_session_id = ? AND status IN ('PENDING','RUNNING','TESTING','REPAIRING')

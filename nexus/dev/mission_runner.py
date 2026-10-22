@@ -17,7 +17,7 @@ from nexus.dev.service import DevServiceError, validate_dev_project
 from nexus.dev.test_profiles import resolve_test_profile
 from nexus.dev.worktree import DevWorktreeError, verify_dev_worktree
 from nexus.failure_contract import sanitize_error_text
-from nexus.registry import dev_missions, dev_sessions
+from nexus.registry import dev_missions, dev_sessions, workspace_handoff
 
 MAX_LOG_CHARS = 20_000
 DEFAULT_MISSION_TIMEOUT_SECONDS = 900
@@ -138,6 +138,8 @@ def start_mission(
             allowed_models=normalized_allowed,
             test_profile=test_profile,
         )
+    except workspace_handoff.HandoffBlocked as error:
+        raise DevServiceError("DEPENDENCY_WORKTREE_NOT_TRANSFERRED", str(error), http_status=409) from error
     except dev_missions.MissionBusyError as error:
         raise DevServiceError("MISSION_BUSY", str(error), http_status=409) from error
 

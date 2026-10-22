@@ -567,6 +567,55 @@
       return section;
     }
 
+    function renderHandoffs(pane) {
+      const dependencies = (pane.dependencies || []).filter((item) => item.handoff_required);
+      if (!dependencies.length && !(pane.handoffs || []).length) return null;
+      const section = el("div", { className: "ws-pane-section" },
+        el("h3", { text: "Transferência entre agentes" }),
+        el("p", { className: "ws-msg-meta", text: "A transferência copia alterações para o worktree isolado do agente destinatário. Não aplica alterações ao projeto principal e não inicia missões automaticamente." }));
+      dependencies.forEach((dependency) => {
+        const source = (state.workspace.panes || []).find((item) => item.plan_id === pane.plan_id && item.plan_agent_key === dependency.key);
+        const mission = source && source.latest_mission;
+        if (!source || !mission || mission.status !== "READY_FOR_REVIEW") return;
+        section.appendChild(button(`Ver alterações: ${source.title} → ${pane.title}`, async () => {
+          try {
+            await api("/api/workspace/handoffs/preview", { method: "POST", body: {
+              source_pane_id: source.pane_id, target_pane_id: pane.pane_id,
+              source_mission_id: mission.mission_id,
+            } });
+            showError("");
+          } catch (error) { showError(error.message); }
+          await refresh({ force: true });
+        }, { className: "ws-button-secondary" }));
+      });
+      (pane.handoffs || []).forEach((handoff) => {
+        const box = el("div", { className: "ws-pane-review" },
+          el("div", { text: `${handoff.source_agent_key} → ${handoff.target_agent_key}: ${handoff.status}` }),
+          el("ul", { className: "ws-pane-files" },
+            ...handoff.files.map((file) => el("li", { text: `${file.status} ${file.path} · SHA-256 ${file.sha256}` }))));
+        if (handoff.error_code) box.appendChild(el("div", { className: "ws-error", text: `${handoff.error_code}: ${handoff.error_message || ""}` }));
+        if (handoff.status === "PREVIEWED") box.appendChild(button("Aprovar este snapshot", async () => {
+          try {
+            await api(`/api/workspace/handoffs/${encodeURIComponent(handoff.handoff_id)}/approve`, { method: "POST", body: {
+              fingerprint: handoff.snapshot_fingerprint, source_pane_id: handoff.source_pane_id,
+              target_pane_id: handoff.target_pane_id,
+            } });
+            showError("");
+          } catch (error) { showError(error.message); }
+          await refresh({ force: true });
+        }, { className: "ws-button-secondary" }));
+        if (handoff.status === "APPROVED") box.appendChild(button("Executar transferência aprovada", async () => {
+          try {
+            await api(`/api/workspace/handoffs/${encodeURIComponent(handoff.handoff_id)}/transfer`, { method: "POST" });
+            showError("");
+          } catch (error) { showError(error.message); }
+          await refresh({ force: true });
+        }, { className: "ws-button-primary" }));
+        section.appendChild(box);
+      });
+      return section;
+    }
+
     function renderChat(pane) {
       const section = el("div", { className: "ws-pane-section" }, el("h3", { text: "Conversa" }));
       const list = el("ol", { className: "ws-pane-chat" });
@@ -704,6 +753,7 @@
           chip(pane.role_label), chip(pane.model || "sem modelo", pane.model ? "" : "warn"),
           chip(pane.origin === "maestro" ? "criado pelo Maestro" : pane.origin === "policy" ? "proposta determinística" : "manual")),
         renderBrief(pane),
+        renderHandoffs(pane),
         renderMission(pane),
         renderChat(pane),
         renderMissionForm(pane),

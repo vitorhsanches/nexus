@@ -68,9 +68,14 @@ from collections import deque
 from nexus.chat.appserver_client import AppServerClient, AppServerError
 from nexus.dev import feature_gate
 from nexus.dev.service import DevServiceError, validate_dev_project
-from nexus.dev.worktree import DevWorktreeError, read_worktree_changed_files, read_worktree_diff, verify_dev_worktree
+from nexus.dev.worktree import (
+    DevWorktreeError,
+    read_worktree_changed_files,
+    read_worktree_diff,
+    verify_dev_worktree,
+)
 from nexus.failure_contract import sanitize_error_text
-from nexus.registry import dev_sessions
+from nexus.registry import dev_sessions, workspace_handoff
 
 # Same bounds as nexus.chat.service -- a bounded per-turn event buffer
 # (for a reconnecting subscriber to catch up from) and a bounded
@@ -235,6 +240,8 @@ def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None) 
 
     try:
         turn_id = dev_sessions.create_turn(dev_session_id, prompt, requested_model=model)
+    except workspace_handoff.HandoffBlocked as error:
+        raise DevServiceError("DEPENDENCY_WORKTREE_NOT_TRANSFERRED", str(error), http_status=409) from error
     except dev_sessions.DevTurnBusyError as error:
         raise DevServiceError(
             "SESSION_BUSY",

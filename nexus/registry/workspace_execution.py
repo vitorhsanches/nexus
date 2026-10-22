@@ -271,6 +271,8 @@ def request_interrupt(plan_id: str) -> None:
 
 
 def view(plan_id: str) -> dict | None:
+    from nexus.registry import workspace_handoff
+
     row = get_execution(plan_id)
     if row is None:
         return None
@@ -289,6 +291,7 @@ def view(plan_id: str) -> dict | None:
         "lease_renewed_at": row["lease_renewed_at"],
         "created_at": row["created_at"], "started_at": row["started_at"],
         "finished_at": row["finished_at"], "updated_at": row["updated_at"],
+        "handoffs": workspace_handoff.list_for_plan(plan_id),
         "steps": [{
             "agent_key": step["agent_key"], "ordinal": step["ordinal"], "pane_id": step["pane_id"],
             "test_profile": step["test_profile"], "status": step["status"], "mission_id": step["mission_id"],
