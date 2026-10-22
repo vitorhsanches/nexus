@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import os
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -16,8 +17,9 @@ from nexus.dev.service import DevServiceError, create_dev_session
 from nexus.dev.worktree import read_worktree_changed_files, read_worktree_diff
 from nexus.registry import database, dev_missions, dev_sessions
 from nexus.registry import workspace as panes
+from nexus.registry import workspace_execution as executions
 from nexus.registry import workspace_handoff as records
-from nexus.workspace import handoff, service
+from nexus.workspace import coordinator, handoff, service
 
 
 def _git(root, *args):
@@ -134,6 +136,368 @@ def _preview(env, mission_id):
 def _approve(env, preview):
     return handoff.approve(preview["handoff_id"], preview["snapshot_fingerprint"],
                            env["source_pane"], env["target_pane"])
+
+
+def _sequence(env, monkeypatch, *, three=False):
+    """Real throwaway worktrees and SQLite; only the model launcher is fake."""
+    keys = ["source", "target"]
+    pane_ids = {"source": env["source_pane"], "target": env["target_pane"]}
+    sessions = {"source": env["source"], "target": env["target"]}
+    if three:
+        third = create_dev_session("demo")
+        pane_ids["third"] = panes.create_pane(
+            project_id="demo", dev_session_id=third["session_id"], origin="maestro",
+            role="tester", title="Third", model="free/model", plan_id=env["plan"],
+            plan_agent_key="third", brief={"task": "third", "depends_on": ["target"]},
+        )
+        sessions["third"] = third
+        keys.append("third")
+    proposal = {"agents": [
+        {"key": key, "model": "free/model", "depends_on": [keys[index - 1]] if index else []}
+        for index, key in enumerate(keys)
+    ], "execution": {"mode": "sequential", "order": keys}}
+    approval = {"agent_models": {key: {"model": "free/model", "cost_status": "free"} for key in keys},
+                "max_turns_per_agent": 1, "mission_timeout_seconds": 60, "cost_confirmed_for": []}
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plans SET status='APPROVED', proposal_json=?, approval_json=? WHERE id=?",
+                           (json.dumps(proposal), json.dumps(approval), env["plan"]))
+        for index, key in enumerate(keys):
+            brief = {"task": key, "depends_on": [keys[index - 1]] if index else [],
+                     "authorization": {"model": "free/model", "cost_status": "free",
+                                       "max_turns": 1, "mission_timeout_seconds": 60}}
+            connection.execute("UPDATE workspace_panes SET brief_json=? WHERE id=?",
+                               (json.dumps(brief), pane_ids[key]))
+    monkeypatch.setattr("nexus.dev.test_profiles.list_test_profiles", lambda _project: [{"id": "unit"}])
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: {"models": [{"id": "free/model", "cost_status": "free"}], "catalog_error": None})
+    launches = []
+
+    def fake_start(pane_id, *_args, **_kwargs):
+        key = next(key for key, value in pane_ids.items() if value == pane_id)
+        session = sessions[key]
+        mission_id = dev_missions.create_mission(
+            session["session_id"], key, requested_model="free/model",
+            allowed_models=["free/model"], test_profile="unit",
+        )
+        launches.append(key)
+        if key in {"source", "target"} and (key == "source" or three):
+            (Path(session["worktree_path"]) / "calc.py").write_text(
+                f"def {key}(a, b):\n    return a * b\n", encoding="utf-8",
+            )
+            changed = read_worktree_changed_files(session["worktree_path"])
+            review = read_worktree_diff(session["worktree_path"], session["base_sha"])
+            result = {"changed_files": changed, "review": review}
+        else:
+            result = {"changed_files": []}
+        dev_missions.update_status(mission_id, "READY_FOR_REVIEW", result=result)
+        return {"mission": {"mission_id": mission_id}}
+
+    monkeypatch.setattr("nexus.workspace.service.start_pane_mission", fake_start)
+    coordinator.authorize_execution(
+        env["plan"], agent_keys=keys, test_profiles={key: "unit" for key in keys},
+        max_turns_per_agent=1, mission_timeout_seconds=60,
+    )
+    return pane_ids, sessions, launches
+
+
+def _sequence_status(plan_id, desired):
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        view = executions.view(plan_id)
+        if view["status"] == desired:
+            return view
+        time.sleep(0.05)
+    raise AssertionError(f"sequence did not reach {desired}: {executions.view(plan_id)}")
+
+
+def _transfer_sequence(env, source_pane, target_pane, source_mission):
+    preview = handoff.preview(source_pane, target_pane, source_mission)
+    handoff.approve(preview["handoff_id"], preview["snapshot_fingerprint"], source_pane, target_pane)
+    return handoff.transfer(preview["handoff_id"])
+
+
+def _blocked_and_transferred(env, monkeypatch):
+    pane_ids, sessions, launches = _sequence(env, monkeypatch)
+    coordinator.start(env["plan"])
+    blocked = _sequence_status(env["plan"], "BLOCKED")
+    transferred = _transfer_sequence(env, pane_ids["source"], pane_ids["target"],
+                                     blocked["steps"][0]["mission_id"])
+    return pane_ids, sessions, launches, blocked, transferred
+
+
+def _resume_claim_process(db_path, plan_id, handoff_id, approval_json, start, queue):
+    database.DATABASE_PATH = Path(db_path)
+    database.STORAGE_DIR = Path(db_path).parent
+    if not start.wait(timeout=20):
+        queue.put("TIMEOUT")
+        return
+    queue.put(executions.claim_resume(plan_id, 1, handoff_id, approval_json))
+
+
+def test_explicit_resume_runs_pending_agent_once_after_verified_handoff(env, monkeypatch):
+    pane_ids, sessions, launches = _sequence(env, monkeypatch)
+    original = (env["repo"] / "calc.py").read_bytes()
+    coordinator.start(env["plan"])
+    blocked = _sequence_status(env["plan"], "BLOCKED")
+    assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+    assert launches == ["source"]
+    with pytest.raises(records.HandoffBlocked):
+        dev_missions.create_mission(sessions["target"]["session_id"], "manual", requested_model="free/model",
+                                    allowed_models=["free/model"], test_profile="unit")
+    with pytest.raises(records.HandoffBlocked):
+        dev_sessions.create_turn(sessions["target"]["session_id"], "manual", requested_model="free/model")
+    source_mission = blocked["steps"][0]["mission_id"]
+    transfer = _transfer_sequence(env, pane_ids["source"], pane_ids["target"], source_mission)
+    assert coordinator.state(env["plan"])["resume"]["handoff_id"] == transfer["handoff_id"]
+    with pytest.raises(DevServiceError) as direct_error:
+        service._check_execution_gates(panes.get_pane(pane_ids["target"]), None)
+    assert direct_error.value.code == "COORDINATED_EXECUTION_REQUIRED"
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nexus.web.workspace_routes import router
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    state_response = client.get(f"/api/workspace/plans/{env['plan']}/execution")
+    assert state_response.status_code == 200 and state_response.json()["resume"]["eligible"]
+    response = client.post(f"/api/workspace/plans/{env['plan']}/resume")
+    assert response.status_code == 200
+    done = _sequence_status(env["plan"], "AWAITING_REVIEW")
+    assert launches == ["source", "target"]
+    assert done["steps"][0]["mission_id"] == source_mission
+    assert done["steps"][1]["mission_id"]
+    assert done["result"] == {"human_approval_required": True, "integration_applied": False}
+    assert client.post(f"/api/workspace/plans/{env['plan']}/resume").status_code == 409
+    assert (env["repo"] / "calc.py").read_bytes() == original
+
+
+def test_resume_rejects_target_drift_and_keeps_pending_step(env, monkeypatch):
+    panes_by_key, sessions, launches = _sequence(env, monkeypatch)
+    coordinator.start(env["plan"])
+    blocked = _sequence_status(env["plan"], "BLOCKED")
+    _transfer_sequence(env, panes_by_key["source"], panes_by_key["target"], blocked["steps"][0]["mission_id"])
+    (Path(sessions["target"]["worktree_path"]) / "calc.py").write_text("tampered\n", encoding="utf-8")
+    assert coordinator.state(env["plan"])["resume"]["code"] == "RESUME_TARGET_DRIFT"
+    with pytest.raises(DevServiceError) as error:
+        coordinator.resume(env["plan"])
+    assert error.value.code == "RESUME_TARGET_DRIFT"
+    assert executions.view(env["plan"])["steps"][1]["mission_id"] is None
+    assert launches == ["source"]
+
+
+def test_chained_resume_requires_each_distinct_handoff(env, monkeypatch):
+    pane_ids, _sessions, launches = _sequence(env, monkeypatch, three=True)
+    coordinator.start(env["plan"])
+    blocked = _sequence_status(env["plan"], "BLOCKED")
+    first = blocked["steps"][0]["mission_id"]
+    _transfer_sequence(env, pane_ids["source"], pane_ids["target"], first)
+    coordinator.resume(env["plan"])
+    blocked = _sequence_status(env["plan"], "BLOCKED")
+    assert blocked["current_index"] == 2 and launches == ["source", "target"]
+    second = blocked["steps"][1]["mission_id"]
+    assert second != first
+    assert coordinator.state(env["plan"])["resume"]["eligible"] is False
+    _transfer_sequence(env, pane_ids["target"], pane_ids["third"], second)
+    coordinator.resume(env["plan"])
+    assert _sequence_status(env["plan"], "AWAITING_REVIEW")["status"] == "AWAITING_REVIEW"
+    assert launches == ["source", "target", "third"]
+
+
+def test_intermediate_and_uncertain_handoffs_cannot_resume(env, monkeypatch):
+    pane_ids, _sessions, launches = _sequence(env, monkeypatch)
+    coordinator.start(env["plan"])
+    blocked = _sequence_status(env["plan"], "BLOCKED")
+    assert coordinator.state(env["plan"])["resume"]["eligible"] is False
+    preview = handoff.preview(pane_ids["source"], pane_ids["target"], blocked["steps"][0]["mission_id"])
+    assert coordinator.state(env["plan"])["resume"]["eligible"] is False
+    handoff.approve(preview["handoff_id"], preview["snapshot_fingerprint"],
+                    pane_ids["source"], pane_ids["target"])
+    assert coordinator.state(env["plan"])["resume"]["eligible"] is False
+    token = records.claim(preview["handoff_id"])
+    assert token and coordinator.state(env["plan"])["resume"]["eligible"] is False
+    assert records.finish(preview["handoff_id"], token, "RESULT_UNCERTAIN")
+    assert coordinator.state(env["plan"])["resume"]["eligible"] is False
+    with pytest.raises(DevServiceError):
+        coordinator.resume(env["plan"])
+    assert launches == ["source"]
+
+
+def test_resume_rejects_mismatched_evidence_and_authorization(env, monkeypatch):
+    _panes, _sessions, launches, blocked, transfer = _blocked_and_transferred(env, monkeypatch)
+    plan_id = env["plan"]
+    handoff_id = transfer["handoff_id"]
+    assert coordinator.state(plan_id)["resume"]["eligible"]
+    changes = [
+        ("workspace_handoffs", "source_mission_id", "WRONG", "id", handoff_id),
+        ("workspace_handoffs", "plan_id", "WRONG", "id", handoff_id),
+        ("workspace_handoffs", "snapshot_fingerprint", "0" * 64, "id", handoff_id),
+        ("workspace_handoffs", "approved_at", None, "id", handoff_id),
+        ("workspace_handoffs", "result_json", json.dumps({"verified": False}), "id", handoff_id),
+        ("workspace_plan_execution_steps", "mission_id", "WRONG", "agent_key", "target"),
+        ("workspace_plan_executions", "status", "FAILED", "plan_id", plan_id),
+        ("workspace_plan_executions", "status", "RESULT_UNCERTAIN", "plan_id", plan_id),
+    ]
+    for table, field, replacement, key, identity in changes:
+        with database.get_connection() as connection:
+            # Simulate a damaged persisted record, including FK identity drift.
+            connection.execute("PRAGMA foreign_keys = OFF")
+            original = connection.execute(f"SELECT {field} FROM {table} WHERE {key}=?", (identity,)).fetchone()[0]
+            connection.execute(f"UPDATE {table} SET {field}=? WHERE {key}=?", (replacement, identity))
+        try:
+            assert coordinator.state(plan_id)["resume"]["eligible"] is False, (table, field)
+            with pytest.raises(DevServiceError):
+                coordinator.resume(plan_id)
+        finally:
+            with database.get_connection() as connection:
+                connection.execute("PRAGMA foreign_keys = OFF")
+                connection.execute(f"UPDATE {table} SET {field}=? WHERE {key}=?", (original, identity))
+    with database.get_connection() as connection:
+        original = connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (plan_id,)).fetchone()[0]
+        altered = json.loads(original)
+        altered["agent_models"]["target"]["model"] = "other/model"
+        connection.execute("UPDATE workspace_plans SET approval_json=? WHERE id=?", (json.dumps(altered), plan_id))
+    try:
+        assert coordinator.state(plan_id)["resume"]["code"] == "RESUME_AUTHORIZATION_INVALID"
+    finally:
+        with database.get_connection() as connection:
+            connection.execute("UPDATE workspace_plans SET approval_json=? WHERE id=?", (original, plan_id))
+    with database.get_connection() as connection:
+        original_pane_model = connection.execute("SELECT model FROM workspace_panes WHERE id=?", (env["target_pane"],)).fetchone()[0]
+        connection.execute("UPDATE workspace_panes SET model='other/model' WHERE id=?", (env["target_pane"],))
+    try:
+        assert coordinator.state(plan_id)["resume"]["code"] == "RESUME_AUTHORIZATION_INVALID"
+    finally:
+        with database.get_connection() as connection:
+            connection.execute("UPDATE workspace_panes SET model=? WHERE id=?", (original_pane_model, env["target_pane"]))
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: {
+        "models": [{"id": "free/model", "cost_status": "low_cost"}], "catalog_error": None,
+    })
+    assert coordinator.state(plan_id)["resume"]["code"] == "RESUME_AUTHORIZATION_INVALID"
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: {
+        "models": [{"id": "free/model", "cost_status": "free"}], "catalog_error": None,
+    })
+    assert blocked["steps"][1]["mission_id"] is None and launches == ["source"]
+
+
+def test_multiple_write_dependencies_remain_blocked(env, monkeypatch):
+    _panes, _sessions, launches, _blocked, _transfer = _blocked_and_transferred(env, monkeypatch)
+    with database.get_connection() as connection:
+        proposal = json.loads(connection.execute("SELECT proposal_json FROM workspace_plans WHERE id=?", (env["plan"],)).fetchone()[0])
+        proposal["agents"][1]["depends_on"] = ["source", "another"]
+        connection.execute("UPDATE workspace_plans SET proposal_json=? WHERE id=?", (json.dumps(proposal), env["plan"]))
+        brief = json.loads(connection.execute("SELECT brief_json FROM workspace_panes WHERE id=?", (env["target_pane"],)).fetchone()[0])
+        brief["depends_on"] = ["source", "another"]
+        connection.execute("UPDATE workspace_panes SET brief_json=? WHERE id=?", (json.dumps(brief), env["target_pane"]))
+    assert coordinator.state(env["plan"])["resume"]["code"] == "RESUME_TOPOLOGY_UNSUPPORTED"
+    with pytest.raises(DevServiceError):
+        coordinator.resume(env["plan"])
+    assert launches == ["source"]
+
+
+def test_two_processes_cannot_claim_same_resume(env, monkeypatch):
+    _panes, _sessions, launches, _blocked, transfer = _blocked_and_transferred(env, monkeypatch)
+    with database.get_connection() as connection:
+        approval_json = connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan"],)).fetchone()[0]
+    context = multiprocessing.get_context("spawn")
+    start, queue = context.Event(), context.Queue()
+    processes = [context.Process(target=_resume_claim_process,
+                 args=(str(database.DATABASE_PATH), env["plan"], transfer["handoff_id"], approval_json, start, queue))
+                 for _ in range(2)]
+    try:
+        for process in processes:
+            process.start()
+        start.set()
+        claims = [queue.get(timeout=30) for _ in processes]
+        assert sum(bool(token) for token in claims) == 1, claims
+    finally:
+        for process in processes:
+            process.join(15)
+            if process.is_alive():
+                process.terminate()
+                process.join()
+        queue.close()
+    assert all(process.exitcode == 0 for process in processes)
+    assert executions.view(env["plan"])["steps"][1]["status"] == "PENDING"
+    assert launches == ["source"]
+
+
+def test_resume_claim_recovers_pending_without_replaying_source(env, monkeypatch):
+    _panes, sessions, launches, _blocked, transfer = _blocked_and_transferred(env, monkeypatch)
+    with database.get_connection() as connection:
+        approval_json = connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan"],)).fetchone()[0]
+    old = executions.claim_resume(env["plan"], 1, transfer["handoff_id"], approval_json)
+    assert old
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plan_executions SET lease_renewed_at='2000-01-01T00:00:00+00:00' WHERE plan_id=?", (env["plan"],))
+    coordinator.recover(env["plan"])
+    assert _sequence_status(env["plan"], "AWAITING_REVIEW")["status"] == "AWAITING_REVIEW"
+    assert launches == ["source", "target"]
+    assert not executions.renew_lease(env["plan"], old)
+    with executions.coordinated_launch(env["plan"], "target", old), pytest.raises(records.HandoffBlocked):
+        dev_missions.create_mission(sessions["target"]["session_id"], "stale", requested_model="free/model",
+                                    allowed_models=["free/model"], test_profile="unit")
+
+
+def test_resume_starting_without_mission_id_is_never_replayed(env, monkeypatch):
+    _panes, _sessions, launches, _blocked, transfer = _blocked_and_transferred(env, monkeypatch)
+    with database.get_connection() as connection:
+        approval_json = connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan"],)).fetchone()[0]
+    old = executions.claim_resume(env["plan"], 1, transfer["handoff_id"], approval_json)
+    executions.update_step(env["plan"], "target", "STARTING", owner_token=old)
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plan_executions SET lease_renewed_at='2000-01-01T00:00:00+00:00' WHERE plan_id=?", (env["plan"],))
+    coordinator.recover(env["plan"])
+    assert _sequence_status(env["plan"], "RESULT_UNCERTAIN")["error_code"] == "COORDINATOR_START_INTERRUPTED"
+    assert launches == ["source"]
+
+
+def test_resume_recovery_observes_persisted_target_mission(env, monkeypatch):
+    _panes, sessions, launches, _blocked, transfer = _blocked_and_transferred(env, monkeypatch)
+    with database.get_connection() as connection:
+        approval_json = connection.execute("SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan"],)).fetchone()[0]
+    old = executions.claim_resume(env["plan"], 1, transfer["handoff_id"], approval_json)
+    executions.update_step(env["plan"], "target", "STARTING", owner_token=old)
+    with executions.coordinated_launch(env["plan"], "target", old):
+        mission_id = dev_missions.create_mission(
+            sessions["target"]["session_id"], "target", requested_model="free/model",
+            allowed_models=["free/model"], test_profile="unit",
+        )
+    dev_missions.update_status(mission_id, "READY_FOR_REVIEW", result={"changed_files": []})
+    executions.update_step(env["plan"], "target", "STARTING", mission_id=mission_id, owner_token=old)
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plan_executions SET lease_renewed_at='2000-01-01T00:00:00+00:00' WHERE plan_id=?", (env["plan"],))
+    coordinator.recover(env["plan"])
+    done = _sequence_status(env["plan"], "AWAITING_REVIEW")
+    assert done["steps"][1]["mission_id"] == mission_id
+    assert launches == ["source"]
+
+
+def test_real_mission_runner_propagates_fenced_token_to_internal_turn(env, monkeypatch):
+    from nexus.dev import feature_gate, mission_runner
+
+    real_start = service.start_pane_mission
+    _panes, sessions, launches, _blocked, _transfer = _blocked_and_transferred(env, monkeypatch)
+    monkeypatch.setattr(service, "start_pane_mission", real_start)
+    monkeypatch.setattr(feature_gate, "execution_enabled", lambda: True)
+    monkeypatch.setattr(mission_runner, "resolve_test_profile", lambda *_args: (["python", "-c", "pass"], 10))
+    observed = []
+
+    def fake_mission_body(mission_id, _timeout, _stop):
+        context = executions.current_launch()
+        observed.append(context)
+        turn_id = dev_sessions.create_turn(sessions["target"]["session_id"], "internal", requested_model="free/model")
+        dev_sessions.update_turn_status(turn_id, "COMPLETED")
+        dev_missions.update_status(mission_id, "READY_FOR_REVIEW", result={"changed_files": []})
+        with mission_runner._active_lock:
+            mission_runner._active_missions.pop(mission_id, None)
+
+    monkeypatch.setattr(mission_runner, "_run_mission_body", fake_mission_body)
+    coordinator.resume(env["plan"])
+    assert _sequence_status(env["plan"], "AWAITING_REVIEW")["status"] == "AWAITING_REVIEW"
+    assert launches == ["source"]  # The real Mission Runner launched the target.
+    assert observed and observed[0][0:2] == (env["plan"], "target")
+    assert len(dev_missions.list_missions(sessions["target"]["session_id"])) == 1
 
 
 def test_modified_and_added_files_transfer_only_to_target(env):
