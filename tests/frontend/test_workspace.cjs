@@ -474,6 +474,35 @@ test("refresh reasserts persisted limits while preserving test profiles and expl
   assert.equal(draft.confirmCosts, true);
 });
 
+test("handoff controls follow persisted preview, approval and transfer states", async () => {
+  const source = pane({ pane_id: "PANE-S", plan_id: "PLAN-1", plan_agent_key: "source", title: "Origem",
+    latest_mission: { mission_id: "MISSION-1", status: "READY_FOR_REVIEW", attempt_count: 1,
+      tests: [], changed_files: [{ path: "calc.py", status: "modified" }], integration_applied: false } });
+  const target = pane({ pane_id: "PANE-T", plan_id: "PLAN-1", plan_agent_key: "target", title: "Destino",
+    dependencies: [{ key: "source", title: "Origem", ready: false, handoff_required: true }], handoffs: [] });
+  const box = { state: stateWith([source, target]), maestro: maestroState() };
+  const snapshot = { handoff_id: "HANDOFF-1", source_agent_key: "source", target_agent_key: "target",
+    source_pane_id: "PANE-S", target_pane_id: "PANE-T", source_mission_id: "MISSION-1",
+    snapshot_fingerprint: "a".repeat(64), status: "PREVIEWED",
+    files: [{ path: "calc.py", status: "modified", sha256: "b".repeat(64) }] };
+  const routes = { ...baseRoutes(box),
+    "POST /api/workspace/handoffs/preview": () => { target.handoffs = [snapshot]; return snapshot; },
+    "POST /api/workspace/handoffs/HANDOFF-1/approve": () => { snapshot.status = "APPROVED"; return snapshot; },
+    "POST /api/workspace/handoffs/HANDOFF-1/transfer": () => { snapshot.status = "TRANSFERRED"; return snapshot; },
+  };
+  const { app, doc, calls } = harness(routes);
+  await app.init();
+  const grid = doc.byId["ws-grid"];
+  assert.match(grid.text(), /Não aplica alterações ao projeto principal/);
+  await findButtonStarting(grid, "Ver alterações:").dispatch("click");
+  assert.match(grid.text(), /calc.py/);
+  await findButton(grid, "Aprovar este snapshot").dispatch("click");
+  assert.equal(calls.find((call) => call.url.endsWith("/approve")).body.fingerprint, "a".repeat(64));
+  await findButton(grid, "Executar transferência aprovada").dispatch("click");
+  assert.match(grid.text(), /TRANSFERRED/);
+  assert.equal(calls.filter((call) => call.method === "POST" && call.url.includes("/handoffs/")).length, 3);
+});
+
 test("different approved plans restore isolated limits and profile drafts", async () => {
   const a = approvedPlan();
   const b = approvedPlan({ plan_id: "WSPLAN-2", approval: { ...a.approval, max_turns_per_agent: 3, mission_timeout_seconds: 61 } });

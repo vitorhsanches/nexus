@@ -619,3 +619,47 @@ def initialize_database() -> None:
         for column in ("owner_token", "lease_renewed_at"):
             if column not in execution_cols:
                 connection.execute(f"ALTER TABLE workspace_plan_executions ADD COLUMN {column} TEXT")
+
+        # P2B.2A: an approved, immutable snapshot and a durable write barrier.
+        # A TRANSFERRING row is deliberately never reclaimed automatically.
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_handoffs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL,
+                source_agent_key TEXT NOT NULL,
+                target_agent_key TEXT NOT NULL,
+                source_pane_id TEXT NOT NULL,
+                target_pane_id TEXT NOT NULL,
+                source_mission_id TEXT NOT NULL,
+                source_session_id TEXT NOT NULL,
+                target_session_id TEXT NOT NULL,
+                source_base_sha TEXT NOT NULL,
+                source_head_sha TEXT NOT NULL,
+                target_base_sha TEXT NOT NULL,
+                target_head_sha TEXT NOT NULL,
+                snapshot_fingerprint TEXT NOT NULL,
+                files_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                owner_token TEXT,
+                owner_host TEXT,
+                owner_pid INTEGER,
+                owner_acquired_at TEXT,
+                created_at TEXT NOT NULL,
+                approved_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                result_json TEXT,
+                FOREIGN KEY (plan_id) REFERENCES workspace_plans(id),
+                FOREIGN KEY (source_pane_id) REFERENCES workspace_panes(id),
+                FOREIGN KEY (target_pane_id) REFERENCES workspace_panes(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_handoffs_target
+                ON workspace_handoffs(target_pane_id, created_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_handoffs_target_transferring
+                ON workspace_handoffs(target_session_id) WHERE status = 'TRANSFERRING';
+            """
+        )

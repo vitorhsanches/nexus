@@ -90,6 +90,20 @@ class PlanExecuteRequest(BaseModel):
     confirm_costs: bool = False
 
 
+class HandoffPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_pane_id: str = Field(min_length=1, max_length=64)
+    target_pane_id: str = Field(min_length=1, max_length=64)
+    source_mission_id: str = Field(min_length=1, max_length=64)
+
+
+class HandoffApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_pane_id: str = Field(min_length=1, max_length=64)
+    target_pane_id: str = Field(min_length=1, max_length=64)
+
+
 def _error(error) -> HTTPException:
     return HTTPException(status_code=error.http_status, detail={"code": error.code, "message": str(error)})
 
@@ -262,3 +276,40 @@ def recover_plan(plan_id: str):
     from nexus.workspace import coordinator
 
     return _call(coordinator.recover, plan_id)
+
+
+@router.post("/handoffs/preview")
+def preview_handoff(request: HandoffPreviewRequest):
+    from nexus.workspace import handoff
+
+    return _call(handoff.preview, request.source_pane_id, request.target_pane_id,
+                 request.source_mission_id)
+
+
+@router.post("/handoffs/{handoff_id}/approve")
+def approve_handoff(handoff_id: str, request: HandoffApproveRequest):
+    from nexus.workspace import handoff
+
+    return _call(handoff.approve, handoff_id, request.fingerprint,
+                 request.source_pane_id, request.target_pane_id)
+
+
+@router.post("/handoffs/{handoff_id}/transfer")
+def transfer_handoff(handoff_id: str):
+    from nexus.workspace import handoff
+
+    return _call(handoff.transfer, handoff_id)
+
+
+@router.get("/handoffs/{handoff_id}")
+def handoff_status(handoff_id: str):
+    from nexus.workspace import handoff
+
+    return _call(handoff.status, handoff_id)
+
+
+@router.get("/plans/{plan_id}/handoffs")
+def handoff_history(plan_id: str):
+    from nexus.workspace import handoff
+
+    return {"handoffs": _call(handoff.history, plan_id)}

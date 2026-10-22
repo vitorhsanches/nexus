@@ -100,7 +100,7 @@ def _latest_mission(missions: list[dict]) -> dict | None:
 
 
 def pane_view(row) -> dict:
-    from nexus.registry import dev_sessions
+    from nexus.registry import dev_sessions, workspace_handoff
 
     session = dev_sessions.get_session(row["dev_session_id"])
     missions = _missions(row["dev_session_id"])
@@ -128,6 +128,8 @@ def pane_view(row) -> dict:
         "plan_agent_key": row["plan_agent_key"],
         "brief": _brief_view(row),
         "dependencies": _dependency_status(row),
+        "handoffs": [handoff for handoff in workspace_handoff.list_for_plan(row["plan_id"])
+                     if handoff["target_pane_id"] == row["id"]] if row["plan_id"] else [],
         "messages": pane_messages(row),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -191,6 +193,8 @@ def _brief_view(row) -> dict | None:
 
 
 def _dependency_status(row) -> list[dict]:
+    from nexus.registry import workspace_handoff
+
     brief = _brief(row)
     if not brief or not brief.get("depends_on") or not row["plan_id"]:
         return []
@@ -199,11 +203,18 @@ def _dependency_status(row) -> list[dict]:
     for key in brief["depends_on"]:
         pane = by_key.get(key)
         latest = _latest_mission(_missions(pane["dev_session_id"])) if pane is not None else None
-        status.append({
+        changed = bool(latest and latest["changed_files"])
+        handoff = (workspace_handoff.latest_transfer(latest["mission_id"], row["id"])
+                   if changed and pane is not None else None)
+        item = {
             "key": key,
             "title": pane["title"] if pane is not None else key,
-            "ready": bool(latest and latest["status"] == "READY_FOR_REVIEW"),
-        })
+            "ready": bool(latest and latest["status"] == "READY_FOR_REVIEW" and (not changed or handoff)),
+        }
+        if changed:
+            item.update(handoff_required=True, handoff_status=handoff["status"] if handoff else None,
+                        handoff_id=handoff["handoff_id"] if handoff else None)
+        status.append(item)
     return status
 
 
@@ -557,9 +568,20 @@ def _check_execution_gates(row, confirm_model: str | None, confirm_cost: bool = 
     3. The plan authorization or an explicit model confirmation must cover
        the use (returns True when the plan authorization is used).
     """
+    from nexus.registry import workspace_handoff
+
+    if workspace_handoff.target_has_unresolved_transfer(row["dev_session_id"]):
+        raise DevServiceError("HANDOFF_TARGET_UNCERTAIN", "Target has a transfer in progress or requiring human review.", http_status=409)
     if _pane_is_executing(row):
         raise DevServiceError("PANE_BUSY", "This agent is already executing; wait for it to finish.", http_status=409)
-    if any(not item["ready"] for item in _dependency_status(row)):
+    dependencies = _dependency_status(row)
+    if any(item.get("handoff_required") and not item.get("handoff_id") for item in dependencies):
+        raise DevServiceError(
+            "DEPENDENCY_WORKTREE_NOT_TRANSFERRED",
+            "A dependency changed files in another worktree; approve and transfer its snapshot first.",
+            http_status=409,
+        )
+    if any(not item["ready"] for item in dependencies):
         raise DevServiceError(
             "DEPENDENCY_PENDING",
             "This agent depends on agents whose work is not ready for review yet.",
