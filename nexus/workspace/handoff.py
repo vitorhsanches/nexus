@@ -149,6 +149,9 @@ def _build_snapshot(source_pane_id: str, target_pane_id: str, mission_id: str) -
     target_session = dev_sessions.get_session(target["dev_session_id"])
     if not source_session or not target_session or source_session["status"] != "ACTIVE" or target_session["status"] != "ACTIVE":
         _fail("HANDOFF_SESSION_INACTIVE", "Both development sessions must be active.")
+    if (dev_missions.get_active_mission_for_session(source_session["id"])
+            or dev_sessions.get_active_turn_for_session(source_session["id"])):
+        _fail("HANDOFF_SOURCE_BUSY", "The source agent is executing.")
     source_root = verify_dev_worktree(project_path, source_session["worktree_path"], source_session["id"])
     target_root = verify_dev_worktree(project_path, target_session["worktree_path"], target_session["id"])
     source_head = read_worktree_head_sha(str(source_root))
@@ -266,7 +269,7 @@ def transfer(handoff_id: str) -> dict:
         raise
     token = records.claim(handoff_id)
     if token is None:
-        _fail("HANDOFF_CONCURRENT", "Another transfer owns or has uncertain results for this target.")
+        _fail("HANDOFF_CONCURRENT", "A source or target execution or transfer prevents this claim.")
     # The committed TRANSFERRING row is the write-ahead barrier. A crash here
     # leaves the row unreplayable; no startup recovery invokes this function.
     try:

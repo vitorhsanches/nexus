@@ -8,15 +8,16 @@ não aplica alterações ao projeto original e não faz operações de integraç
 
 1. `POST /api/workspace/handoffs/preview` identifica os dois panes e a missão.
    O serviço verifica projeto, plano, dependência declarada, sessões, identidade
-   dos worktrees, bases Git idênticas e destino limpo. A lista de arquivos e o
+   dos worktrees, bases Git idênticas, origem ociosa e destino limpo/ocioso. A lista de arquivos e o
    `review_id` devem coincidir com a evidência salva quando a missão terminou.
    O preview registra `PREVIEWED` no SQLite, sem escrever em qualquer worktree.
 2. `POST /api/workspace/handoffs/{id}/approve` exige o fingerprint e ambos os
    IDs de pane. O servidor recalcula o snapshot antes de gravar `APPROVED`.
 3. `POST /api/workspace/handoffs/{id}/transfer` recalcula o snapshot, reserva o
-   destino com `BEGIN IMMEDIATE` e grava `TRANSFERRING` antes da primeira
-   escrita. Inícios de missões e turnos diretos consultam essa barreira na
-   própria transação de reserva. Cada arquivo é verificado por SHA-256 após a
+   destino com `BEGIN IMMEDIATE`, confirma que nenhuma missão ou turno está
+   ativo nas duas sessões e grava `TRANSFERRING` antes da primeira escrita.
+   Inícios de missões e turnos diretos nas duas sessões consultam essa barreira
+   na própria transação de reserva. Cada arquivo é verificado por SHA-256 após a
    cópia. Somente então o registro se torna `TRANSFERRED`.
 4. `GET /api/workspace/handoffs/{id}` e
    `GET /api/workspace/plans/{plan_id}/handoffs` expõem estado e histórico.
@@ -41,14 +42,24 @@ estar inteiramente limpo antes da cópia; esta versão não combina múltiplos
 handoffs em um mesmo worktree já modificado.
 
 O SQLite serializa tentativas entre processos e o token impede que um dono
-antigo registre sucesso. Um `TRANSFERRING` ou `RESULT_UNCERTAIN` bloqueia
-novas transferências e execução no destino até análise humana. A substituição
+antigo registre sucesso. `TRANSFERRING` bloqueia novos turnos e missões na
+origem; a barreira da origem cessa após conclusão ou falha registrada.
+`TRANSFERRING` ou `RESULT_UNCERTAIN` bloqueia novas transferências e execução
+no destino até análise humana. A substituição
 de cada arquivo modificado é atômica; uma falha entre arquivos pode deixar
 alguns copiados e por isso não é tratada como sucesso nem sofre rollback
 destrutivo. Um processo externo que escreva diretamente no filesystem fora
 dos gates do Nexus não participa da transação SQLite; a revalidação e os
 hashes detectam deriva observável, mas a operação pressupõe o ambiente
 local controlado previsto nesta fase.
+
+Não existe ainda uma ação administrativa para reconciliar `RESULT_UNCERTAIN`.
+O operador deve inspecionar o registro e o worktree destinatário, preservar
+as evidências e tratar a reconciliação em uma fase futura; a interface não
+oferece botão para declarar sucesso nem repete a transferência.
+Uma transferência incerta também impede outro claim com a mesma origem;
+turnos novos na origem só são liberados quando o escritor do handoff já não
+está ativo (erro encerrado ou processo local comprovadamente morto).
 
 O coordenador continua `BLOCKED` em
 `DEPENDENCY_WORKTREE_NOT_TRANSFERRED`; a existência de preview, aprovação ou

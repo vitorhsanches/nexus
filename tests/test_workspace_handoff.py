@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -23,11 +25,61 @@ def _git(root, *args):
 
 
 def _claim_in_process(db_path, handoff_id, queue):
-    from pathlib import Path
-
     database.DATABASE_PATH = Path(db_path)
     database.STORAGE_DIR = Path(db_path).parent
     queue.put(records.claim(handoff_id))
+
+
+def _race_source_start_in_process(db_path, session_id, handoff_id, action, start, queue):
+    database.DATABASE_PATH = Path(db_path)
+    database.STORAGE_DIR = Path(db_path).parent
+    if not start.wait(timeout=10):
+        queue.put((action, "TIMEOUT"))
+        return
+    if action == "claim":
+        queue.put((action, records.claim(handoff_id)))
+        return
+    try:
+        if action == "turn":
+            execution_id = dev_sessions.create_turn(session_id, "concurrent edit", requested_model="free/model")
+        else:
+            execution_id = dev_missions.create_mission(
+                session_id, "concurrent mission", requested_model="free/model",
+                allowed_models=["free/model"], test_profile="unit",
+            )
+    except records.HandoffBlocked:
+        queue.put((action, "BLOCKED"))
+    else:
+        queue.put((action, execution_id))
+
+
+def _claim_after_barrier_in_process(db_path, handoff_id, start, queue):
+    database.DATABASE_PATH = Path(db_path)
+    database.STORAGE_DIR = Path(db_path).parent
+    if not start.wait(timeout=10):
+        queue.put((handoff_id, "TIMEOUT"))
+        return
+    queue.put((handoff_id, records.claim(handoff_id)))
+
+
+def _transfer_until_first_write_in_process(db_path, handoff_id, target_file, signal, release):
+    database.DATABASE_PATH = Path(db_path)
+    database.STORAGE_DIR = Path(db_path).parent
+    original_bytes = handoff._bytes
+
+    def after_first_target_read(path):
+        content = original_bytes(path)
+        if Path(path) == Path(target_file):
+            signal.send(("first_write", None))
+            release.wait(timeout=60)
+        return content
+
+    handoff._bytes = after_first_target_read
+    try:
+        handoff.transfer(handoff_id)
+    except Exception as error:
+        signal.send(("error", repr(error)))
+        raise
 
 
 @pytest.fixture
@@ -91,6 +143,7 @@ def test_modified_and_added_files_transfer_only_to_target(env):
 
     (Path(source) / "calc.py").write_text("def multiply(a, b):\n    return a * b\n", encoding="utf-8")
     (Path(source) / "new.txt").write_text("new\n", encoding="utf-8")
+    source_before = {path: (Path(source) / path).read_bytes() for path in ("calc.py", "new.txt")}
     mission = _ready(env)
     before = (Path(target) / "calc.py").read_bytes()
     preview = _preview(env, mission)
@@ -104,12 +157,199 @@ def test_modified_and_added_files_transfer_only_to_target(env):
     assert handoff.transfer(preview["handoff_id"])["status"] == "TRANSFERRED"
     assert (Path(target) / "calc.py").read_bytes() == (Path(source) / "calc.py").read_bytes()
     assert (Path(target) / "new.txt").read_bytes() == (Path(source) / "new.txt").read_bytes()
+    for item in preview["files"]:
+        assert hashlib.sha256((Path(target) / item["path"]).read_bytes()).hexdigest() == item["sha256"]
+    assert {path: (Path(source) / path).read_bytes() for path in source_before} == source_before
+    assert {(row["path"], row["status"]) for row in read_worktree_changed_files(target)} == {
+        (item["path"], item["status"]) for item in preview["files"]
+    }
     assert (env["repo"] / "calc.py").read_bytes() == before
     assert not (env["repo"] / "new.txt").exists()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip() == env["base"]
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=env["repo"], text=True).strip() == env["base"]
     dependency = service.get_pane(env["target_pane"])["dependencies"][0]
     assert dependency["ready"] and dependency["handoff_id"] == preview["handoff_id"]
+    # A completed transfer releases the source barrier.
+    turn_id = dev_sessions.create_turn(env["source"]["session_id"], "next edit", requested_model="free/model")
+    assert dev_sessions.get_turn(turn_id)["status"] == "PENDING"
+
+
+def test_active_source_turn_blocks_preview_and_approval(env):
+    source = Path(env["source"]["worktree_path"])
+    (source / "calc.py").write_text("changed\n", encoding="utf-8")
+    mission = _ready(env)
+    turn_id = dev_sessions.create_turn(env["source"]["session_id"], "active edit", requested_model="free/model")
+    with pytest.raises(DevServiceError) as error:
+        _preview(env, mission)
+    assert error.value.code == "HANDOFF_SOURCE_BUSY"
+    dev_sessions.update_turn_status(turn_id, "COMPLETED")
+    preview = _preview(env, mission)
+    second_turn = dev_sessions.create_turn(env["source"]["session_id"], "another edit", requested_model="free/model")
+    with pytest.raises(DevServiceError) as error:
+        _approve(env, preview)
+    assert error.value.code == "HANDOFF_SOURCE_BUSY"
+    assert records.get(preview["handoff_id"])["status"] == "BLOCKED"
+    dev_sessions.update_turn_status(second_turn, "COMPLETED")
+
+
+def test_source_turn_before_transfer_blocks_without_target_write(env):
+    source = Path(env["source"]["worktree_path"])
+    target = Path(env["target"]["worktree_path"])
+    (source / "calc.py").write_text("changed\n", encoding="utf-8")
+    preview = _preview(env, _ready(env))
+    _approve(env, preview)
+    before = (target / "calc.py").read_bytes()
+    turn_id = dev_sessions.create_turn(env["source"]["session_id"], "active edit", requested_model="free/model")
+    with pytest.raises(DevServiceError) as error:
+        handoff.transfer(preview["handoff_id"])
+    assert error.value.code == "HANDOFF_SOURCE_BUSY"
+    assert (target / "calc.py").read_bytes() == before
+    assert records.get(preview["handoff_id"])["status"] == "BLOCKED"
+    dev_sessions.update_turn_status(turn_id, "COMPLETED")
+
+
+def test_claim_checks_source_and_blocks_both_sessions_until_finished(env):
+    source = Path(env["source"]["worktree_path"])
+    (source / "calc.py").write_text("changed\n", encoding="utf-8")
+    preview = _preview(env, _ready(env))
+    _approve(env, preview)
+    source_id = env["source"]["session_id"]
+    target_id = env["target"]["session_id"]
+    turn_id = dev_sessions.create_turn(source_id, "active edit", requested_model="free/model")
+    assert records.claim(preview["handoff_id"]) is None
+    dev_sessions.update_turn_status(turn_id, "COMPLETED")
+    mission_id = dev_missions.create_mission(source_id, "active mission", requested_model="free/model",
+                                            allowed_models=["free/model"], test_profile="unit")
+    assert records.claim(preview["handoff_id"]) is None
+    dev_missions.update_status(mission_id, "CANCELLED")
+    token = records.claim(preview["handoff_id"])
+    assert token is not None
+    with pytest.raises(records.HandoffBlocked, match="Source"):
+        dev_sessions.create_turn(source_id, "bypass", requested_model="free/model")
+    with pytest.raises(records.HandoffBlocked, match="Source"):
+        dev_missions.create_mission(source_id, "bypass", requested_model="free/model",
+                                    allowed_models=["free/model"], test_profile="unit")
+    with pytest.raises(records.HandoffBlocked, match="Target"):
+        dev_sessions.create_turn(target_id, "bypass", requested_model="free/model")
+    with pytest.raises(records.HandoffBlocked, match="Target"):
+        dev_missions.create_mission(target_id, "bypass", requested_model="free/model",
+                                    allowed_models=["free/model"], test_profile="unit")
+    assert not records.finish(preview["handoff_id"], "old-token", "TRANSFERRED")
+    assert records.owns(preview["handoff_id"], token)
+    assert records.finish(preview["handoff_id"], token, "RESULT_UNCERTAIN")
+    # Uncertain target remains blocked, but source can start a new turn.
+    assert dev_sessions.create_turn(source_id, "safe next edit", requested_model="free/model")
+    with pytest.raises(records.HandoffBlocked):
+        dev_sessions.create_turn(target_id, "still blocked", requested_model="free/model")
+
+
+@pytest.mark.parametrize("action", ["turn", "mission"])
+def test_source_start_races_claim_across_processes(env, action):
+    source = Path(env["source"]["worktree_path"])
+    (source / "calc.py").write_text("changed\n", encoding="utf-8")
+    preview = _preview(env, _ready(env))
+    _approve(env, preview)
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    queue = context.Queue()
+    processes = [context.Process(target=_race_source_start_in_process,
+                                 args=(str(database.DATABASE_PATH), env["source"]["session_id"],
+                                       preview["handoff_id"], action, start, queue))
+                 for action in ("claim", action)]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=20)
+        assert process.exitcode == 0
+    results = dict(queue.get(timeout=2) for _ in processes)
+    assert results["claim"] != "TIMEOUT" and results[action] != "TIMEOUT"
+    if results["claim"] is None:
+        assert results[action].startswith("DEVTURN-" if action == "turn" else "DEVMISSION-")
+        assert records.get(preview["handoff_id"])["status"] == "APPROVED"
+    else:
+        assert results[action] == "BLOCKED"
+        assert records.owns(preview["handoff_id"], results["claim"])
+        assert records.recover_orphaned() == [preview["handoff_id"]]
+        assert records.get(preview["handoff_id"])["status"] == "RESULT_UNCERTAIN"
+        with pytest.raises(DevServiceError):
+            handoff.transfer(preview["handoff_id"])
+
+
+def test_two_targets_cannot_claim_same_source_concurrently(env):
+    source = Path(env["source"]["worktree_path"])
+    (source / "calc.py").write_text("changed\n", encoding="utf-8")
+    mission = _ready(env)
+    other_session = create_dev_session("demo")
+    other_pane = panes.create_pane(
+        project_id="demo", dev_session_id=other_session["session_id"], origin="maestro",
+        role="tester", title="Other target", model="free/model", plan_id=env["plan"],
+        plan_agent_key="other", brief={"task": "other", "depends_on": ["source"]},
+    )
+    first = _preview(env, mission)
+    second = handoff.preview(env["source_pane"], other_pane, mission)
+    _approve(env, first)
+    handoff.approve(second["handoff_id"], second["snapshot_fingerprint"], env["source_pane"], other_pane)
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    queue = context.Queue()
+    processes = [context.Process(target=_claim_after_barrier_in_process,
+                                 args=(str(database.DATABASE_PATH), preview["handoff_id"], start, queue))
+                 for preview in (first, second)]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=20)
+        assert process.exitcode == 0
+    outcomes = dict(queue.get(timeout=2) for _ in processes)
+    assert sum(token not in {None, "TIMEOUT"} for token in outcomes.values()) == 1
+    winner = next(handoff_id for handoff_id, token in outcomes.items() if token)
+    loser = next(handoff_id for handoff_id, token in outcomes.items() if token is None)
+    assert records.get(winner)["status"] == "TRANSFERRING"
+    assert records.get(loser)["status"] == "APPROVED"
+    assert records.recover_orphaned() == [winner]
+    assert records.get(winner)["status"] == "RESULT_UNCERTAIN"
+    assert records.claim(loser) is None
+
+
+def test_dead_transfer_owner_leaves_partial_target_uncertain_without_replay(env):
+    source = Path(env["source"]["worktree_path"])
+    target = Path(env["target"]["worktree_path"])
+    (source / "calc.py").write_text("changed\n", encoding="utf-8")
+    (source / "z.txt").write_text("second\n", encoding="utf-8")
+    preview = _preview(env, _ready(env))
+    _approve(env, preview)
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    release = context.Event()
+    process = context.Process(target=_transfer_until_first_write_in_process,
+                              args=(str(database.DATABASE_PATH), preview["handoff_id"],
+                                    str(target / "calc.py"), sender, release))
+    process.start()
+    sender.close()
+    try:
+        assert receiver.poll(120), f"transfer did not report a write (exit={process.exitcode})"
+        phase, detail = receiver.recv()
+        assert phase == "first_write", detail
+        assert records.get(preview["handoff_id"])["status"] == "TRANSFERRING"
+    finally:
+        process.terminate()
+        process.join(timeout=20)
+        receiver.close()
+    assert process.exitcode is not None
+    assert records.recover_orphaned() == [preview["handoff_id"]]
+    database.initialize_database()  # Reopening the database never replays the write.
+    record = records.get(preview["handoff_id"])
+    assert record["status"] == "RESULT_UNCERTAIN"
+    assert record["error_code"] == "HANDOFF_OWNER_EXITED"
+    assert (target / "calc.py").read_bytes() == (source / "calc.py").read_bytes()
+    assert not (target / "z.txt").exists()
+    with pytest.raises(DevServiceError):
+        handoff.transfer(preview["handoff_id"])
+    with pytest.raises(records.HandoffBlocked):
+        dev_sessions.create_turn(env["target"]["session_id"], "no replay", requested_model="free/model")
+    assert dev_sessions.create_turn(env["source"]["session_id"], "after dead owner", requested_model="free/model")
 
 
 def test_approval_rejects_fingerprint_and_source_drift(env):

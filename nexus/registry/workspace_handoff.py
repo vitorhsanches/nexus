@@ -25,6 +25,12 @@ def assert_session_execution_allowed(connection, session_id: str) -> None:
     This closes direct Development API bypasses and serializes starts with
     handoff.claim() across processes.
     """
+    source_transfer = connection.execute(
+        """SELECT 1 FROM workspace_handoffs WHERE source_session_id = ?
+           AND status = 'TRANSFERRING' LIMIT 1""", (session_id,),
+    ).fetchone()
+    if source_transfer:
+        raise HandoffBlocked("Source handoff is in progress; writing is blocked.")
     uncertain = connection.execute(
         """SELECT 1 FROM workspace_handoffs WHERE target_session_id = ?
            AND status IN ('TRANSFERRING','RESULT_UNCERTAIN') LIMIT 1""", (session_id,),
@@ -117,6 +123,56 @@ def target_has_unresolved_transfer(target_session_id: str) -> bool:
     return row is not None
 
 
+def _session_has_active_execution(connection, session_id: str) -> bool:
+    """Read durable turn and mission reservations inside the caller's transaction."""
+    return connection.execute(
+        """SELECT 1 FROM dev_turns WHERE dev_session_id = ?
+           AND status IN ('PENDING','RUNNING')
+           UNION SELECT 1 FROM dev_autonomous_missions WHERE dev_session_id = ?
+           AND status IN ('PENDING','RUNNING','TESTING','REPAIRING') LIMIT 1""",
+        (session_id, session_id),
+    ).fetchone() is not None
+
+
+def _claim_identity_valid(connection, row) -> bool:
+    """Check durable bindings under the same write transaction as the claim.
+
+    Filesystem content and the review fingerprint are rechecked by the service
+    immediately before and after this transaction.
+    """
+    source = connection.execute(
+        """SELECT p.*, s.status AS session_status, s.base_sha AS session_base_sha
+           FROM workspace_panes p JOIN dev_sessions s ON s.id = p.dev_session_id
+           WHERE p.id = ?""", (row["source_pane_id"],),
+    ).fetchone()
+    target = connection.execute(
+        """SELECT p.*, s.status AS session_status, s.base_sha AS session_base_sha
+           FROM workspace_panes p JOIN dev_sessions s ON s.id = p.dev_session_id
+           WHERE p.id = ?""", (row["target_pane_id"],),
+    ).fetchone()
+    mission = connection.execute(
+        "SELECT * FROM dev_autonomous_missions WHERE id = ?", (row["source_mission_id"],),
+    ).fetchone()
+    if source is None or target is None or mission is None:
+        return False
+    if (source["project_id"] != row["project_id"] or target["project_id"] != row["project_id"]
+            or source["plan_id"] != row["plan_id"] or target["plan_id"] != row["plan_id"]
+            or source["plan_agent_key"] != row["source_agent_key"]
+            or target["plan_agent_key"] != row["target_agent_key"]
+            or source["dev_session_id"] != row["source_session_id"]
+            or target["dev_session_id"] != row["target_session_id"]
+            or source["session_status"] != "ACTIVE" or target["session_status"] != "ACTIVE"
+            or source["session_base_sha"] != row["source_base_sha"]
+            or target["session_base_sha"] != row["target_base_sha"]
+            or mission["dev_session_id"] != row["source_session_id"]
+            or mission["status"] != "READY_FOR_REVIEW" or mission["error_code"]):
+        return False
+    try:
+        return row["source_agent_key"] in (json.loads(target["brief_json"] or "{}").get("depends_on") or [])
+    except (TypeError, ValueError):
+        return False
+
+
 def create(snapshot: dict) -> dict:
     handoff_id = f"HANDOFF-{uuid4().hex[:12].upper()}"
     with get_connection() as connection:
@@ -167,21 +223,18 @@ def claim(handoff_id: str) -> str | None:
         row = connection.execute("SELECT * FROM workspace_handoffs WHERE id = ?", (handoff_id,)).fetchone()
         if row is None or row["status"] != "APPROVED":
             return None
+        if not _claim_identity_valid(connection, row):
+            return None
         busy = connection.execute(
-            """SELECT 1 FROM workspace_handoffs WHERE target_session_id = ?
+            """SELECT 1 FROM workspace_handoffs
+               WHERE (target_session_id = ? OR source_session_id = ?)
                AND status IN ('TRANSFERRING','RESULT_UNCERTAIN') LIMIT 1""",
-            (row["target_session_id"],),
+            (row["target_session_id"], row["source_session_id"]),
         ).fetchone()
         if busy:
             return None
-        executing = connection.execute(
-            """SELECT 1 FROM dev_turns WHERE dev_session_id = ?
-               AND status IN ('PENDING','RUNNING')
-               UNION SELECT 1 FROM dev_autonomous_missions WHERE dev_session_id = ?
-               AND status IN ('PENDING','RUNNING','TESTING','REPAIRING') LIMIT 1""",
-            (row["target_session_id"], row["target_session_id"]),
-        ).fetchone()
-        if executing:
+        if (_session_has_active_execution(connection, row["source_session_id"])
+                or _session_has_active_execution(connection, row["target_session_id"])):
             return None
         connection.execute(
             """UPDATE workspace_handoffs SET status = 'TRANSFERRING',
