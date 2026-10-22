@@ -418,10 +418,21 @@
         const limits = approvedExecutionLimits(plan);
         const execution = plan.execution;
         if (execution) {
+          const resume = execution.resume || { eligible: false };
+          const pending = execution.steps[execution.current_index];
+          const completed = execution.steps[execution.current_index - 1];
+          const handoff = resume.handoff_id || (execution.handoffs || []).find((item) =>
+            pending && completed && item.source_mission_id === completed.mission_id && item.target_pane_id === pending.pane_id);
           card.appendChild(el("div", { className: "ws-pane-section" },
             el("h3", { text: EXECUTION_STATUS_LABELS[execution.status] || execution.status }),
             el("div", { className: "ws-msg-meta", text: `${execution.current_index}/${execution.steps.length} agentes processados` }),
             ...execution.steps.map((step) => el("div", { text: `${step.ordinal + 1}. ${step.agent_key}: ${step.status}${step.error_code ? ` · ${step.error_code}` : ""}` })),
+            execution.status === "BLOCKED" && pending && completed
+              ? el("div", { className: "ws-msg-meta", text: `Dependência: ${completed.agent_key} → ${pending.agent_key}` }) : null,
+            handoff ? el("div", { className: "ws-msg-meta", text: `Handoff ${typeof handoff === "string" ? handoff : handoff.handoff_id} · ${typeof handoff === "string" ? "TRANSFERRED" : handoff.status}` }) : null,
+            execution.status === "BLOCKED" ? el("div", { className: "ws-msg-meta", text: resume.eligible ? "Retomada elegível: evidências conferidas." : `Retomada indisponível: ${resume.message || resume.code || "dependência pendente"}` }) : null,
+            resume.eligible ? button("Retomar sequência", () => resumeExecution(plan),
+              { className: "ws-button-primary", disabled: state.resumingPlan === plan.plan_id }) : null,
             execution.error_message ? el("div", { className: "ws-error", text: execution.error_message }) : null,
             ["RUNNING", "WAITING_DEPENDENCY"].includes(execution.status)
               ? button("Interromper sequência", () => interruptExecution(plan), { className: "ws-button-secondary" }) : null));
@@ -485,6 +496,18 @@
       try { await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/interrupt`, { method: "POST" }); showError(""); }
       catch (error) { showError(error.message); }
       await refresh({ force: true });
+    }
+
+    async function resumeExecution(plan) {
+      if (state.resumingPlan) return;
+      state.resumingPlan = plan.plan_id;
+      try {
+        const current = await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execution`);
+        if (!current.resume || !current.resume.eligible) throw new Error(current.resume?.message || "A retomada não está mais elegível.");
+        await api(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/resume`, { method: "POST" });
+        showError("");
+      } catch (error) { showError(error.message); }
+      finally { state.resumingPlan = null; await refresh({ force: true }); }
     }
 
     function renderMaestro() {

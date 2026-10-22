@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from nexus.dev.service import DevServiceError
-from nexus.registry import database, dev_missions
+from nexus.registry import database, dev_missions, dev_sessions, workspace_handoff
 from nexus.registry import workspace as store
 from nexus.registry import workspace_execution as executions
 from nexus.workspace import coordinator
@@ -172,6 +172,29 @@ def test_execution_requires_approved_plan_and_is_idempotent(coord_env):
     assert len(first["steps"]) == 2
 
 
+def test_durable_token_gates_mission_and_internal_turn_in_one_transaction(coord_env):
+    _authorize(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    executions.update_step(plan_id, "api", "STARTING", owner_token=token)
+    with pytest.raises(workspace_handoff.HandoffBlocked):
+        dev_missions.create_mission("DEV-API", "manual", requested_model="free/model",
+                                    allowed_models=["free/model"], test_profile="unit")
+    with executions.coordinated_launch(plan_id, "api", token):
+        mission_id = dev_missions.create_mission("DEV-API", "coordinated", requested_model="free/model",
+                                                allowed_models=["free/model"], test_profile="unit")
+        turn_id = dev_sessions.create_turn("DEV-API", "internal", requested_model="free/model")
+    assert mission_id and turn_id
+    with pytest.raises(workspace_handoff.HandoffBlocked):
+        dev_sessions.create_turn("DEV-API", "manual", requested_model="free/model")
+    _stale(plan_id)
+    new = executions.claim_recovery(plan_id)
+    assert new and new != token
+    with executions.coordinated_launch(plan_id, "api", token), pytest.raises(workspace_handoff.HandoffBlocked):
+        dev_missions.create_mission("DEV-API", "old owner", requested_model="free/model",
+                                    allowed_models=["free/model"], test_profile="unit")
+
+
 def test_sequential_execution_reuses_mission_runner_and_completes_for_review(coord_env, monkeypatch):
     env = coord_env
     calls = env["calls"]
@@ -240,7 +263,9 @@ def _stale(plan_id):
 def _existing(env, status="READY_FOR_REVIEW", *, starting=False):
     _authorize(env)
     token = executions.claim_execution(env["plan_id"])
-    mission_id = dev_missions.create_mission("DEV-API", "api", requested_model="free/model", allowed_models=["free/model"], test_profile="unit")
+    executions.update_step(env["plan_id"], "api", "STARTING", owner_token=token)
+    with executions.coordinated_launch(env["plan_id"], "api", token):
+        mission_id = dev_missions.create_mission("DEV-API", "api", requested_model="free/model", allowed_models=["free/model"], test_profile="unit")
     dev_missions.update_status(mission_id, status, result={"changed_files": [{"path": "api.py"}]})
     executions.update_step(env["plan_id"], "api", "STARTING" if starting else "RUNNING", mission_id=mission_id, owner_token=token)
     _stale(env["plan_id"])
@@ -463,8 +488,10 @@ def test_review_result_preserves_human_integration_approval(coord_env, monkeypat
 
 def test_recovery_never_invokes_launcher_for_a_persisted_mission(coord_env, monkeypatch):
     _authorize(coord_env)
-    executions.claim_execution(coord_env["plan_id"])
-    mission_id = dev_missions.create_mission("DEV-API", "api", requested_model="free/model", allowed_models=["free/model"], test_profile="unit")
+    token = executions.claim_execution(coord_env["plan_id"])
+    executions.update_step(coord_env["plan_id"], "api", "STARTING", owner_token=token)
+    with executions.coordinated_launch(coord_env["plan_id"], "api", token):
+        mission_id = dev_missions.create_mission("DEV-API", "api", requested_model="free/model", allowed_models=["free/model"], test_profile="unit")
     dev_missions.update_status(mission_id, "READY_FOR_REVIEW", result={"changed_files": [{"path": "api.py"}]})
     with database.get_connection() as connection:
         connection.execute("UPDATE workspace_plan_execution_steps SET status='RUNNING', mission_id=? WHERE plan_id=? AND agent_key='api'", (mission_id, coord_env["plan_id"]))

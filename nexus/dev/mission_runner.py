@@ -11,6 +11,7 @@ import os
 import subprocess
 import threading
 import time
+from contextvars import copy_context
 
 from nexus.dev import executor, feature_gate
 from nexus.dev.service import DevServiceError, validate_dev_project
@@ -155,9 +156,12 @@ def start_mission(
     stop_event = threading.Event()
     with _active_lock:
         _active_missions[mission_id] = stop_event
+    # Preserve the coordinator's private launch credential for this mission's
+    # own turns. SQLite still verifies the durable owner token at each insert.
+    launch_context = copy_context()
     thread = threading.Thread(
-        target=_run_mission_body,
-        args=(mission_id, timeout_seconds, stop_event),
+        target=launch_context.run,
+        args=(_run_mission_body, mission_id, timeout_seconds, stop_event),
         daemon=True,
         name=f"nexus-mission-{mission_id}",
     )

@@ -503,6 +503,47 @@ test("handoff controls follow persisted preview, approval and transfer states", 
   assert.equal(calls.filter((call) => call.method === "POST" && call.url.includes("/handoffs/")).length, 3);
 });
 
+test("resume control requires current eligibility and one explicit operator click", async () => {
+  const execution = { status: "BLOCKED", current_index: 1, error_code: "DEPENDENCY_WORKTREE_NOT_TRANSFERRED",
+    steps: [{ ordinal: 0, agent_key: "api", status: "READY_FOR_REVIEW", mission_id: "MISSION-A", pane_id: "PANE-A" },
+      { ordinal: 1, agent_key: "ui", status: "BLOCKED", mission_id: null, pane_id: "PANE-B" }],
+    handoffs: [{ handoff_id: "HANDOFF-1", source_mission_id: "MISSION-A", target_pane_id: "PANE-B", status: "TRANSFERRED" }],
+    resume: { eligible: true, pending_agent: "ui", completed_agent: "api", handoff_id: "HANDOFF-1" } };
+  const p = approvedPlan({ execution });
+  const box = boxWithPlans(p);
+  const routes = { ...baseRoutes(box),
+    "GET /api/workspace/plans/WSPLAN-1/execution": () => execution,
+    "POST /api/workspace/plans/WSPLAN-1/resume": () => {
+      execution.status = "RUNNING"; execution.resume = { eligible: false, code: "RESUME_NOT_ALLOWED" };
+      return execution;
+    },
+  };
+  const { app, doc, calls } = harness(routes);
+  await app.init();
+  const log = doc.byId["ws-maestro-log"];
+  assert.match(log.text(), /Dependência: api → ui/);
+  assert.match(log.text(), /Handoff HANDOFF-1 · TRANSFERRED/);
+  const button = findButton(log, "Retomar sequência");
+  assert.ok(button);
+  await Promise.all([button.dispatch("click"), button.dispatch("click")]);
+  assert.equal(calls.filter((call) => call.method === "POST" && call.url.endsWith("/resume")).length, 1);
+  const getIndex = calls.findIndex((call) => call.method === "GET" && call.url.endsWith("/execution"));
+  const postIndex = calls.findIndex((call) => call.method === "POST" && call.url.endsWith("/resume"));
+  assert.ok(getIndex >= 0 && getIndex < postIndex);
+  assert.equal(findButton(doc.byId["ws-maestro-log"], "Retomar sequência"), undefined);
+  assert.ok(!calls.some((call) => call.method === "POST" && call.url.includes("/handoffs/")));
+});
+
+test("uncertain execution never displays resume action", async () => {
+  const p = approvedPlan({ execution: { status: "RESULT_UNCERTAIN", current_index: 1,
+    steps: [{ ordinal: 0, agent_key: "api", status: "READY_FOR_REVIEW" },
+      { ordinal: 1, agent_key: "ui", status: "RESULT_UNCERTAIN" }],
+    handoffs: [], resume: { eligible: false, code: "RESUME_NOT_ALLOWED" } } });
+  const { app, doc } = harness(baseRoutes(boxWithPlans(p)));
+  await app.init();
+  assert.equal(findButton(doc.byId["ws-maestro-log"], "Retomar sequência"), undefined);
+});
+
 test("different approved plans restore isolated limits and profile drafts", async () => {
   const a = approvedPlan();
   const b = approvedPlan({ plan_id: "WSPLAN-2", approval: { ...a.approval, max_turns_per_agent: 3, mission_timeout_seconds: 61 } });
