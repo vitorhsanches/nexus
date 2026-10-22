@@ -332,10 +332,12 @@ def test_resume_rejects_mismatched_evidence_and_authorization(env, monkeypatch):
         ("workspace_handoffs", "source_mission_id", "WRONG", "id", handoff_id),
         ("workspace_handoffs", "plan_id", "WRONG", "id", handoff_id),
         ("workspace_handoffs", "snapshot_fingerprint", "0" * 64, "id", handoff_id),
+        ("workspace_handoffs", "source_pane_id", env["target_pane"], "id", handoff_id),
         ("workspace_handoffs", "approved_at", None, "id", handoff_id),
         ("workspace_handoffs", "result_json", json.dumps({"verified": False}), "id", handoff_id),
         ("workspace_plan_execution_steps", "mission_id", "WRONG", "agent_key", "target"),
         ("workspace_plan_executions", "status", "FAILED", "plan_id", plan_id),
+        ("workspace_plan_executions", "status", "INTERRUPTED", "plan_id", plan_id),
         ("workspace_plan_executions", "status", "RESULT_UNCERTAIN", "plan_id", plan_id),
     ]
     for table, field, replacement, key, identity in changes:
@@ -362,6 +364,13 @@ def test_resume_rejects_mismatched_evidence_and_authorization(env, monkeypatch):
     finally:
         with database.get_connection() as connection:
             connection.execute("UPDATE workspace_plans SET approval_json=? WHERE id=?", (original, plan_id))
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plans SET status='PROPOSED' WHERE id=?", (plan_id,))
+    try:
+        assert coordinator.state(plan_id)["resume"]["code"] == "RESUME_AUTHORIZATION_INVALID"
+    finally:
+        with database.get_connection() as connection:
+            connection.execute("UPDATE workspace_plans SET status='APPROVED' WHERE id=?", (plan_id,))
     with database.get_connection() as connection:
         original_pane_model = connection.execute("SELECT model FROM workspace_panes WHERE id=?", (env["target_pane"],)).fetchone()[0]
         connection.execute("UPDATE workspace_panes SET model='other/model' WHERE id=?", (env["target_pane"],))
@@ -471,6 +480,35 @@ def test_resume_recovery_observes_persisted_target_mission(env, monkeypatch):
     done = _sequence_status(env["plan"], "AWAITING_REVIEW")
     assert done["steps"][1]["mission_id"] == mission_id
     assert launches == ["source"]
+
+
+def test_interrupt_after_resume_uses_existing_coordinator_path(env, monkeypatch):
+    from nexus.dev import mission_runner
+
+    _panes, sessions, launches, _blocked, _transfer = _blocked_and_transferred(env, monkeypatch)
+
+    def pending_target(_pane_id, *_args, **_kwargs):
+        mission_id = dev_missions.create_mission(
+            sessions["target"]["session_id"], "target", requested_model="free/model",
+            allowed_models=["free/model"], test_profile="unit",
+        )
+        launches.append("target")
+        return {"mission": {"mission_id": mission_id}}
+
+    def interrupt(session_id, mission_id):
+        assert session_id == sessions["target"]["session_id"]
+        dev_missions.update_status(mission_id, "CANCELLED")
+
+    monkeypatch.setattr(service, "start_pane_mission", pending_target)
+    monkeypatch.setattr(mission_runner, "interrupt_mission", interrupt)
+    coordinator.resume(env["plan"])
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and launches != ["source", "target"]:
+        time.sleep(0.05)
+    assert launches == ["source", "target"]
+    assert coordinator.interrupt(env["plan"])["interrupt_requested"]
+    assert _sequence_status(env["plan"], "INTERRUPTED")["status"] == "INTERRUPTED"
+    assert launches == ["source", "target"]
 
 
 def test_real_mission_runner_propagates_fenced_token_to_internal_turn(env, monkeypatch):
