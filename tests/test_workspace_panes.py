@@ -299,3 +299,31 @@ def test_workspace_page_renders_and_advanced_tools_stay_reachable():
     assert 'id="ws-maestro-form"' in page.text and 'href="/nexus"' in page.text
     assert "/static/js/workspace.js" in page.text
     assert 'href="/nexus/workspace"' in client.get("/nexus").text
+
+
+def test_cockpit_preview_route_renders_without_replacing_workspace():
+    client = _client()
+    page = client.get("/nexus/workspace/cockpit")
+    assert page.status_code == 200
+    assert "/static/css/cockpit.css" in page.text
+    assert "/static/js/cockpit.js" in page.text
+    assert 'id="pane-grid"' in page.text
+    assert "EVENTOS NEXUS" in page.text
+    assert client.get("/nexus/workspace").status_code == 200
+
+
+def test_cockpit_existing_read_apis_expose_project_agent_and_history(ws_env):
+    created = service.create_pane("demo", role="implementer", title="Agente de teste", model="free/model")
+    client = _client()
+    projects = client.get("/api/projects")
+    workspace = client.get("/api/workspace/state", params={"project_id": "demo"})
+    maestro = client.get("/api/workspace/maestro", params={"project_id": "demo"})
+    history = client.get(f"/api/workspace/panes/{created['pane_id']}/history")
+    assert all(response.status_code == 200 for response in (projects, workspace, maestro, history))
+    assert any(project["id"] == "demo" for project in projects.json()["projects"])
+    pane = workspace.json()["panes"][0]
+    assert pane["pane_id"] == created["pane_id"]
+    assert pane["model"] == "free/model"
+    assert pane["session"]["session_id"] == created["session"]["session_id"]
+    assert maestro.json()["project_id"] == "demo"
+    assert history.json()["pane_id"] == created["pane_id"]

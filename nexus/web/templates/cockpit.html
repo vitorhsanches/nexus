@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Nexus — Cockpit</title>
+  <link rel="stylesheet" href="/static/css/cockpit.css?v={{ asset_version }}">
+  <script src="/static/js/cockpit.js?v={{ asset_version }}" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="window-bar" aria-label="Nexus cockpit"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title"><strong>NEXUS</strong><span>{{ app_version }} · cockpit preview</span></span><span class="window-mode">LOCAL / DADOS REAIS</span></div>
+    <aside class="sidebar" id="sidebar" aria-label="Projetos e missões">
+      <div class="brand"><span class="brand-mark">N<span class="brand-spark">✳</span></span><div><strong>NEXUS</strong><small>MISSION CONTROL</small></div></div>
+      <div class="sidebar-caption">ESPAÇO DE TRABALHO <span id="project-count">00</span></div>
+      <button class="project active" id="project-toggle" type="button" aria-label="Selecionar projeto"><span class="project-icon">N</span><span><strong id="project-name">Selecione um projeto</strong><small id="project-detail">Carregando projetos</small></span><span class="chevron">⌄</span></button>
+      <nav class="mission-nav" id="project-nav" aria-label="Projetos disponíveis" hidden></nav>
+      <div class="nav-label">MISSÕES <span id="mission-count">00</span></div>
+      <nav class="mission-nav" id="mission-nav" aria-label="Missões registradas"></nav>
+      <div class="nav-label pane-nav-heading">PANES <span id="sidebar-pane-count">04</span></div>
+      <nav class="pane-nav" id="pane-nav" aria-label="Panes da missão"></nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-note"><span class="note-dot"></span><div><strong>Prévia de leitura</strong><p>Eventos e resultados do Nexus. Nenhum shell ou CLI conectado.</p></div></div>
+      <div class="sidebar-footer"><span class="avatar">N</span><span><strong>Nexus</strong><small>Workspace atual: <a href="/nexus/workspace">abrir</a></small></span><span class="footer-more">···</span></div>
+    </aside>
+
+    <main class="workspace" id="workspace">
+      <header class="topbar">
+        <div class="topbar-left"><button class="icon-button mobile-menu" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button><div class="breadcrumb"><span>WORKSPACE</span><span class="crumb-separator">/</span><strong id="breadcrumb-title">Cockpit</strong></div></div>
+        <div class="topbar-right"><span class="local-chip"><span></span>LOCAL · LEITURA</span><button class="top-icon" type="button" aria-label="Ajuda sobre a prévia" title="Dados do Nexus em modo leitura; nenhum terminal shell conectado">?</button><span class="top-avatar">N</span></div>
+      </header>
+
+      <section class="mission-bar" aria-labelledby="mission-title">
+        <div class="mission-heading"><div class="eyebrow"><span class="eyebrow-line"></span> WORKSPACE <span class="eyebrow-id" id="workspace-id">—</span></div><h1 id="mission-title">Cockpit <span class="heading-muted">/ visão geral</span></h1><p id="mission-description">Acompanhamento de agentes, missões e coordenação do projeto selecionado.</p></div>
+        <div class="mission-actions"><span class="status-pill"><span></span> Somente leitura</span><button class="outline-button" id="focus-maestro" type="button">Abrir Maestro <span>↗</span></button></div>
+      </section>
+
+      <section class="overview" aria-label="Resumo do projeto"><div class="overview-intro"><span class="overview-icon">▦</span><span>VISÃO DO PROJETO</span></div><div class="overview-stat"><strong>02</strong><span>panes na grade</span></div><div class="overview-stat"><strong>00</strong><span>agentes registrados</span></div><div class="overview-stat"><strong id="execution-count">00</strong><span>missões registradas</span></div><div class="overview-divider"></div><span class="overview-disclaimer" id="data-status">Conectando ao Nexus…</span></section>
+
+      <div class="section-heading"><div><span class="section-kicker">ÁREA DE TRABALHO</span><h2>Panes do projeto <span id="pane-count">02</span></h2></div><div class="view-controls"><div class="group-controls" id="group-controls" hidden><button id="previous-group" type="button" aria-label="Grupo anterior">‹</button><span id="group-label" aria-live="polite">Grupo 1/1</span><button id="next-group" type="button" aria-label="Próximo grupo">›</button></div><button class="restore-layout-button" id="restore-layout" type="button" title="Restaurar layout automático" aria-label="Restaurar layout automático">↺ <span>Restaurar layout</span></button><span class="view-selected" id="grid-layout-label">▦ &nbsp; Grade 2 × 2</span><button class="add-pane-button" id="add-pane" type="button" aria-label="Mostrar próximo agente registrado">+ Pane</button></div></div>
+
+      <section class="pane-grid" id="pane-grid" data-count="2" aria-label="Grade de panes do projeto">
+        <article class="pane maestro-pane selected" data-pane="maestro" tabindex="0" aria-label="Pane Maestro">
+          <div class="pane-header"><div class="pane-identity"><span class="pane-icon maestro-icon">✳</span><div><strong>Maestro</strong><span>COORDENAÇÃO</span></div></div><div class="pane-tools"><span class="pane-status ready"><i></i> Prévia</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Maestro" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Maestro" title="Expandir">⤢</button></div></div>
+          <div class="pane-meta"><span>TIPO <b>Orquestrador</b></span><span>MODELO <b>Não conectado</b></span><span>SESSÃO <b>—</b></span></div>
+          <div class="pane-body maestro-body"><div class="terminal-kicker"><span>●</span> NEXUS / MAESTRO <span class="right">VISUALIZAÇÃO</span></div><div class="maestro-copy"><div class="orbit-symbol">✳</div><span class="mini-label">CENTRO DE COORDENAÇÃO</span><h3>Selecione um projeto.</h3><p>O estado do Maestro aparecerá aqui quando um projeto autorizado for selecionado.</p><div class="maestro-chips"><span>Plano</span><span>Handoffs</span><span>Aprovações</span></div></div></div>
+          <div class="pane-footer"><span class="foot-path">◇ &nbsp;workspace / maestro</span><span>EVENTOS NEXUS · SEM CLI</span></div>
+        </article>
+
+        <article class="pane" data-pane="agent-a" tabindex="0" aria-label="Pane Agente A" hidden>
+          <div class="pane-header"><div class="pane-identity"><span class="pane-icon agent-icon">A</span><div><strong>Agente A <span class="agent-tag">01</span></strong><span>DESENVOLVIMENTO</span></div></div><div class="pane-tools"><span class="pane-status idle"><i></i> Inativo</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Agente A" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Agente A" title="Expandir">⤢</button></div></div>
+          <div class="pane-meta"><span>CLI <b>Codex · proposta</b></span><span>MODELO <b>Não selecionado</b></span><span>SESSÃO <b>—</b></span></div>
+          <div class="pane-body terminal-body"><div class="terminal-kicker"><span>●</span> TERMINAL / AGENTE A <span class="right">OFFLINE</span></div><div class="terminal-placeholder"><span class="prompt-symbol">›</span><div><strong>Terminal ainda não conectado</strong><p>Este espaço representa a futura CLI interativa do agente. Nenhum comando ou log foi produzido.</p></div></div><div class="terminal-bottom"><span class="cursor"></span><span>Prévia de interface · entrada desativada</span></div></div>
+          <div class="pane-footer"><span class="foot-path">◇ &nbsp;worktree / agente-a</span><span>SEM SESSÃO REAL</span></div>
+        </article>
+
+        <article class="pane" data-pane="agent-b" tabindex="0" aria-label="Pane Agente B" hidden>
+          <div class="pane-header"><div class="pane-identity"><span class="pane-icon agent-icon purple">B</span><div><strong>Agente B <span class="agent-tag">02</span></strong><span>VALIDAÇÃO</span></div></div><div class="pane-tools"><span class="pane-status idle"><i></i> Inativo</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Agente B" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Agente B" title="Expandir">⤢</button></div></div>
+          <div class="pane-meta"><span>CLI <b>Codex · proposta</b></span><span>MODELO <b>Não selecionado</b></span><span>SESSÃO <b>—</b></span></div>
+          <div class="pane-body terminal-body"><div class="terminal-kicker"><span>●</span> TERMINAL / AGENTE B <span class="right">OFFLINE</span></div><div class="terminal-placeholder"><span class="prompt-symbol purple-text">›</span><div><strong>Aguardando conexão futura</strong><p>Um segundo agente poderia ocupar este pane após autorização e isolamento do worktree.</p></div></div><div class="terminal-bottom"><span class="cursor purple-cursor"></span><span>Prévia de interface · entrada desativada</span></div></div>
+          <div class="pane-footer"><span class="foot-path">◇ &nbsp;worktree / agente-b</span><span>SEM SESSÃO REAL</span></div>
+        </article>
+
+        <article class="pane" data-pane="review" tabindex="0" aria-label="Pane Revisão">
+          <div class="pane-header"><div class="pane-identity"><span class="pane-icon review-icon">✓</span><div><strong>Revisão</strong><span>GATE HUMANO</span></div></div><div class="pane-tools"><span class="pane-status waiting"><i></i> Aguardando</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Revisão" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Revisão" title="Expandir">⤢</button></div></div>
+          <div class="pane-meta"><span>TIPO <b>Aprovação</b></span><span>STATUS <b>Sem resultado</b></span><span>SESSÃO <b>—</b></span></div>
+          <div class="pane-body review-body"><div class="terminal-kicker"><span>●</span> CHECKPOINT / REVISÃO <span class="right">LEITURA</span></div><div class="review-steps"><div class="review-step"><span class="step-number">01</span><div><strong>Plano da missão</strong><small>Espaço para revisar escopo e dependências</small></div><span class="step-mark">○</span></div><div class="review-step"><span class="step-number">02</span><div><strong>Handoff entre agentes</strong><small>Transferência sujeita à aprovação</small></div><span class="step-mark">○</span></div><div class="review-step"><span class="step-number">03</span><div><strong>Resultado final</strong><small>Integração permanece decisão humana</small></div><span class="step-mark">○</span></div></div></div>
+          <div class="pane-footer"><span class="foot-path">◇ &nbsp;workspace / revisão</span><span>AGUARDANDO DADOS DO NEXUS</span></div>
+        </article>
+      </section>
+
+      <footer class="workspace-footer"><span><i></i> NEXUS COCKPIT PREVIEW</span><span>DADOS DO NEXUS <b>·</b> SEM SHELL <b>·</b> SOMENTE LEITURA</span><span id="footer-pane-count">2 PANES · 0 SESSÕES</span></footer>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
