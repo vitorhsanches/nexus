@@ -166,6 +166,15 @@ def create_app():
             context={"app_version": APP_VERSION, "asset_version": _static_asset_version()},
         )
 
+    @app.get("/nexus/workspace/cockpit", response_class=HTMLResponse, include_in_schema=False)
+    async def cockpit(request: Request):
+        """Render the read-only Dark Terminal workspace preview."""
+        return templates.TemplateResponse(
+            request=request,
+            name="cockpit.html",
+            context={"app_version": APP_VERSION, "asset_version": _static_asset_version()},
+        )
+
     return app
 
 
