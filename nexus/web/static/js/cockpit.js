@@ -13,6 +13,12 @@
   const knownAgents = new Map();
   const closedAgents = new Set();
   const pending = new Set();
+  const streams = new Map();
+  const liveTurns = new Map();
+  const settledStreams = new Map();
+  const streamCursors = new Map();
+  const reconnectHold = new Set();
+  const maxStreams = 4;
   const maestroDrafts = new Map();
   let workspaceState = null;
   let maestroState = null;
@@ -237,6 +243,7 @@
     });
     updateSidebar();
     updateLayout();
+    syncStreams();
   };
 
   const selectPane = pane => {
@@ -255,6 +262,7 @@
     }
     panes().forEach(item => item.classList.toggle('selected', item === pane));
     updateSidebar();
+    syncStreams();
   };
 
   const closePane = pane => {
@@ -369,6 +377,7 @@
     });
     grid.classList.remove('has-maximized');
     updateLayout();
+    syncStreams();
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('menu-toggle').setAttribute('aria-expanded', 'false');
   });
@@ -398,12 +407,16 @@
   document.getElementById('restore-layout').addEventListener('click', () => {
     savedLayouts.clear();
     updateLayout();
+    syncStreams();
     notify('Layout automático restaurado');
   });
   let resizeFrame = 0;
   const scheduleLayout = () => {
     cancelAnimationFrame(resizeFrame);
-    resizeFrame = requestAnimationFrame(updateLayout);
+    resizeFrame = requestAnimationFrame(() => {
+      updateLayout();
+      syncStreams();
+    });
   };
   window.addEventListener('resize', scheduleLayout);
   new ResizeObserver(scheduleLayout).observe(grid);
@@ -743,6 +756,150 @@
     }) : [element('div', 'review-step', 'Nenhuma missão aguardando revisão.')])) ;
     review.querySelector('.pane-footer > span:last-child').textContent = 'INTEGRAÇÃO EXIGE APROVAÇÃO';
   };
+  const streamBody = key => key === 'maestro'
+    ? maestroPane.querySelector('.maestro-body')
+    : panes().find(pane => pane.dataset.pane === key)?.querySelector('.terminal-body');
+  const renderLive = key => {
+    const body = streamBody(key);
+    if (!body) return;
+    const live = liveTurns.get(key);
+    let node = body.querySelector('.cockpit-live');
+    if (!live || (!live.text && !live.activity && !live.notice)) {
+      if (node) node.remove();
+      return;
+    }
+    if (!node) { node = element('div', 'cockpit-live'); body.append(node); }
+    node.replaceChildren(element('strong', '', `AO VIVO · ${live.status || 'RUNNING'}`));
+    if (live.text) node.append(element('pre', 'cockpit-live-text', live.text));
+    if (live.activity) node.append(element('div', 'cockpit-event', live.activity));
+    if (live.notice) node.append(element('div', 'cockpit-error-text', live.notice));
+  };
+  const stopStream = key => {
+    const stream = streams.get(key);
+    if (stream) { stream.source.close(); streams.delete(key); }
+  };
+  const stopAllStreams = () => {
+    [...streams.keys()].forEach(stopStream);
+    liveTurns.clear();
+    settledStreams.clear();
+    streamCursors.clear();
+    reconnectHold.clear();
+  };
+  const activeSpecs = () => {
+    if (!projectId || typeof window.EventSource !== 'function') return [];
+    const specs = [];
+    const add = (key, kind, sessionId, turnId) => {
+      const pane = panes().find(item => item.dataset.pane === key);
+      if (!pane || pane.hidden || pane.classList.contains('minimized') ||
+          (grid.classList.contains('has-maximized') && !pane.classList.contains('maximized')) ||
+          !sessionId || !turnId) return;
+      specs.push({ key, kind, sessionId, turnId, project: projectId, selected: pane.classList.contains('selected') });
+    };
+    if (maestroState?.busy) add('maestro', 'chat', maestroState.chat_session_id, maestroState.active_turn_id);
+    knownAgents.forEach(agent => add(agent.pane_id, 'dev', agent.session?.session_id, agent.active_turn_id));
+    specs.sort((a, b) => Number(b.selected) - Number(a.selected));
+    return specs.slice(0, maxStreams);
+  };
+  const reconcileStream = stream => {
+    if (stream.project === projectId) void refresh();
+  };
+  const processStreamEvent = (stream, raw) => {
+    if (streams.get(stream.key) !== stream || stream.project !== projectId) return;
+    const eventId = raw.lastEventId;
+    if (eventId) {
+      if (stream.seen.has(eventId)) return;
+      const cursor = streamCursors.get(stream.key);
+      if (!cursor || cursor.turnId !== stream.turnId) streamCursors.set(stream.key, { turnId: stream.turnId, id: eventId });
+      else cursor.id = eventId;
+      stream.seen.add(eventId);
+      if (stream.seen.size > 1000) stream.seen.delete(stream.seen.values().next().value);
+    }
+    let event;
+    try { event = JSON.parse(raw.data); } catch (_error) { return; }
+    if (!event || typeof event !== 'object') return;
+    const type = event.type || event.method || '';
+    if (type === 'nexus/replayGap' || type === 'nexus/turnSnapshot' ||
+        type === 'nexus/turnEnded' || type === 'nexus/noTurn' || /turn\/(completed|failed|interrupted)$/.test(type)) {
+      stopStream(stream.key);
+      settledStreams.set(stream.key, stream.turnId);
+      if (type === 'nexus/replayGap') {
+        liveTurns.set(stream.key, { turnId: stream.turnId, status: 'RECONCILING',
+          notice: 'Eventos ao vivo expiraram; consultando o registro persistido.' });
+        renderLive(stream.key);
+      } else if (type === 'nexus/turnSnapshot') {
+        const turn = event.turn || event.params?.turn || {};
+        liveTurns.set(stream.key, { turnId: stream.turnId, status: turn.status || 'RECONCILING',
+          text: turn.response_text || '', notice: turn.error_message || '' });
+        renderLive(stream.key);
+      }
+      reconcileStream(stream);
+      return;
+    }
+    const live = liveTurns.get(stream.key) || { turnId: stream.turnId, status: 'RUNNING', text: '' };
+    if (live.turnId !== stream.turnId) return;
+    const params = event.params || {};
+    if (/agentMessage.*delta|delta.*agentMessage/i.test(type)) {
+      const delta = params.delta || params.textDelta;
+      if (typeof delta === 'string') live.text = (live.text + delta).slice(-20000);
+    } else if (/item\/completed$/.test(type) && params.item?.type === 'agentMessage' && typeof params.item.text === 'string') {
+      live.text = params.item.text.slice(-20000);
+    } else if (/item\/(started|updated|completed)$/.test(type) && params.item?.type && params.item.type !== 'agentMessage') {
+      live.activity = `Evento ${params.item.type} · ${type}`;
+    } else if (/turn\/started$/.test(type)) live.status = 'RUNNING';
+    else return;
+    liveTurns.set(stream.key, live);
+    renderLive(stream.key);
+  };
+  const startStream = spec => {
+    const cursor = streamCursors.get(spec.key);
+    const resumeCursor = cursor?.turnId === spec.turnId ? `&cursor=${encodeURIComponent(cursor.id)}` : '';
+    const url = `/api/${spec.kind}/sessions/${encodeURIComponent(spec.sessionId)}/events?turn_id=${encodeURIComponent(spec.turnId)}${resumeCursor}`;
+    const source = new window.EventSource(url);
+    const stream = { ...spec, source, seen: new Set() };
+    streams.set(spec.key, stream);
+    const previous = liveTurns.get(spec.key);
+    liveTurns.set(spec.key, previous?.turnId === spec.turnId
+      ? { ...previous, status: 'RUNNING' } : { turnId: spec.turnId, status: 'RUNNING', text: '' });
+    source.onmessage = raw => processStreamEvent(stream, raw);
+    source.onerror = () => {
+      if (streams.get(spec.key) !== stream) return;
+      const live = liveTurns.get(spec.key);
+      if (live) { live.status = 'RECONNECTING'; renderLive(spec.key); }
+      // EventSource reconnects using Last-Event-ID. Polling continues as fallback.
+      if (source.readyState === window.EventSource.CLOSED) {
+        stopStream(spec.key);
+        reconnectHold.add(spec.key);
+        setTimeout(() => {
+          reconnectHold.delete(spec.key);
+          if (spec.project === projectId) syncStreams();
+        }, 1000);
+      }
+      reconcileStream(stream);
+    };
+  };
+  const syncStreams = () => {
+    const wanted = activeSpecs();
+    for (const [key, turnId] of settledStreams) {
+      if (!wanted.some(spec => spec.key === key && spec.turnId === turnId)) settledStreams.delete(key);
+    }
+    for (const [key, stream] of streams) {
+      if (!wanted.some(spec => spec.key === key && spec.project === stream.project &&
+          spec.sessionId === stream.sessionId && spec.turnId === stream.turnId)) stopStream(key);
+    }
+    for (const spec of wanted) {
+      const current = streams.get(spec.key);
+      if (streamCursors.get(spec.key)?.turnId !== spec.turnId) streamCursors.delete(spec.key);
+      if (!current && !reconnectHold.has(spec.key) && settledStreams.get(spec.key) !== spec.turnId) startStream(spec);
+      renderLive(spec.key);
+    }
+    for (const [key, live] of liveTurns) {
+      const spec = wanted.find(item => item.key === key);
+      if (!spec || live.turnId !== spec.turnId) {
+        liveTurns.delete(key);
+        renderLive(key);
+      }
+    }
+  };
   const refresh = async () => {
     if (!projectId) return;
     clearTimeout(refreshTimer);
@@ -781,6 +938,7 @@
     }
   };
   const selectProject = id => {
+    stopAllStreams();
     if (projectId) maestroDrafts.set(projectId, maestroComposer.input.value);
     projectId = id;
     maestroComposer.input.value = maestroDrafts.get(id) || '';

@@ -286,10 +286,15 @@ def conversation_state(project_id: str) -> dict:
             "plan": plan,
         })
     model_row = None
+    active_turn_id = next((row["chat_turn_id"] for row in store.list_messages(conversation["id"])
+                           if row["author"] == "user" and row["status"] in {"PENDING", "PROCESSING"}
+                           and row["chat_turn_id"]), None)
     if conversation["model"]:
         model_row = next((item for item in _catalog()["models"] if item["id"] == conversation["model"]), None)
     return {
         "conversation_id": conversation["id"],
+        "chat_session_id": conversation["chat_session_id"],
+        "active_turn_id": active_turn_id,
         "project_id": project_id,
         "planning": {
             "authorized": bool(conversation["chat_session_id"]) and model_row is not None and (

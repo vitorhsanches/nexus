@@ -122,6 +122,7 @@ def pane_view(row) -> dict:
             "worktree_path": session["worktree_path"],
             "base_sha": session["base_sha"],
         },
+        "active_turn_id": (active["id"] if (active := dev_sessions.get_active_turn_for_session(row["dev_session_id"])) else None),
         "mission_count": len(missions),
         "latest_mission": latest,
         "busy": _pane_is_executing(row),

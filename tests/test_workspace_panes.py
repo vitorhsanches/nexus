@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nexus.dev.service import DevServiceError
-from nexus.registry import database
+from nexus.registry import database, dev_sessions
 from nexus.workspace import policy, service
 
 FREE = {"id": "free/model", "cost_status": "free"}
@@ -239,6 +239,16 @@ def test_pane_view_surfaces_review_state_without_applying(ws_env, monkeypatch):
     assert latest["status"] == "READY_FOR_REVIEW" and latest["human_approval_required"] is True
     assert latest["integration_applied"] is False
     assert latest["changed_files"] == [{"path": "calc.py", "status": "modified"}]
+
+
+def test_pane_view_exposes_only_its_active_dev_turn_for_streaming(ws_env):
+    pane = service.create_pane("demo", role="implementer", model="free/model")
+    assert pane["active_turn_id"] is None
+    session_id = pane["session"]["session_id"]
+    turn_id = dev_sessions.create_turn(session_id, "test prompt", requested_model="free/model")
+    assert service.get_pane(pane["pane_id"])["active_turn_id"] == turn_id
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    assert service.get_pane(pane["pane_id"])["active_turn_id"] is None
 
 
 # ── Routes ──────────────────────────────────────────────────────────────
