@@ -18,11 +18,15 @@
   const settledStreams = new Map();
   const streamCursors = new Map();
   const reconnectHold = new Set();
+  const interruptRequests = new Set();
   const maxStreams = 4;
   const maestroDrafts = new Map();
   let workspaceState = null;
   let maestroState = null;
   let modelCatalog = [];
+  let testProfiles = [];
+  let testProfilesLoading = false;
+  let testProfilesError = '';
   let projectId = null;
   let projects = [];
   let refreshTimer;
@@ -576,6 +580,90 @@
       if (accepted) composer.error.textContent = '';
     }
   };
+  const submitMission = async (paneId, controls) => {
+    const agent = knownAgents.get(paneId);
+    const description = controls.description.value.trim();
+    const profile = controls.profile.value;
+    if (!agent || (!description && !agent.brief) || !profile || pending.has(paneId) || !projectId) return;
+    if (!workspaceState?.execution_enabled || agent.busy || agent.session?.status !== 'ACTIVE') return;
+    if ((agent.dependencies || []).some(dependency => !dependency.ready)) {
+      controls.error.textContent = 'Aguarde a dependência e o handoff antes de iniciar esta missão.';
+      return;
+    }
+    const authorized = Boolean(agent.brief?.authorization?.applies);
+    const confirmModel = controls.composer.controls.querySelector('.cockpit-model-confirm input');
+    const confirmCost = controls.composer.controls.querySelector('.cockpit-cost-confirm input');
+    if (!authorized && !confirmModel?.checked) {
+      controls.error.textContent = `Confirme o uso de ${agent.model || 'um modelo'} antes da missão.`;
+      return;
+    }
+    if (!authorized && costOf(agent.model) !== 'free' && !confirmCost?.checked) {
+      controls.error.textContent = `Confirme o custo de ${agent.model} antes da missão.`;
+      return;
+    }
+    pending.add(paneId);
+    controls.start.disabled = true;
+    controls.error.textContent = '';
+    try {
+      await api(`/api/workspace/panes/${encodeURIComponent(paneId)}/missions`, { method: 'POST', body: {
+        ...(description ? { description } : {}), test_profile: profile,
+        ...(!authorized ? { confirm_model: agent.model } : {}),
+        ...(!authorized && costOf(agent.model) !== 'free' ? { confirm_cost: true } : {})
+      } });
+      if (controls.description.value.trim() === description) controls.description.value = '';
+      confirmModel.checked = false;
+      confirmCost.checked = false;
+    } catch (error) {
+      controls.error.textContent = `${error.message}. O resultado pode ser incerto; confira a missão antes de tentar novamente.`;
+    } finally {
+      await refresh();
+      pending.delete(paneId);
+      renderAgentControls(paneId);
+    }
+  };
+  const interruptMission = async (paneId, controls) => {
+    const agent = knownAgents.get(paneId);
+    const missionId = agent?.latest_mission?.mission_id;
+    const sessionId = agent?.session?.session_id;
+    if (!missionId || !sessionId || pending.has(`interrupt:${paneId}`) || interruptRequests.has(missionId)) return;
+    const key = `interrupt:${paneId}`;
+    pending.add(key);
+    controls.interrupt.disabled = true;
+    controls.error.textContent = '';
+    try {
+      await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}/missions/${encodeURIComponent(missionId)}/interrupt`, { method: 'POST' });
+      interruptRequests.add(missionId);
+    } catch (error) {
+      controls.error.textContent = `${error.message}. Confira o estado atualizado antes de repetir a solicitação.`;
+    } finally {
+      await refresh();
+      pending.delete(key);
+      renderAgentControls(paneId);
+    }
+  };
+  const inspectMission = async controls => {
+    const sessionId = controls.inspect.dataset.sessionId;
+    const missionId = controls.inspect.dataset.missionId;
+    if (!sessionId || !missionId) return;
+    if (controls.diff.dataset.loaded === missionId) {
+      controls.diff.hidden = !controls.diff.hidden;
+      controls.inspect.textContent = controls.diff.hidden ? 'Revisar diff' : 'Ocultar diff';
+      return;
+    }
+    controls.inspect.disabled = true;
+    controls.diff.hidden = false;
+    controls.diff.textContent = 'Carregando diff…';
+    try {
+      const diff = await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}/diff`);
+      controls.diff.textContent = (diff.files || []).map(file => file.patch || `${file.path}: ${file.reason || 'sem patch'}`).join('\n\n') || 'Sem alterações no worktree.';
+      controls.diff.dataset.loaded = missionId;
+      controls.inspect.textContent = 'Ocultar diff';
+    } catch (error) {
+      controls.diff.textContent = `Falha ao carregar diff: ${error.message}`;
+    } finally {
+      controls.inspect.disabled = false;
+    }
+  };
   maestroComposer.form.addEventListener('submit', event => {
     event.preventDefault();
     void submitMessage('maestro', maestroComposer);
@@ -597,11 +685,60 @@
     costConfirm.hidden = authorized || !agent.model || costOf(agent.model) === 'free';
     modelConfirm.querySelector('span').textContent = `Confirmo o uso de ${agent.model || 'um modelo'}`;
     costConfirm.querySelector('span').textContent = `Autorizo o custo de ${agent.model || 'um modelo'} (${costOf(agent.model)})`;
+    const mission = pane.missionControls;
+    const previousProfile = mission.profile.value;
+    const profilePrompt = testProfilesLoading ? 'Carregando perfis confiáveis…' :
+      (testProfilesError ? 'Perfis indisponíveis — execução bloqueada' :
+        (testProfiles.length ? 'Selecione perfil verificado…' : 'Nenhum perfil confiável'));
+    mission.profile.replaceChildren(
+      element('option', '', profilePrompt),
+      ...testProfiles.map(profile => {
+        const option = element('option', '', `${profile.name} · ${profile.id} · ${profile.timeout_seconds}s`);
+        option.value = profile.id;
+        return option;
+      })
+    );
+    mission.profile.value = testProfiles.some(profile => profile.id === previousProfile) ? previousProfile : '';
+    mission.profileNote.textContent = testProfilesError ? `Perfis de teste indisponíveis: ${testProfilesError}` : '';
     composer.note.textContent = authorized ? `Modelo ${agent.model} autorizado pelo plano vigente` :
       `Turno no worktree isolado · ${agent.model || 'modelo não selecionado'} · ${costOf(agent.model)}`;
-    composer.send.disabled = pending.has(paneId) || !workspaceState?.execution_enabled || agent.busy ||
+    const activeMission = ['PENDING', 'RUNNING', 'TESTING', 'REPAIRING'].includes(agent.latest_mission?.status);
+    const latestMission = agent.latest_mission;
+    if (latestMission && !activeMission) interruptRequests.delete(latestMission.mission_id);
+    mission.summary.textContent = latestMission
+      ? `Missão ${latestMission.mission_id} · ${latestMission.status}`
+      : (agent.brief ? 'Executar tarefa planejada' : 'Criar missão com testes');
+    mission.status.hidden = !latestMission;
+    mission.status.replaceChildren();
+    if (latestMission) {
+      mission.status.append(element('strong', '', `${latestMission.status} · tentativa ${latestMission.attempt_count || 0}`));
+      if (latestMission.tests?.length) {
+        const lastTest = latestMission.tests.at(-1);
+        mission.status.append(element('span', '', `Testes: ${lastTest.status}${lastTest.exit_code === null || lastTest.exit_code === undefined ? '' : ` (exit ${lastTest.exit_code})`}`));
+      }
+      if (latestMission.changed_files?.length) mission.status.append(element('span', '', `${latestMission.changed_files.length} arquivo(s) alterado(s) no worktree isolado`));
+      if (latestMission.error_code) mission.status.append(element('span', 'cockpit-error-text', `${latestMission.error_code}: ${latestMission.error_message || ''}`));
+      if (!activeMission) mission.status.append(element('span', 'cockpit-mission-review-note', 'Revisão somente leitura; nenhuma alteração será aplicada ou integrada aqui.'));
+    }
+    composer.send.disabled = pending.has(paneId) || !workspaceState?.execution_enabled || agent.busy || activeMission ||
       (agent.messages || []).some(message => ['PENDING', 'RUNNING'].includes(message.status)) ||
       agent.session?.status !== 'ACTIVE' || !agent.model;
+    mission.start.disabled = pending.has(paneId) || !workspaceState?.execution_enabled || agent.busy || activeMission ||
+      agent.session?.status !== 'ACTIVE' || !agent.model || !mission.profile.value ||
+      (!mission.description.value.trim() && !agent.brief) || (agent.dependencies || []).some(dependency => !dependency.ready);
+    mission.interrupt.hidden = !activeMission;
+    const interruptRequested = Boolean(latestMission?.interrupt_requested) || interruptRequests.has(latestMission?.mission_id);
+    mission.interrupt.disabled = pending.has(`interrupt:${paneId}`) || interruptRequested;
+    mission.interrupt.textContent = interruptRequested ? 'Interrupção solicitada' : 'Interromper missão';
+    mission.inspect.hidden = !agent.latest_mission || activeMission;
+    mission.inspect.dataset.sessionId = agent.session?.session_id || '';
+    mission.inspect.dataset.missionId = agent.latest_mission?.mission_id || '';
+    if (mission.diff.dataset.missionId !== (agent.latest_mission?.mission_id || '')) {
+      mission.diff.dataset.missionId = agent.latest_mission?.mission_id || '';
+      mission.diff.hidden = true;
+      mission.diff.dataset.loaded = '';
+      mission.diff.textContent = '';
+    }
   };
   const statusOf = agent => {
     if (!agent.session || agent.session.status !== 'ACTIVE') return agent.session?.status || 'Sessão ausente';
@@ -670,6 +807,47 @@
     addCloseControl(pane);
     const composer = makeComposer(pane, 'agent');
     pane.composer = composer;
+    const missionDetails = element('details', 'cockpit-mission-details');
+    const missionSummary = element('summary', '', 'Criar missão com testes');
+    const missionDescription = element('textarea', 'cockpit-input cockpit-mission-input');
+    missionDescription.rows = 2;
+    missionDescription.maxLength = 100000;
+    missionDescription.placeholder = agent.brief ? 'Instruções extras (opcional)' : 'Objetivo da missão';
+    missionDescription.setAttribute('aria-label', 'Objetivo da missão');
+    const missionProfile = element('select', 'cockpit-model-select cockpit-mission-profile');
+    missionProfile.setAttribute('aria-label', 'Perfil confiável de testes');
+    const profilePrompt = element('option', '', 'Carregando perfis confiáveis…');
+    profilePrompt.value = '';
+    missionProfile.append(profilePrompt);
+    const profileNote = element('div', 'cockpit-mission-note');
+    profileNote.setAttribute('role', 'status');
+    const missionStatus = element('div', 'cockpit-mission-status');
+    missionStatus.setAttribute('role', 'status');
+    missionStatus.hidden = true;
+    const missionActions = element('div', 'cockpit-mission-actions');
+    const startMission = element('button', 'cockpit-send cockpit-mission-start', 'Iniciar missão');
+    startMission.type = 'button';
+    const interrupt = element('button', 'cockpit-send cockpit-mission-interrupt', 'Interromper missão');
+    interrupt.type = 'button';
+    interrupt.hidden = true;
+    const inspect = element('button', 'cockpit-send cockpit-mission-inspect', 'Revisar diff');
+    inspect.type = 'button';
+    inspect.hidden = true;
+    const diff = element('pre', 'cockpit-mission-diff');
+    diff.hidden = true;
+    const missionError = element('div', 'cockpit-compose-error cockpit-mission-error');
+    missionError.setAttribute('role', 'status');
+    missionActions.append(startMission, interrupt, inspect);
+    missionDetails.append(missionSummary, missionStatus, missionDescription, missionProfile, profileNote, missionActions, diff, missionError);
+    composer.form.append(missionDetails);
+    const missionControls = { composer, summary: missionSummary, status: missionStatus, description: missionDescription,
+      profile: missionProfile, profileNote, start: startMission, interrupt, inspect, diff, error: missionError };
+    pane.missionControls = missionControls;
+    startMission.addEventListener('click', () => { void submitMission(agent.pane_id, missionControls); });
+    interrupt.addEventListener('click', () => { void interruptMission(agent.pane_id, missionControls); });
+    inspect.addEventListener('click', () => { void inspectMission(missionControls); });
+    missionProfile.addEventListener('change', () => renderAgentControls(agent.pane_id));
+    missionDescription.addEventListener('input', () => renderAgentControls(agent.pane_id));
     const modelInput = checkbox();
     const costInput = checkbox();
     const modelLabel = formField('', modelInput);
@@ -949,13 +1127,34 @@
     clearTimeout(refreshTimer);
     closedAgents.clear();
     knownAgents.clear();
+    interruptRequests.clear();
+    testProfiles = [];
+    testProfilesLoading = Boolean(projectId);
+    testProfilesError = '';
     workspaceState = null;
     maestroState = null;
     panes().filter(pane => !['maestro', 'review'].includes(pane.dataset.pane)).forEach(pane => pane.remove());
     renderProjects();
     syncUI();
     selectPane(grid.querySelector('[data-pane="maestro"]'));
-    if (projectId) refresh();
+    if (projectId) {
+      const selectedProject = projectId;
+      api(`/api/dev/test-profiles?project_id=${encodeURIComponent(selectedProject)}`)
+        .then(data => {
+          if (selectedProject !== projectId) return;
+          testProfiles = data.profiles || [];
+          testProfilesLoading = false;
+          knownAgents.forEach((_agent, paneId) => renderAgentControls(paneId));
+        })
+        .catch(error => {
+          if (selectedProject !== projectId) return;
+          testProfilesLoading = false;
+          testProfilesError = error.message;
+          knownAgents.forEach((_agent, paneId) => renderAgentControls(paneId));
+          document.getElementById('data-status').textContent = `Perfis de teste indisponíveis: ${error.message}`;
+        });
+      refresh();
+    }
   };
   document.getElementById('project-toggle').addEventListener('click', () => {
     const nav = document.getElementById('project-nav');

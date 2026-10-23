@@ -136,8 +136,10 @@ function harness(initialAgents, { gridWidth = 1200 } = {}) {
   const calls = [];
   const box = { agents: initialAgents, models: [{ id: 'free/model', cost_status: 'free' }, { id: 'paid/model', cost_status: 'low_cost' }],
     projects: [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 }],
+    profiles: [{ id: 'unit', name: 'Unitários', timeout_seconds: 120 }],
+    diff: { files: [{ path: 'nexus/example.py', status: 'M', patch: '--- a/nexus/example.py\n+++ b/nexus/example.py' }] },
     maestro: { conversation_id: 'MAESTRO-1', busy: false, planning: { authorized: false, model: null }, messages: [] },
-    postError: null, postWait: null };
+    postError: null, postWait: null, profileError: null };
   const timers = [];
   const frames = new Map();
   let nextFrameId = 0;
@@ -170,14 +172,27 @@ function harness(initialAgents, { gridWidth = 1200 } = {}) {
         const pane = box.agents.find(item => item.pane_id === paneId);
         pane.messages.push({ message_id: 'MSG-1', text: JSON.parse(options.body).text, status: 'COMPLETED', response_text: 'Resposta real persistida', outcome: 'conversation' });
         data = pane;
+      } else if (/\/api\/workspace\/panes\/[^/]+\/missions$/.test(url)) {
+        const paneId = url.split('/')[4];
+        const pane = box.agents.find(item => item.pane_id === paneId);
+        pane.latest_mission = { mission_id: 'MISSION-NEW', status: 'PENDING', attempt_count: 0, tests: [], changed_files: [] };
+        pane.mission_count = (pane.mission_count || 0) + 1;
+        data = { pane, mission: pane.latest_mission };
+      } else if (/\/api\/dev\/sessions\/[^/]+\/missions\/[^/]+\/interrupt$/.test(url)) {
+        data = { mission_id: url.split('/')[6], interrupt_requested: true };
       } else throw new Error(`Unexpected POST: ${url}`);
       return { ok: true, json: async () => data };
     }
     if (url === '/api/projects') data = { projects: box.projects };
     else if (url === '/api/dev/models') data = { models: box.models };
+    else if (url.startsWith('/api/dev/test-profiles?')) {
+      if (box.profileError) throw box.profileError;
+      data = { profiles: box.profiles };
+    }
     else if (url.startsWith('/api/workspace/state?')) data = { panes: box.agents, execution_enabled: true };
     else if (url.startsWith('/api/workspace/maestro?')) data = box.maestro;
     else if (url.endsWith('/history')) data = { events: [{ kind: 'MISSION_STARTED', created_at: '2026-10-22' }] };
+    else if (/\/api\/dev\/sessions\/[^/]+\/diff$/.test(url)) data = box.diff;
     else throw new Error(`Unexpected API call: ${url}`);
     return { ok: true, json: async () => data };
   };
@@ -611,4 +626,112 @@ test('model changes clear previous per-turn model and cost confirmations', async
   assert.equal(model.checked, false);
   assert.equal(cost.checked, false);
   assert.equal(form.querySelector('.cockpit-cost-confirm').hidden, false);
+});
+
+test('mission creation requires trusted profile plus exact model and cost consent, then reconciles by GET', async () => {
+  const idle = { ...agent(1), model: 'paid/model', mission_count: 0, latest_mission: null };
+  const app = harness([idle]);
+  await app.settle();
+  const pane = app.grid.querySelector('[data-pane="PANE-1"]');
+  const form = pane.querySelector('.cockpit-composer');
+  const description = form.querySelector('.cockpit-mission-input');
+  const profile = form.querySelector('.cockpit-mission-profile');
+  const start = form.querySelector('.cockpit-mission-start');
+  description.value = 'Implementar com segurança';
+  description.dispatch('input');
+  profile.value = 'unit';
+  profile.dispatch('change');
+  start.dispatch('click');
+  await app.settle();
+  assert.equal(app.calls.filter(call => call.url.endsWith('/missions') && call.method === 'POST').length, 0);
+  assert.match(form.querySelector('.cockpit-mission-error').textContent, /Confirme o uso/);
+  form.querySelector('.cockpit-model-confirm input').checked = true;
+  start.dispatch('click');
+  await app.settle();
+  assert.match(form.querySelector('.cockpit-mission-error').textContent, /Confirme o custo/);
+  form.querySelector('.cockpit-cost-confirm input').checked = true;
+  start.dispatch('click');
+  await app.settle();
+  const posts = app.calls.filter(call => call.url === '/api/workspace/panes/PANE-1/missions' && call.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].body, { description: 'Implementar com segurança', test_profile: 'unit', confirm_model: 'paid/model', confirm_cost: true });
+  assert.equal(description.value, '');
+  assert.equal(form.querySelector('.cockpit-model-confirm input').checked, false);
+  assert.equal(form.querySelector('.cockpit-cost-confirm input').checked, false);
+  assert.match(form.querySelector('.cockpit-mission-status').textContent, /PENDING/);
+  assert.equal(form.querySelector('.cockpit-mission-interrupt').hidden, false);
+});
+
+test('planned mission can use its persisted authorization without extra instructions or confirmations', async () => {
+  const planned = { ...agent(1), mission_count: 0, latest_mission: null,
+    brief: { task: 'Executar tarefa aprovada', authorization: { applies: true } } };
+  const app = harness([planned]);
+  await app.settle();
+  const form = app.grid.querySelector('[data-pane="PANE-1"]').querySelector('.cockpit-composer');
+  const profile = form.querySelector('.cockpit-mission-profile');
+  profile.value = 'unit';
+  profile.dispatch('change');
+  assert.equal(form.querySelector('.cockpit-mission-start').disabled, false);
+  form.querySelector('.cockpit-mission-start').dispatch('click');
+  await app.settle();
+  const post = app.calls.find(call => call.url === '/api/workspace/panes/PANE-1/missions' && call.method === 'POST');
+  assert.deepEqual(post.body, { test_profile: 'unit' });
+  assert.equal(form.querySelector('.cockpit-model-confirm').hidden, true);
+  assert.equal(form.querySelector('.cockpit-cost-confirm').hidden, true);
+});
+
+test('active mission exposes one safe interrupt and terminal missions expose read-only diff review', async () => {
+  const running = { ...agent(1), latest_mission: { mission_id: 'MISSION-1', status: 'TESTING', attempt_count: 1,
+    tests: [{ status: 'RUNNING', exit_code: null }], changed_files: [] } };
+  const app = harness([running]);
+  await app.settle();
+  const form = app.grid.querySelector('[data-pane="PANE-1"]').querySelector('.cockpit-composer');
+  const interrupt = form.querySelector('.cockpit-mission-interrupt');
+  assert.equal(interrupt.hidden, false);
+  assert.match(form.querySelector('.cockpit-mission-status').textContent, /TESTING.*Testes: RUNNING/);
+  interrupt.dispatch('click');
+  interrupt.dispatch('click');
+  await app.settle();
+  interrupt.dispatch('click');
+  await app.settle();
+  const interrupts = app.calls.filter(call => call.url === '/api/dev/sessions/DEV-1/missions/MISSION-1/interrupt' && call.method === 'POST');
+  assert.equal(interrupts.length, 1);
+  assert.equal(interrupt.disabled, true);
+  assert.match(interrupt.textContent, /Interrupção solicitada/);
+
+  app.box.agents[0] = { ...running, latest_mission: { mission_id: 'MISSION-1', status: 'READY_FOR_REVIEW', attempt_count: 1,
+    tests: [{ status: 'PASSED', exit_code: 0 }], changed_files: [{ path: 'nexus/example.py', status: 'M' }] } };
+  await app.refresh();
+  const inspect = form.querySelector('.cockpit-mission-inspect');
+  assert.equal(interrupt.hidden, true);
+  assert.equal(inspect.hidden, false);
+  assert.match(form.querySelector('.cockpit-mission-status').textContent, /READY_FOR_REVIEW.*PASSED.*1 arquivo.*nenhuma alteração será aplicada/s);
+  inspect.dispatch('click');
+  await app.settle();
+  const diff = form.querySelector('.cockpit-mission-diff');
+  assert.match(diff.textContent, /--- a\/nexus\/example.py/);
+  assert.equal(app.calls.filter(call => call.url === '/api/dev/sessions/DEV-1/diff' && call.method === 'GET').length, 1);
+  inspect.dispatch('click');
+  assert.equal(diff.hidden, true);
+  assert.equal(app.calls.some(call => /apply|merge|integrat/i.test(call.url)), false);
+});
+
+test('ambiguous mission failure preserves the draft and never retries automatically', async () => {
+  const idle = { ...agent(1), mission_count: 0, latest_mission: null, brief: { authorization: { applies: true } } };
+  const app = harness([idle]);
+  await app.settle();
+  const form = app.grid.querySelector('[data-pane="PANE-1"]').querySelector('.cockpit-composer');
+  const description = form.querySelector('.cockpit-mission-input');
+  description.value = 'Não duplicar missão';
+  description.dispatch('input');
+  const profile = form.querySelector('.cockpit-mission-profile');
+  profile.value = 'unit';
+  profile.dispatch('change');
+  app.box.postError = new Error('Resposta perdida');
+  form.querySelector('.cockpit-mission-start').dispatch('click');
+  await app.settle();
+  assert.equal(description.value, 'Não duplicar missão');
+  assert.match(form.querySelector('.cockpit-mission-error').textContent, /resultado pode ser incerto/i);
+  assert.equal(app.calls.filter(call => call.url === '/api/workspace/panes/PANE-1/missions' && call.method === 'POST').length, 1);
+  assert.ok(app.calls.filter(call => call.method === 'GET').length > 4);
 });
