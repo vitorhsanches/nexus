@@ -117,12 +117,13 @@ function buildPane(kind) {
   return pane;
 }
 
-function harness(initialAgents) {
+function harness(initialAgents, { gridWidth = 1200 } = {}) {
   const rootNode = el('body');
   const ids = [...template.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
   const byId = Object.fromEntries(ids.map(id => [id, el('div')]));
   for (const [id, node] of Object.entries(byId)) { node.id = id; rootNode.append(node); }
   const grid = byId['pane-grid'];
+  grid.clientWidth = gridWidth;
   grid.append(buildPane('maestro'), buildPane('agent-a'), buildPane('agent-b'), buildPane('review'));
   const overview = el('div');
   for (let index = 0; index < 3; index++) overview.append(nodeWith('div', 'overview-stat', el('strong')));
@@ -138,6 +139,9 @@ function harness(initialAgents) {
     maestro: { conversation_id: 'MAESTRO-1', busy: false, planning: { authorized: false, model: null }, messages: [] },
     postError: null, postWait: null };
   const timers = [];
+  const frames = new Map();
+  let nextFrameId = 0;
+  const windowListeners = {};
   const sources = [];
   class FakeEventSource {
     static CLOSED = 2;
@@ -178,11 +182,13 @@ function harness(initialAgents) {
     return { ok: true, json: async () => data };
   };
   const context = {
-    document, fetch, window: { matchMedia: () => ({ matches: false }), addEventListener() {}, EventSource: FakeEventSource },
+    document, fetch, window: { matchMedia: () => ({ matches: false }),
+      addEventListener(name, callback) { windowListeners[name] = callback; }, EventSource: FakeEventSource },
     ResizeObserver: class { observe() {} },
     setTimeout(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimeout(timer) { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
-    requestAnimationFrame() { return 1; }, cancelAnimationFrame() {},
+    requestAnimationFrame(callback) { const id = ++nextFrameId; frames.set(id, callback); return id; },
+    cancelAnimationFrame(id) { frames.delete(id); },
   };
   vm.runInNewContext(script, context, { filename: 'cockpit.js' });
   const settle = async () => { for (let count = 0; count < 8; count++) await new Promise(resolve => setImmediate(resolve)); };
@@ -198,7 +204,15 @@ function harness(initialAgents) {
     timers.splice(index, 1)[0].callback();
     await settle();
   };
-  return { byId, grid, box, calls, settle, refresh, sources, tick };
+  const resize = (width, height = grid.clientHeight) => {
+    grid.clientWidth = width;
+    grid.clientHeight = height;
+    windowListeners.resize();
+    const frame = [...frames.values()].at(-1);
+    frames.clear();
+    frame?.();
+  };
+  return { byId, grid, box, calls, settle, refresh, sources, tick, resize };
 }
 
 const agent = index => ({
@@ -320,6 +334,88 @@ test('at most four streams stay open and switching project closes previous conne
   await app.settle();
   assert.equal(app.sources.slice(0, 4).every(source => source.closed), true);
   assert.ok(app.sources.filter(source => !source.closed).length <= 4);
+});
+
+test('selected active pane takes a stream slot immediately without recreating retained connections', async () => {
+  const agents = Array.from({ length: 8 }, (_, index) => ({ ...agent(index + 1), active_turn_id: `TURN-${index + 1}` }));
+  const app = harness(agents, { gridWidth: 1600 });
+  await app.settle();
+  assert.equal(app.sources.filter(source => !source.closed).length, 4);
+  assert.equal(app.sources.some(source => source.url.includes('/DEV-6/')), false);
+  const retained = app.sources.find(source => source.url.includes('/DEV-1/'));
+  const pane = app.grid.querySelector('[data-pane="PANE-6"]');
+  app.grid.dispatch('click', pane);
+  assert.equal(pane.classList.contains('selected'), true);
+  assert.equal(app.sources.filter(source => !source.closed).length, 4);
+  assert.ok(app.sources.some(source => !source.closed && source.url.includes('/DEV-6/')));
+  assert.equal(retained.closed, false);
+  const count = app.sources.length;
+  app.grid.dispatch('click', pane);
+  assert.equal(app.sources.length, count);
+  assert.ok(app.calls.every(call => call.method === 'GET'));
+});
+
+test('switching groups closes hidden streams and connects visible agents without launching turns', async () => {
+  const agents = Array.from({ length: 8 }, (_, index) => ({ ...agent(index + 1), active_turn_id: `TURN-${index + 1}` }));
+  const app = harness(agents, { gridWidth: 1600 });
+  await app.settle();
+  const original = app.sources.filter(source => !source.closed);
+  app.byId['next-group'].dispatch('click');
+  assert.ok(original.every(source => source.closed));
+  assert.equal(app.sources.filter(source => !source.closed).length, 2);
+  assert.ok(app.sources.some(source => !source.closed && source.url.includes('/DEV-7/')));
+  assert.ok(app.sources.some(source => !source.closed && source.url.includes('/DEV-8/')));
+  const count = app.sources.length;
+  app.byId['next-group'].dispatch('click');
+  assert.equal(app.sources.length, count);
+  app.byId['previous-group'].dispatch('click');
+  assert.equal(app.sources.filter(source => !source.closed).length, 4);
+  assert.ok(app.calls.every(call => call.method === 'GET'));
+  assert.equal(app.box.agents.every(item => item.active_turn_id), true);
+});
+
+test('sidebar selection jumps to a hidden active agent and minimization releases only its stream', async () => {
+  const agents = Array.from({ length: 8 }, (_, index) => ({ ...agent(index + 1), active_turn_id: `TURN-${index + 1}` }));
+  const app = harness(agents, { gridWidth: 1600 });
+  await app.settle();
+  const firstGroup = app.sources.slice();
+  const link = app.byId['pane-nav'].children.find(button => button.dataset.paneTarget === 'PANE-8');
+  app.byId['pane-nav'].dispatch('click', link);
+  const pane = app.grid.querySelector('[data-pane="PANE-8"]');
+  assert.equal(pane.hidden, false);
+  assert.equal(pane.classList.contains('selected'), true);
+  assert.ok(firstGroup.every(source => source.closed));
+  const selectedStream = app.sources.find(source => !source.closed && source.url.includes('/DEV-8/'));
+  const neighbor = app.sources.find(source => !source.closed && source.url.includes('/DEV-7/'));
+  assert.ok(selectedStream && neighbor);
+  app.grid.dispatch('click', pane.querySelector('.minimize'));
+  assert.equal(selectedStream.closed, true);
+  assert.equal(neighbor.closed, false);
+  app.grid.dispatch('click', pane.querySelector('.minimize'));
+  assert.equal(neighbor.closed, false);
+  assert.ok(app.sources.some(source => !source.closed && source.url.includes('/DEV-8/')));
+});
+
+test('maximize, restore and responsive resize keep stream membership aligned with visible panes', async () => {
+  const agents = Array.from({ length: 8 }, (_, index) => ({ ...agent(index + 1), active_turn_id: `TURN-${index + 1}` }));
+  const app = harness(agents, { gridWidth: 1600 });
+  await app.settle();
+  const pane = app.grid.querySelector('[data-pane="PANE-3"]');
+  app.grid.dispatch('click', pane.querySelector('.expand'));
+  assert.equal(app.sources.filter(source => !source.closed).length, 1);
+  const kept = app.sources.find(source => !source.closed);
+  assert.match(kept.url, /\/DEV-3\//);
+  app.grid.dispatch('click', pane.querySelector('.expand'));
+  assert.equal(kept.closed, false);
+  assert.equal(app.sources.filter(source => !source.closed).length, 4);
+  app.resize(600);
+  assert.equal(app.sources.filter(source => !source.closed).length, 0);
+  const count = app.sources.length;
+  app.resize(600);
+  assert.equal(app.sources.length, count);
+  app.resize(1600);
+  assert.equal(app.sources.filter(source => !source.closed).length, 4);
+  assert.ok(app.calls.every(call => call.method === 'GET'));
 });
 
 test('cockpit reads existing project, workspace, Maestro and history APIs with GET only', async () => {

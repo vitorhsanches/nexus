@@ -262,6 +262,7 @@
     }
     panes().forEach(item => item.classList.toggle('selected', item === pane));
     updateSidebar();
+    syncStreams();
   };
 
   const closePane = pane => {
@@ -376,6 +377,7 @@
     });
     grid.classList.remove('has-maximized');
     updateLayout();
+    syncStreams();
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('menu-toggle').setAttribute('aria-expanded', 'false');
   });
@@ -405,12 +407,16 @@
   document.getElementById('restore-layout').addEventListener('click', () => {
     savedLayouts.clear();
     updateLayout();
+    syncStreams();
     notify('Layout automático restaurado');
   });
   let resizeFrame = 0;
   const scheduleLayout = () => {
     cancelAnimationFrame(resizeFrame);
-    resizeFrame = requestAnimationFrame(updateLayout);
+    resizeFrame = requestAnimationFrame(() => {
+      updateLayout();
+      syncStreams();
+    });
   };
   window.addEventListener('resize', scheduleLayout);
   new ResizeObserver(scheduleLayout).observe(grid);
