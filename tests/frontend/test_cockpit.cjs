@@ -134,9 +134,19 @@ function harness(initialAgents) {
   };
   const calls = [];
   const box = { agents: initialAgents, models: [{ id: 'free/model', cost_status: 'free' }, { id: 'paid/model', cost_status: 'low_cost' }],
+    projects: [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 }],
     maestro: { conversation_id: 'MAESTRO-1', busy: false, planning: { authorized: false, model: null }, messages: [] },
     postError: null, postWait: null };
   const timers = [];
+  const sources = [];
+  class FakeEventSource {
+    static CLOSED = 2;
+    constructor(url) { this.url = url; this.closed = false; this.readyState = 1; sources.push(this); }
+    close() { this.closed = true; }
+    emit(payload, id = '') { this.onmessage?.({ data: JSON.stringify(payload), lastEventId: id }); }
+    fail() { this.onerror?.(); }
+    failClosed() { this.readyState = FakeEventSource.CLOSED; this.onerror?.(); }
+  }
   const fetch = async (url, options = {}) => {
     calls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
     let data;
@@ -159,7 +169,7 @@ function harness(initialAgents) {
       } else throw new Error(`Unexpected POST: ${url}`);
       return { ok: true, json: async () => data };
     }
-    if (url === '/api/projects') data = { projects: [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 }] };
+    if (url === '/api/projects') data = { projects: box.projects };
     else if (url === '/api/dev/models') data = { models: box.models };
     else if (url.startsWith('/api/workspace/state?')) data = { panes: box.agents, execution_enabled: true };
     else if (url.startsWith('/api/workspace/maestro?')) data = box.maestro;
@@ -168,7 +178,7 @@ function harness(initialAgents) {
     return { ok: true, json: async () => data };
   };
   const context = {
-    document, fetch, window: { matchMedia: () => ({ matches: false }), addEventListener() {} },
+    document, fetch, window: { matchMedia: () => ({ matches: false }), addEventListener() {}, EventSource: FakeEventSource },
     ResizeObserver: class { observe() {} },
     setTimeout(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimeout(timer) { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
@@ -182,7 +192,13 @@ function harness(initialAgents) {
     timers.splice(index, 1)[0].callback();
     await settle();
   };
-  return { byId, grid, box, calls, settle, refresh };
+  const tick = async delay => {
+    const index = timers.findIndex(timer => timer.delay === delay);
+    assert.notEqual(index, -1);
+    timers.splice(index, 1)[0].callback();
+    await settle();
+  };
+  return { byId, grid, box, calls, settle, refresh, sources, tick };
 }
 
 const agent = index => ({
@@ -190,6 +206,120 @@ const agent = index => ({
   layout: { position: index }, session: { session_id: `DEV-${index}`, status: 'ACTIVE', branch: `dev/agent-${index}` },
   mission_count: 1, latest_mission: { mission_id: `MISSION-${index}`, status: 'RUNNING', tests: [], changed_files: [] },
   messages: [], dependencies: [],
+});
+
+test('agent SSE renders incremental text once and reconciles completion by GET', async () => {
+  const running = { ...agent(1), active_turn_id: 'TURN-1' };
+  const app = harness([running]);
+  await app.settle();
+  const source = app.sources[0];
+  assert.match(source.url, /\/api\/dev\/sessions\/DEV-1\/events\?turn_id=TURN-1/);
+  const pane = app.grid.querySelector('[data-pane="PANE-1"]');
+  const delta = { method: 'item/agentMessage/delta', params: { delta: 'Olá' } };
+  source.emit(delta, 'DEV-1:TURN-1:1');
+  source.emit(delta, 'DEV-1:TURN-1:1');
+  assert.match(pane.querySelector('.cockpit-live').textContent, /Olá/);
+  assert.doesNotMatch(pane.querySelector('.cockpit-live').textContent, /OláOlá/);
+  app.box.agents[0] = { ...running, active_turn_id: null, messages: [{ text: 'Oi', status: 'COMPLETED', response_text: 'Olá' }] };
+  source.emit({ type: 'nexus/turnEnded' }, 'DEV-1:TURN-1:2');
+  await app.settle();
+  assert.equal(source.closed, true);
+  assert.equal(pane.querySelector('.cockpit-live'), null);
+  assert.match(pane.querySelector('.cockpit-conversation').textContent, /Olá/);
+  assert.equal(app.sources.length, 1);
+});
+
+test('Maestro SSE uses chat session and exact turn rather than conversation ID', async () => {
+  const app = harness([agent(1)]);
+  app.box.maestro = { conversation_id: 'CONV-1', chat_session_id: 'CHAT-1', active_turn_id: 'CHAT-TURN-1',
+    busy: true, planning: { authorized: true, model: 'free/model' }, messages: [] };
+  await app.settle();
+  await app.refresh();
+  const source = app.sources.find(item => item.url.includes('/chat/sessions/CHAT-1/'));
+  assert.ok(source);
+  assert.match(source.url, /turn_id=CHAT-TURN-1/);
+  source.emit({ method: 'item/agentMessage/delta', params: { delta: 'Plano' } }, 'CHAT-1:CHAT-TURN-1:1');
+  assert.match(app.grid.querySelector('[data-pane="maestro"]').querySelector('.cockpit-live').textContent, /Plano/);
+  app.box.maestro = { ...app.box.maestro, busy: false, active_turn_id: null,
+    messages: [{ author: 'maestro', text: 'Plano persistido', status: 'COMPLETED' }] };
+  source.emit({ type: 'nexus/turnSnapshot', turn: { status: 'COMPLETED', response_text: 'Plano persistido' } });
+  await app.settle();
+  assert.equal(source.closed, true);
+  assert.equal(app.grid.querySelector('[data-pane="maestro"]').querySelector('.cockpit-live'), null);
+});
+
+test('replay gap discards volatile text and uses persisted GET without restarting the turn', async () => {
+  const app = harness([{ ...agent(1), active_turn_id: 'TURN-1' }]);
+  await app.settle();
+  const source = app.sources[0];
+  source.emit({ method: 'item/agentMessage/delta', params: { delta: 'Incompleto' } }, '1');
+  source.emit({ type: 'nexus/replayGap' });
+  await app.settle();
+  assert.equal(source.closed, true);
+  assert.equal(app.sources.length, 1);
+  assert.doesNotMatch(app.grid.querySelector('[data-pane="PANE-1"]').querySelector('.cockpit-live').textContent, /Incompleto/);
+  assert.ok(app.calls.filter(call => call.url.startsWith('/api/workspace/state?')).length >= 2);
+});
+
+test('streams close for minimized and removed panes while other pane state remains intact', async () => {
+  const app = harness([{ ...agent(1), active_turn_id: 'TURN-1' }, { ...agent(2), active_turn_id: 'TURN-2' }]);
+  await app.settle();
+  assert.equal(app.sources.length, 2);
+  const first = app.grid.querySelector('[data-pane="PANE-1"]');
+  const draft = first.querySelector('textarea');
+  draft.value = 'Rascunho';
+  app.grid.dispatch('click', first.querySelector('.minimize'));
+  assert.equal(app.sources[0].closed, true);
+  assert.equal(app.sources[1].closed, false);
+  assert.equal(draft.value, 'Rascunho');
+  app.grid.dispatch('click', first.querySelector('.minimize'));
+  assert.equal(app.sources.length, 3);
+  app.grid.dispatch('click', first.querySelector('.close'));
+  assert.equal(app.sources[2].closed, true);
+  assert.equal(app.sources[1].closed, false);
+});
+
+test('new turn replaces the stream and stale events cannot change its pane', async () => {
+  const app = harness([{ ...agent(1), active_turn_id: 'TURN-1' }]);
+  await app.settle();
+  const old = app.sources[0];
+  app.box.agents[0] = { ...app.box.agents[0], active_turn_id: 'TURN-2' };
+  await app.refresh();
+  assert.equal(old.closed, true);
+  const current = app.sources[1];
+  assert.match(current.url, /turn_id=TURN-2/);
+  old.emit({ method: 'item/agentMessage/delta', params: { delta: 'velho' } }, 'old');
+  current.emit({ method: 'item/agentMessage/delta', params: { delta: 'novo' } }, 'new');
+  const live = app.grid.querySelector('[data-pane="PANE-1"]').querySelector('.cockpit-live').textContent;
+  assert.match(live, /novo/);
+  assert.doesNotMatch(live, /velho/);
+});
+
+test('permanently closed SSE reconnects with its cursor and retains polling fallback', async () => {
+  const app = harness([{ ...agent(1), active_turn_id: 'TURN-1' }]);
+  await app.settle();
+  const source = app.sources[0];
+  source.emit({ method: 'item/agentMessage/delta', params: { delta: 'um' } }, 'DEV-1:TURN-1:7');
+  source.failClosed();
+  assert.equal(source.closed, true);
+  assert.equal(app.sources.length, 1);
+  await app.tick(1000);
+  assert.equal(app.sources.length, 2);
+  assert.match(app.sources[1].url, /cursor=DEV-1%3ATURN-1%3A7/);
+  app.sources[1].emit({ method: 'item/agentMessage/delta', params: { delta: ' dois' } }, 'DEV-1:TURN-1:8');
+  assert.match(app.grid.querySelector('[data-pane="PANE-1"]').querySelector('.cockpit-live').textContent, /um dois/);
+});
+
+test('at most four streams stay open and switching project closes previous connections', async () => {
+  const app = harness(Array.from({ length: 8 }, (_, index) => ({ ...agent(index + 1), active_turn_id: `TURN-${index + 1}` })));
+  app.box.projects.push({ id: 'other', name: 'Outro projeto', enabled: 1, dev_enabled: 1 });
+  await app.settle();
+  assert.ok(app.sources.filter(source => !source.closed).length <= 4);
+  const otherProject = app.byId['project-nav'].children[1];
+  otherProject.dispatch('click');
+  await app.settle();
+  assert.equal(app.sources.slice(0, 4).every(source => source.closed), true);
+  assert.ok(app.sources.filter(source => !source.closed).length <= 4);
 });
 
 test('cockpit reads existing project, workspace, Maestro and history APIs with GET only', async () => {

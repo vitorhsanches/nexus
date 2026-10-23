@@ -814,10 +814,14 @@ def test_turn_id_never_recorded_is_relinked_through_the_idempotency_key(env, mon
     conversation = store.get_conversation_for_project("demo")
     message = next(row for row in store.list_messages(conversation["id"]) if row["author"] == "user")
     assert message["chat_turn_id"] is None
-    assert maestro.conversation_state("demo")["busy"] is True  # still running, now linked
+    state = maestro.conversation_state("demo")
+    assert state["busy"] is True  # still running, now linked
+    assert state["chat_session_id"] == conversation["chat_session_id"]
+    assert state["active_turn_id"] == original[-1]["turn_id"]
     assert store.list_messages(conversation["id"])[0]["chat_turn_id"] == original[-1]["turn_id"]
     _complete_last(env, _answer(SIMPLE))
     assert maestro.conversation_state("demo")["messages"][-1]["plan"]["source"] == "llm"
+    assert maestro.conversation_state("demo")["active_turn_id"] is None
 
 
 def test_message_never_sent_gets_a_labelled_fallback_only_after_the_grace_period(env, monkeypatch):

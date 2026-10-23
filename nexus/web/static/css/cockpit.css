@@ -180,3 +180,6 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 @media(max-width:650px){.cockpit-composer{max-height:none}.cockpit-input{min-height:44px}}
 .cockpit-event-heading{color:var(--accent-strong);font-weight:700;margin-bottom:7px}
 .cockpit-event{padding:3px 0;border-bottom:1px solid var(--border-soft)}
+.cockpit-live{margin:5px 12px 12px;padding:7px 9px;border-left:2px solid var(--accent);background:var(--surface);color:var(--text);font:10px/1.5 'Cascadia Code',Consolas,monospace;overflow-wrap:anywhere}
+.cockpit-live strong{color:var(--accent);font-size:9px;letter-spacing:.04em}
+.cockpit-live-text{margin:6px 0 0;white-space:pre-wrap;word-break:break-word;font:inherit;color:var(--text)}
