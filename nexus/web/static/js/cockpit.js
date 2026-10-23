@@ -12,10 +12,16 @@
   grid.querySelector('[data-pane="agent-b"]').remove();
   const knownAgents = new Map();
   const closedAgents = new Set();
+  const pending = new Set();
+  const maestroDrafts = new Map();
+  let workspaceState = null;
+  let maestroState = null;
+  let modelCatalog = [];
   let projectId = null;
   let projects = [];
   let refreshTimer;
   let refreshGeneration = 0;
+  let refreshRequest = 0;
   const panes = () => [...grid.querySelectorAll(':scope > .pane')];
   const twoDigits = number => String(number).padStart(2, '0');
   let toastTimer;
@@ -408,11 +414,181 @@
     if (value !== undefined) item.textContent = String(value);
     return item;
   };
-  const api = async path => {
-    const response = await fetch(path, { headers: { Accept: 'application/json' } });
+  const api = async (path, options = {}) => {
+    const response = await fetch(path, {
+      method: options.method || 'GET',
+      headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
+      ...(options.body ? { body: JSON.stringify(options.body) } : {})
+    });
     const data = await response.json();
     if (!response.ok) throw new Error(data?.detail?.message || `HTTP ${response.status}`);
     return data;
+  };
+  const costOf = model => modelCatalog.find(row => row.id === model)?.cost_status || 'unknown';
+  const formField = (label, input) => {
+    const field = element('label', 'cockpit-confirm');
+    field.append(input, element('span', '', label));
+    return field;
+  };
+  const checkbox = () => {
+    const input = element('input');
+    input.type = 'checkbox';
+    return input;
+  };
+  const makeComposer = (pane, kind) => {
+    const form = element('form', 'cockpit-composer');
+    const note = element('div', 'cockpit-compose-note');
+    const controls = element('div', 'cockpit-compose-controls');
+    const input = element('textarea', 'cockpit-input');
+    input.maxLength = 100000;
+    input.rows = 2;
+    input.placeholder = kind === 'maestro' ? 'Mensagem para o Maestro' : 'Mensagem para o agente';
+    input.setAttribute('aria-label', input.placeholder);
+    const send = element('button', 'cockpit-send', 'Enviar ↵');
+    send.type = 'submit';
+    const error = element('div', 'cockpit-compose-error');
+    error.setAttribute('role', 'status');
+    const footer = pane.querySelector('.pane-footer');
+    form.append(note, controls, input, send, error);
+    pane.append(form, footer);
+    input.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+      event.preventDefault();
+      form.requestSubmit();
+    });
+    return { form, note, controls, input, send, error };
+  };
+  const maestroPane = grid.querySelector('[data-pane="maestro"]');
+  const maestroComposer = makeComposer(maestroPane, 'maestro');
+  const planningSelect = element('select', 'cockpit-model-select');
+  planningSelect.setAttribute('aria-label', 'Modelo de planejamento do Maestro');
+  const planningCost = checkbox();
+  const planningCostLabel = formField('Autorizo o custo deste modelo para planejamento', planningCost);
+  const authorize = element('button', 'cockpit-authorize', 'Autorizar planejamento');
+  authorize.type = 'button';
+  maestroComposer.controls.append(planningSelect, planningCostLabel, authorize);
+  planningSelect.addEventListener('change', () => { planningCost.checked = false; renderPlanningControls(); });
+  const renderPlanningControls = () => {
+    const planning = maestroState?.planning;
+    const selected = planningSelect.value;
+    const emptyOption = element('option', '', 'Modelo de planejamento…');
+    emptyOption.value = '';
+    planningSelect.replaceChildren(emptyOption, ...modelCatalog.map(row => {
+      const option = element('option', '', `${row.id} · ${row.cost_status || 'unknown'}`);
+      option.value = row.id;
+      return option;
+    }));
+    planningSelect.value = modelCatalog.some(row => row.id === selected) ? selected :
+      (modelCatalog.some(row => row.id === planning?.model) ? planning.model : '');
+    planningCostLabel.hidden = !planningSelect.value || costOf(planningSelect.value) === 'free';
+    authorize.textContent = planning?.authorized ? 'Trocar modelo' : 'Autorizar planejamento';
+    authorize.disabled = pending.has('authorize') || !projectId || !planningSelect.value ||
+      (planning?.authorized && planning.model === planningSelect.value) ||
+      (planningCostLabel.hidden === false && !planningCost.checked);
+    maestroComposer.note.textContent = planning?.authorized
+      ? `IA autorizada: ${planning.model} · ${planning.cost_status || 'unknown'} · planejamento somente leitura`
+      : 'Planejamento determinístico. Autorize um modelo para usar IA; execução de agentes exige aprovação separada.';
+    maestroComposer.send.disabled = pending.has('maestro') || pending.has('authorize') || !projectId || Boolean(maestroState?.busy);
+  };
+  planningCost.addEventListener('change', renderPlanningControls);
+  authorize.addEventListener('click', async () => {
+    if (pending.has('authorize') || !projectId || !planningSelect.value) return;
+    const selectedProject = projectId;
+    const model = planningSelect.value;
+    const paid = costOf(model) !== 'free';
+    if (paid && !planningCost.checked) return;
+    pending.add('authorize');
+    renderPlanningControls();
+    try {
+      await api('/api/workspace/maestro/authorize', { method: 'POST', body: {
+        project_id: selectedProject, model, confirm_cost: paid && planningCost.checked
+      } });
+      maestroComposer.error.textContent = '';
+    } catch (error) {
+      maestroComposer.error.textContent = `${error.message}. Confira o estado atualizado antes de tentar novamente.`;
+    } finally {
+      pending.delete('authorize');
+      await refresh();
+      renderPlanningControls();
+    }
+  });
+  const submitMessage = async (kind, composer, paneId) => {
+    const key = kind === 'maestro' ? 'maestro' : paneId;
+    const text = composer.input.value.trim();
+    if (!text || pending.has(key) || !projectId) return;
+    const selectedProject = projectId;
+    let path, body;
+    if (kind === 'maestro') {
+      if (maestroState?.busy || pending.has('authorize')) return;
+      path = '/api/workspace/maestro/messages';
+      body = { project_id: selectedProject, text };
+    } else {
+      const agent = knownAgents.get(paneId);
+      if (!agent || !workspaceState?.execution_enabled || agent.busy ||
+          (agent.messages || []).some(message => ['PENDING', 'RUNNING'].includes(message.status)) ||
+          agent.session?.status !== 'ACTIVE') return;
+      if (!agent.model) { composer.error.textContent = 'Selecione um modelo no Workspace antes de enviar.'; return; }
+      const authorized = Boolean(agent.brief?.authorization?.applies);
+      const confirmed = composer.controls.querySelector('.cockpit-model-confirm input');
+      const costConfirmed = composer.controls.querySelector('.cockpit-cost-confirm input');
+      if (!authorized && !confirmed?.checked) { composer.error.textContent = `Confirme o uso de ${agent.model}.`; return; }
+      if (!authorized && costOf(agent.model) !== 'free' && !costConfirmed?.checked) {
+        composer.error.textContent = `Confirme o custo de ${agent.model}.`; return;
+      }
+      path = `/api/workspace/panes/${encodeURIComponent(paneId)}/messages`;
+      body = { text, ...(!authorized ? { confirm_model: agent.model } : {}),
+        ...(!authorized && costOf(agent.model) !== 'free' ? { confirm_cost: true } : {}) };
+    }
+    pending.add(key);
+    composer.send.disabled = true;
+    composer.error.textContent = '';
+    let accepted = false;
+    try {
+      await api(path, { method: 'POST', body });
+      accepted = true;
+      if (kind === 'maestro' && maestroDrafts.get(selectedProject)?.trim() === text) maestroDrafts.set(selectedProject, '');
+      if (selectedProject === projectId && composer.input.value.trim() === text) composer.input.value = '';
+      if (kind === 'agent') {
+        composer.controls.querySelector('.cockpit-model-confirm input').checked = false;
+        composer.controls.querySelector('.cockpit-cost-confirm input').checked = false;
+      }
+    } catch (error) {
+      composer.error.textContent = `${error.message}. Resultado pode ser incerto; confira o histórico antes de reenviar.`;
+    } finally {
+      // A failed response may follow a committed POST. Reconcile only by GET.
+      await refresh();
+      pending.delete(key);
+      if (kind === 'maestro') renderPlanningControls();
+      else renderAgentControls(paneId);
+      if (accepted) composer.error.textContent = '';
+    }
+  };
+  maestroComposer.form.addEventListener('submit', event => {
+    event.preventDefault();
+    void submitMessage('maestro', maestroComposer);
+  });
+  const renderAgentControls = paneId => {
+    const pane = panes().find(item => item.dataset.pane === paneId);
+    const agent = knownAgents.get(paneId);
+    if (!pane || !agent) return;
+    const composer = pane.composer;
+    const authorized = Boolean(agent.brief?.authorization?.applies);
+    const modelConfirm = composer.controls.querySelector('.cockpit-model-confirm');
+    const costConfirm = composer.controls.querySelector('.cockpit-cost-confirm');
+    if (pane.dataset.confirmedModel !== (agent.model || '')) {
+      modelConfirm.querySelector('input').checked = false;
+      costConfirm.querySelector('input').checked = false;
+      pane.dataset.confirmedModel = agent.model || '';
+    }
+    modelConfirm.hidden = authorized || !agent.model;
+    costConfirm.hidden = authorized || !agent.model || costOf(agent.model) === 'free';
+    modelConfirm.querySelector('span').textContent = `Confirmo o uso de ${agent.model || 'um modelo'}`;
+    costConfirm.querySelector('span').textContent = `Autorizo o custo de ${agent.model || 'um modelo'} (${costOf(agent.model)})`;
+    composer.note.textContent = authorized ? `Modelo ${agent.model} autorizado pelo plano vigente` :
+      `Turno no worktree isolado · ${agent.model || 'modelo não selecionado'} · ${costOf(agent.model)}`;
+    composer.send.disabled = pending.has(paneId) || !workspaceState?.execution_enabled || agent.busy ||
+      (agent.messages || []).some(message => ['PENDING', 'RUNNING'].includes(message.status)) ||
+      agent.session?.status !== 'ACTIVE' || !agent.model;
   };
   const statusOf = agent => {
     if (!agent.session || agent.session.status !== 'ACTIVE') return agent.session?.status || 'Sessão ausente';
@@ -439,7 +615,7 @@
     });
     pane.querySelector('.terminal-kicker').replaceChildren(element('span', '', '●'), document.createTextNode(' EVENTOS NEXUS / NÃO É SHELL '), element('span', 'right', status));
     pane.querySelector('.foot-path').textContent = agent.session?.branch || 'Sem worktree ativo';
-    pane.querySelector('.pane-footer > span:last-child').textContent = 'LEITURA · SEM CLI';
+    pane.querySelector('.pane-footer > span:last-child').textContent = 'MENSAGENS NEXUS · SEM SHELL';
     const body = pane.querySelector('.terminal-body');
     const signature = JSON.stringify([agent.latest_mission, agent.messages, agent.dependencies, history?.events]);
     if (body.dataset.signature === signature) return;
@@ -453,8 +629,19 @@
       (mission.changed_files || []).slice(0, 8).forEach(file => eventList.append(element('div', 'cockpit-event', `${file.status} ${file.path}`)));
     }
     (history?.events || []).slice(-12).forEach(event => eventList.append(element('div', 'cockpit-event', `${event.created_at || ''}  ${event.kind}`)));
+    const conversation = element('div', 'cockpit-conversation');
+    (agent.messages || []).forEach(message => {
+      const item = element('div', 'cockpit-message');
+      item.append(element('strong', '', `Você · ${message.created_at || ''}`), element('p', '', message.text));
+      const response = element('div', 'cockpit-response');
+      response.append(element('strong', '', `Agente · ${message.status || 'PENDING'} · ${message.outcome || 'aguardando'}`));
+      if (message.response_text) response.append(element('p', '', message.response_text));
+      if (message.error_code) response.append(element('p', 'cockpit-error-text', `${message.error_code}: ${message.error_message || ''}`));
+      item.append(response);
+      conversation.append(item);
+    });
     if (!eventList.children.length) eventList.append(element('div', 'cockpit-event', 'Nenhuma atividade registrada para este agente.'));
-    body.replaceChildren(pane.querySelector('.terminal-kicker'), eventList);
+    body.replaceChildren(pane.querySelector('.terminal-kicker'), conversation, eventList);
     body.dataset.signature = signature;
     body.scrollTop = oldScroll;
     pane.querySelector('.minimize').setAttribute('aria-label', `Minimizar ${pane.dataset.title}`);
@@ -468,8 +655,22 @@
     pane.dataset.pane = agent.pane_id;
     pane.classList.remove('selected', 'minimized', 'maximized');
     addCloseControl(pane);
+    const composer = makeComposer(pane, 'agent');
+    pane.composer = composer;
+    const modelInput = checkbox();
+    const costInput = checkbox();
+    const modelLabel = formField('', modelInput);
+    const costLabel = formField('', costInput);
+    modelLabel.classList.add('cockpit-model-confirm');
+    costLabel.classList.add('cockpit-cost-confirm');
+    composer.controls.append(modelLabel, costLabel);
+    composer.form.addEventListener('submit', event => {
+      event.preventDefault();
+      void submitMessage('agent', composer, pane.dataset.pane);
+    });
     grid.append(pane);
     updateAgentPane(pane, agent);
+    renderAgentControls(agent.pane_id);
     return pane;
   };
   const renderProjects = () => {
@@ -507,13 +708,28 @@
     }));
   };
   const renderSystemPanes = (workspace, maestro) => {
-    const maestroPane = grid.querySelector('[data-pane="maestro"]');
-    maestroPane.querySelector('.pane-status').lastChild.textContent = maestro?.busy ? ' Planejando' : ' Leitura';
+    maestroPane.querySelector('.pane-status').lastChild.textContent = maestro?.busy ? ' Planejando' : ' Disponível';
     maestroPane.querySelector('.pane-meta').replaceChildren(element('span', '', `MODELO  ${maestro?.planning?.model || 'Não autorizado'}`), element('span', '', `SESSÃO  ${maestro?.conversation_id || '—'}`));
-    const lastMessage = (maestro?.messages || []).at(-1);
-    maestroPane.querySelector('.maestro-copy h3').textContent = lastMessage ? 'Última atividade do Maestro' : 'Maestro sem mensagens';
-    maestroPane.querySelector('.maestro-copy p').textContent = lastMessage ? `${lastMessage.author} · ${lastMessage.status} · ${lastMessage.text || ''}` : 'Nenhuma atividade registrada para o projeto selecionado.';
-    maestroPane.querySelector('.pane-footer > span:last-child').textContent = 'EVENTOS NEXUS · SEM CLI';
+    const body = maestroPane.querySelector('.maestro-body');
+    const signature = JSON.stringify(maestro?.messages || []);
+    if (body.dataset.signature !== signature) {
+      const oldScroll = body.scrollTop;
+      const conversation = element('div', 'cockpit-conversation');
+      (maestro?.messages || []).forEach(message => {
+        const item = element('div', `cockpit-message ${message.author === 'user' ? 'cockpit-user' : 'cockpit-maestro'}`);
+        item.append(element('strong', '', `${message.author === 'user' ? 'Você' : 'Maestro'} · ${message.status || ''}`),
+          element('p', '', message.text || ''));
+        if (message.error_code) item.append(element('p', 'cockpit-error-text', `${message.error_code}: ${message.error_message || ''}`));
+        if (message.plan) item.append(element('small', '', `Plano ${message.plan.plan_id || ''} · ${message.plan.source || 'origem desconhecida'}${message.plan.fallback_reason ? ` · ${message.plan.fallback_reason}` : ''}`));
+        conversation.append(item);
+      });
+      if (!conversation.children.length) conversation.append(element('div', 'cockpit-event', 'Nenhuma mensagem registrada para este projeto.'));
+      body.replaceChildren(maestroPane.querySelector('.terminal-kicker'), conversation);
+      body.dataset.signature = signature;
+      body.scrollTop = oldScroll;
+    }
+    maestroPane.querySelector('.pane-footer > span:last-child').textContent = 'PLANEJAMENTO · SEM EXECUÇÃO AUTOMÁTICA';
+    renderPlanningControls();
     const review = grid.querySelector('[data-pane="review"]');
     const awaiting = workspace.panes.filter(agent => agent.latest_mission?.status === 'READY_FOR_REVIEW');
     review.querySelector('.pane-status').lastChild.textContent = awaiting.length ? ' Aguardando' : ' Sem pendências';
@@ -529,25 +745,29 @@
   };
   const refresh = async () => {
     if (!projectId) return;
+    clearTimeout(refreshTimer);
     const generation = refreshGeneration;
+    const request = ++refreshRequest;
     try {
       const query = encodeURIComponent(projectId);
       const [workspace, maestro] = await Promise.all([
         api(`/api/workspace/state?project_id=${query}`),
         api(`/api/workspace/maestro?project_id=${query}`)
       ]);
-      if (generation !== refreshGeneration) return;
+      if (generation !== refreshGeneration || request !== refreshRequest) return;
+      workspaceState = workspace;
+      maestroState = maestro;
       const agents = (workspace.panes || []).slice().sort((a, b) => (a.layout?.position || 0) - (b.layout?.position || 0));
       knownAgents.clear();
       agents.forEach(agent => knownAgents.set(agent.pane_id, agent));
       panes().filter(pane => !['maestro', 'review'].includes(pane.dataset.pane) && !knownAgents.has(pane.dataset.pane)).forEach(pane => pane.remove());
       if (!panes().some(pane => pane.classList.contains('selected'))) selectPane(grid.querySelector('[data-pane="maestro"]'));
       const histories = await Promise.all(agents.map(agent => api(`/api/workspace/panes/${encodeURIComponent(agent.pane_id)}/history`).catch(() => null)));
-      if (generation !== refreshGeneration) return;
+      if (generation !== refreshGeneration || request !== refreshRequest) return;
       agents.forEach((agent, index) => {
         let pane = panes().find(item => item.dataset.pane === agent.pane_id);
         if (!pane && !closedAgents.has(agent.pane_id)) pane = createAgentPane(agent);
-        if (pane) updateAgentPane(pane, agent, histories[index]);
+        if (pane) { updateAgentPane(pane, agent, histories[index]); renderAgentControls(agent.pane_id); }
       });
       renderMissions(agents);
       renderSystemPanes(workspace, maestro);
@@ -555,17 +775,24 @@
       document.getElementById('data-status').textContent = 'Dados do Nexus · atualização automática';
       syncUI();
     } catch (error) {
-      if (generation === refreshGeneration) document.getElementById('data-status').textContent = `Falha ao carregar: ${error.message}`;
+      if (generation === refreshGeneration && request === refreshRequest) document.getElementById('data-status').textContent = `Falha ao carregar: ${error.message}`;
     } finally {
-      if (generation === refreshGeneration) refreshTimer = setTimeout(refresh, 15000);
+      if (generation === refreshGeneration && request === refreshRequest) refreshTimer = setTimeout(refresh, 15000);
     }
   };
   const selectProject = id => {
+    if (projectId) maestroDrafts.set(projectId, maestroComposer.input.value);
     projectId = id;
+    maestroComposer.input.value = maestroDrafts.get(id) || '';
+    maestroComposer.error.textContent = '';
+    planningSelect.value = '';
+    planningCost.checked = false;
     refreshGeneration++;
     clearTimeout(refreshTimer);
     closedAgents.clear();
     knownAgents.clear();
+    workspaceState = null;
+    maestroState = null;
     panes().filter(pane => !['maestro', 'review'].includes(pane.dataset.pane)).forEach(pane => pane.remove());
     renderProjects();
     syncUI();
@@ -577,6 +804,11 @@
     nav.hidden = !nav.hidden;
   });
   syncUI();
+  api('/api/dev/models').then(data => {
+    modelCatalog = data.models || [];
+    renderPlanningControls();
+    knownAgents.forEach(agent => renderAgentControls(agent.pane_id));
+  }).catch(error => { maestroComposer.error.textContent = `Catálogo de modelos indisponível: ${error.message}`; });
   api('/api/projects').then(data => {
     projects = (data.projects || []).filter(project => project.enabled && project.dev_enabled);
     renderProjects();
