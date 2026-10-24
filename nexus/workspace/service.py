@@ -83,6 +83,7 @@ def _latest_mission(missions: list[dict]) -> dict | None:
     return {
         "mission_id": latest["mission_id"],
         "status": latest["status"],
+        "interrupt_requested": bool(latest.get("interrupt_requested", False)),
         "requested_model": latest["requested_model"],
         "attempt_count": latest["attempt_count"],
         "error_code": latest["error_code"],

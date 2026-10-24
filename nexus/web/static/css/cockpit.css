@@ -183,3 +183,13 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .cockpit-live{margin:5px 12px 12px;padding:7px 9px;border-left:2px solid var(--accent);background:var(--surface);color:var(--text);font:10px/1.5 'Cascadia Code',Consolas,monospace;overflow-wrap:anywhere}
 .cockpit-live strong{color:var(--accent);font-size:9px;letter-spacing:.04em}
 .cockpit-live-text{margin:6px 0 0;white-space:pre-wrap;word-break:break-word;font:inherit;color:var(--text)}
+.cockpit-mission-details{display:grid;gap:6px;border-top:1px solid var(--border-soft);padding-top:6px}
+.cockpit-mission-details>summary{cursor:pointer;color:var(--accent);font-weight:600;list-style-position:inside}
+.cockpit-mission-details[open]>summary{margin-bottom:2px}
+.cockpit-mission-status{display:grid;gap:3px;padding:6px 8px;border-left:2px solid var(--accent);background:var(--surface);color:var(--text-muted)}
+.cockpit-mission-status strong{color:var(--text)}
+.cockpit-mission-review-note,.cockpit-mission-note{color:var(--text-muted)}
+.cockpit-mission-note:empty{display:none}
+.cockpit-mission-actions{display:flex;flex-wrap:wrap;gap:6px}
+.cockpit-mission-interrupt{color:var(--warning)}
+.cockpit-mission-diff{max-height:180px;overflow:auto;margin:0;padding:7px;border:1px solid var(--border-soft);background:var(--terminal);color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere;font:9px/1.45 'Cascadia Code',Consolas,monospace}

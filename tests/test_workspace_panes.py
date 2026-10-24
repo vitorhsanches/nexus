@@ -227,7 +227,8 @@ def test_pane_mission_uses_pane_session_and_requires_exact_model_confirmation(ws
 def test_pane_view_surfaces_review_state_without_applying(ws_env, monkeypatch):
     pane = service.create_pane("demo", role="implementer", model="free/model")
     ready = [{
-        "mission_id": "DEVMISSION-2", "status": "READY_FOR_REVIEW", "requested_model": "free/model", "attempt_count": 1,
+        "mission_id": "DEVMISSION-2", "status": "READY_FOR_REVIEW", "interrupt_requested": True,
+        "requested_model": "free/model", "attempt_count": 1,
         "error_code": None, "error_message": None, "created_at": "t", "finished_at": "t2",
         "tests": [{"attempt_number": 1, "status": "PASSED", "exit_code": 0}],
         "result": {"changed_files": [{"path": "calc.py", "status": "modified"}], "human_approval_required": True, "integration_applied": False},
@@ -237,6 +238,7 @@ def test_pane_view_surfaces_review_state_without_applying(ws_env, monkeypatch):
     latest = view["latest_mission"]
     assert view["busy"] is False
     assert latest["status"] == "READY_FOR_REVIEW" and latest["human_approval_required"] is True
+    assert latest["interrupt_requested"] is True
     assert latest["integration_applied"] is False
     assert latest["changed_files"] == [{"path": "calc.py", "status": "modified"}]
 
