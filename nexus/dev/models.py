@@ -61,7 +61,7 @@ def list_dev_models(*, refresh: bool = False) -> dict:
     if catalog["default_model"] not in active_ids:
         catalog["default_model"] = next(
             (row["id"] for row in catalog["models"] if row["cost_status"] == "free"),
-            catalog["models"][0]["id"] if catalog["models"] else None,
+            None,
         )
     return catalog
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 
-from nexus.registry.database import get_connection
+from nexus.registry.database import get_connection, initialize_database
 
 
 def _now() -> str:
@@ -12,13 +13,33 @@ def _now() -> str:
 
 
 def read() -> dict:
-    with get_connection() as connection:
-        meta = connection.execute(
-            "SELECT selection_configured FROM workspace_model_settings_meta WHERE id = 1"
-        ).fetchone()
-        rows = connection.execute(
-            "SELECT model_id, active, candidate, updated_at FROM workspace_model_settings"
-        ).fetchall()
+    try:
+        with get_connection() as connection:
+            meta = connection.execute(
+                "SELECT selection_configured FROM workspace_model_settings_meta WHERE id = 1"
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT model_id, active, candidate, updated_at FROM workspace_model_settings"
+            ).fetchall()
+    except sqlite3.OperationalError as error:
+        # App routing may be used before the web lifespan initializes the
+        # registry (for example, by a local CLI or a standalone router).
+        # Initialize the actual schema and retry; do not turn a missing table
+        # into an implicit policy bypass or swallow unrelated database errors.
+        message = str(error).lower()
+        if not any(
+            f"no such table: {table}" in message
+            for table in ("workspace_model_settings_meta", "workspace_model_settings")
+        ):
+            raise
+        initialize_database()
+        with get_connection() as connection:
+            meta = connection.execute(
+                "SELECT selection_configured FROM workspace_model_settings_meta WHERE id = 1"
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT model_id, active, candidate, updated_at FROM workspace_model_settings"
+            ).fetchall()
     return {
         "selection_configured": bool(meta and meta["selection_configured"]),
         "models": {
@@ -49,6 +70,7 @@ def set_active(model_id: str, active: bool, qualified_ids: set[str]) -> dict:
     disabling one entry doesn't unexpectedly change any other current route.
     Models qualified later remain inactive until explicitly activated.
     """
+    read()  # Ensure the persisted schema exists before the write transaction.
     now = _now()
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -75,6 +97,7 @@ def set_active(model_id: str, active: bool, qualified_ids: set[str]) -> dict:
 
 
 def set_candidate(model_id: str, candidate: bool) -> dict:
+    read()  # Ensure the persisted schema exists before the write transaction.
     now = _now()
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
