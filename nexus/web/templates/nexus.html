@@ -430,8 +430,12 @@
 
             <form class="chat-composer" id="chat-composer" aria-label="Message composer">
               <div class="chat-model-picker">
-                <label for="chat-model-search">New session configuration</label>
-                <input id="chat-model-search" type="search" placeholder="Search approved routes" aria-label="Search approved models" disabled>
+                <label for="chat-backend-select">New session configuration</label>
+                <select id="chat-backend-select" aria-label="Chat backend">
+                  <option value="codex_native">Codex Native (local login, no OmniRoute)</option>
+                  <option value="omniroute">OmniRoute</option>
+                </select>
+                <input id="chat-model-search" type="search" placeholder="Search models" aria-label="Search approved models" disabled>
                 <select id="chat-model-filter" aria-label="Filter models"><option value="all">All</option><option value="favorites">Favorites</option></select>
                 <span id="chat-model-result-count" aria-live="polite"></span>
                 <select id="chat-model-select" aria-label="Model for new Chat session" disabled></select>

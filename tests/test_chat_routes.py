@@ -389,3 +389,33 @@ class LocalChatHttpProtectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeBackendEndpointTest(unittest.TestCase):
+    def test_native_backend_is_forwarded_to_the_service(self):
+        client = _make_client()
+        fake_session = {"session_id": "CHAT-NAT", "project_id": "demo", "backend": "codex_native", "status": "CREATED"}
+        with patch("nexus.chat.service.create_session", return_value=fake_session) as mock_create:
+            response = client.post("/api/chat/sessions", json={
+                "project_id": "demo", "backend": "codex_native", "model": "gpt-x", "effort": "low",
+            })
+        self.assertEqual(response.status_code, 200)
+        mock_create.assert_called_once_with("demo", "gpt-x", "low", backend="codex_native")
+
+    def test_unknown_backend_is_rejected_by_validation(self):
+        client = _make_client()
+        response = client.post("/api/chat/sessions", json={"project_id": "demo", "backend": "bogus"})
+        self.assertEqual(response.status_code, 422)
+
+    def test_models_endpoint_selects_the_native_catalog(self):
+        client = _make_client()
+        with patch("nexus.chat.service.list_models", return_value={"models": [], "backend": "codex_native"}) as mock_list:
+            response = client.get("/api/chat/models?backend=codex_native&refresh=true")
+        self.assertEqual(response.status_code, 200)
+        mock_list.assert_called_once_with(refresh=True, backend="codex_native")
+
+    def test_models_endpoint_defaults_to_the_unchanged_omniroute_catalog(self):
+        client = _make_client()
+        with patch("nexus.chat.service.list_models", return_value={"models": []}) as mock_list:
+            client.get("/api/chat/models")
+        mock_list.assert_called_once_with()
