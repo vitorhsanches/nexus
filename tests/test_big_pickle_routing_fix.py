@@ -274,8 +274,11 @@ class TestOutageFallbackMechanical(unittest.TestCase):
                 ("oc/big-pickle", "opencode", "low", "OMNIROUTE"),
             ),
         }
+        disabled_route = _find_big_pickle()
+        self.assertIsNotNone(disabled_route)
         svc = AdaptiveRoutingService(
             telemetry_client=_TotalOutage(),
+            approved_catalog=(disabled_route,),
             legacy_fallback=disabled_only_fallback,
         )
         with self.assertRaises(NoEligibleRouteError):
