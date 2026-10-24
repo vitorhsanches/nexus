@@ -29,7 +29,12 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from nexus.chat.appserver_client import AppServerClient, AppServerError
+from nexus.chat.appserver_client import (
+    BACKEND_CODEX_NATIVE,
+    BACKEND_OMNIROUTE,
+    AppServerClient,
+    AppServerError,
+)
 from nexus.failure_contract import sanitize_error_text
 from nexus.registry import chat_sessions
 from nexus.registry.projects import get_project
@@ -51,6 +56,7 @@ HISTORY_MAX_TURN_PAGES = 100
 DEFAULT_CHAT_MODEL = "cx/gpt-5.6-sol"
 _model_catalog_lock = threading.Lock()
 _model_catalog_cache: tuple[float, list[dict]] | None = None
+_native_catalog_cache: tuple[float, list[dict], dict] | None = None
 
 
 def _chat_turn_timeout_seconds() -> int:
@@ -168,7 +174,89 @@ def _model_catalog(*, refresh: bool = False) -> list[dict]:
         return [dict(item) for item in rows]
 
 
-def list_models(*, refresh: bool = False) -> dict:
+def _native_model_catalog(*, refresh: bool = False) -> tuple[list[dict], dict]:
+    """Models and login state straight from the local Codex App-Server.
+
+    No OmniRoute involvement. The catalog is whatever the signed-in Codex
+    account is offered; ``account`` never carries tokens or the e-mail.
+    """
+    global _native_catalog_cache
+    from nexus.process_env import native_catalog_home
+
+    with _model_catalog_lock:
+        if not refresh and _native_catalog_cache and _native_catalog_cache[0] > time.monotonic():
+            return [dict(item) for item in _native_catalog_cache[1]], dict(_native_catalog_cache[2])
+        client = AppServerClient(
+            Path.cwd(), sandbox_mode_override=CHAT_SANDBOX,
+            codex_home=native_catalog_home(), backend=BACKEND_CODEX_NATIVE,
+        )
+        client.start()
+        try:
+            raw_account = client.account_read()
+            account_row = raw_account.get("account") if isinstance(raw_account, dict) else None
+            account = {
+                "authenticated": isinstance(account_row, dict),
+                "type": account_row.get("type") if isinstance(account_row, dict) else None,
+                "plan": account_row.get("planType") if isinstance(account_row, dict) else None,
+            }
+            rows: list[dict] = []
+            if account["authenticated"]:
+                cursor = None
+                seen_cursors: set[str] = set()
+                for _page in range(10):
+                    response = client.model_list(cursor=cursor, limit=100)
+                    entries = response.get("data") if isinstance(response, dict) else None
+                    if not isinstance(entries, list):
+                        break
+                    for entry in entries:
+                        if not isinstance(entry, dict) or entry.get("hidden") is True:
+                            continue
+                        model_id = entry.get("model") or entry.get("id")
+                        if not isinstance(model_id, str) or any(row["id"] == model_id for row in rows):
+                            continue
+                        efforts = []
+                        for effort_row in entry.get("supportedReasoningEfforts") or []:
+                            value = effort_row.get("reasoningEffort") if isinstance(effort_row, dict) else effort_row
+                            if isinstance(value, str) and value not in efforts:
+                                efforts.append(value)
+                        default_effort = entry.get("defaultReasoningEffort")
+                        rows.append({
+                            "id": model_id,
+                            "name": str(entry.get("displayName") or model_id),
+                            "provider": "codex",
+                            "selectable": True,
+                            "availability": "codex-native",
+                            "reason": "Offered by the local Codex App-Server for the signed-in account.",
+                            "cost_status": "known",
+                            "supported_efforts": efforts,
+                            "default_effort": default_effort if default_effort in efforts else None,
+                            "is_default": bool(entry.get("isDefault")),
+                            "appserver_compatible": True,
+                        })
+                    cursor = response.get("nextCursor")
+                    if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                        break
+                    seen_cursors.add(cursor)
+        finally:
+            client.stop()
+        rows.sort(key=lambda item: (not item["is_default"], item["id"].casefold()))
+        _native_catalog_cache = (time.monotonic() + 30, rows, account)
+        return [dict(item) for item in rows], dict(account)
+
+
+def list_models(*, refresh: bool = False, backend: str = BACKEND_OMNIROUTE) -> dict:
+    if backend == BACKEND_CODEX_NATIVE:
+        try:
+            models, account = _native_model_catalog(refresh=refresh)
+            error = None if account["authenticated"] else (
+                "Codex is not signed in. Run 'codex login' for this Windows user, then refresh."
+            )
+        except Exception as exc:
+            models, account = [], {"authenticated": False, "type": None, "plan": None}
+            error = sanitize_error_text(str(exc)) or "Codex App-Server is unavailable."
+        default = next((item["id"] for item in models if item["is_default"]), models[0]["id"] if models else None)
+        return {"backend": backend, "models": models, "default_model": default,
+                "catalog_error": error, "account": account}
     try:
         models = _model_catalog(refresh=refresh)
         error = None
@@ -250,10 +338,23 @@ def _session_dict(row) -> dict:
         "requested_model": row["requested_model"] if "requested_model" in row.keys() else None,
         "requested_effort": row["requested_effort"] if "requested_effort" in row.keys() else None,
         "provider": row["provider"],
+        "backend": row["backend"] if "backend" in row.keys() and row["backend"] else BACKEND_OMNIROUTE,
         "status": row["status"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _row_backend(row) -> str:
+    """The session's persisted backend. Legacy rows predate the column and are OmniRoute.
+
+    Any other unknown value fails closed: a session is never silently run on
+    a different backend than the one it was created for.
+    """
+    backend = row["backend"] if "backend" in row.keys() and row["backend"] else BACKEND_OMNIROUTE
+    if backend not in {BACKEND_OMNIROUTE, BACKEND_CODEX_NATIVE}:
+        raise ChatError("UNSUPPORTED_BACKEND", f"Session has an unsupported backend: {backend!r}", http_status=409)
+    return backend
 
 
 def _turn_dict(row) -> dict:
@@ -302,7 +403,17 @@ def _validate_project(project_id: str) -> str:
     return workspace_path
 
 
-def create_session(project_id: str, model: str = DEFAULT_CHAT_MODEL, effort: str | None = None, allow_unknown_cost: bool = False) -> dict:
+def create_session(
+    project_id: str,
+    model: str | None = DEFAULT_CHAT_MODEL,
+    effort: str | None = None,
+    allow_unknown_cost: bool = False,
+    backend: str = BACKEND_OMNIROUTE,
+) -> dict:
+    if backend == BACKEND_CODEX_NATIVE:
+        return _create_native_session(project_id, model, effort)
+    if backend != BACKEND_OMNIROUTE:
+        raise ChatError("UNSUPPORTED_BACKEND", f"Unsupported Chat backend: {backend!r}", http_status=422)
     _require_chat_provider(model)
     catalog = {item["id"]: item for item in _model_catalog()}
     selected = catalog.get(model)
@@ -317,7 +428,34 @@ def create_session(project_id: str, model: str = DEFAULT_CHAT_MODEL, effort: str
     return _session_dict(chat_sessions.get_session(session_id))
 
 
-def _require_chat_provider(model: str) -> None:
+def _create_native_session(project_id: str, model: str | None, effort: str | None) -> dict:
+    """Codex Native: no OmniRoute catalog, OAuth gate or qualification.
+
+    A model, when supplied, must be one the local Codex account is actually
+    offered. Without one, Codex's own configured default is used.
+    """
+    workspace_path = _validate_project(project_id)
+    if model is None and effort is not None:
+        raise ChatError("EFFORT_REQUIRES_MODEL", "Choose a model before choosing a reasoning effort.", http_status=422)
+    if model is not None:
+        try:
+            models, account = _native_model_catalog()
+        except Exception as error:
+            raise ChatError("NATIVE_CATALOG_UNAVAILABLE", sanitize_error_text(str(error)) or "Codex App-Server is unavailable.", http_status=503) from error
+        if not account["authenticated"]:
+            raise ChatError("CODEX_NOT_SIGNED_IN", "Codex is not signed in. Run 'codex login' first.", http_status=409)
+        selected = next((item for item in models if item["id"] == model), None)
+        if selected is None:
+            raise ChatError("MODEL_NOT_ALLOWED", "The selected model is not offered by the local Codex account.", http_status=422)
+        if effort is not None and effort not in selected["supported_efforts"]:
+            raise ChatError("EFFORT_NOT_SUPPORTED", "The selected reasoning effort is not supported by this model.", http_status=422)
+    session_id = chat_sessions.create_session(project_id, workspace_path, model, effort, BACKEND_CODEX_NATIVE)
+    return _session_dict(chat_sessions.get_session(session_id))
+
+
+def _require_chat_provider(model: str, backend: str = BACKEND_OMNIROUTE) -> None:
+    if backend == BACKEND_CODEX_NATIVE:
+        return
     from nexus.dev.service import DevServiceError
     from nexus.workspace.omniroute_oauth import require_connected_route
     try:
@@ -545,6 +683,7 @@ def get_history(
         workspace_path,
         codex_home=session_row["codex_home"],
         sandbox_mode_override=CHAT_SANDBOX,
+        backend=_row_backend(session_row),
     )
     try:
         client.start()
@@ -614,7 +753,7 @@ def list_sessions(project_id: str | None = None) -> list[dict]:
 def send_turn(session_id: str, text: str, *, idempotency_key: str | None = None) -> dict:
     session_row = _get_session_row(session_id)
     _validated_session_workspace(session_row)
-    _require_chat_provider(session_row["requested_model"] or "")
+    _require_chat_provider(session_row["requested_model"] or "", _row_backend(session_row))
 
     if idempotency_key is None:
         idempotency_key = uuid.uuid4().hex
@@ -712,7 +851,8 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
         turn_timeout_seconds = _chat_turn_timeout_seconds()
         session_row = _get_session_row(session_id)
         workspace_path = _validated_session_workspace(session_row)
-        _require_chat_provider(session_row["requested_model"] or "")
+        backend = _row_backend(session_row)
+        _require_chat_provider(session_row["requested_model"] or "", backend)
         client = AppServerClient(
             workspace_path,
             codex_home=session_row["codex_home"],
@@ -720,6 +860,7 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
             # enforce Chat's read-only sandbox at the process level.
             sandbox_mode_override=CHAT_SANDBOX,
             on_notification=lambda event: _on_event(active, event),
+            backend=backend,
         )
         active.client = client
         client.start()
@@ -736,7 +877,7 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
         active.thread_id = thread_id
 
         requested_effort = session_row["requested_effort"] if "requested_effort" in session_row.keys() else None
-        if requested_effort:
+        if requested_effort and backend != BACKEND_CODEX_NATIVE:
             client.thread_settings_update(thread_id, model=session_row["requested_model"], effort=requested_effort)
             # Confirmation uses the runtime's persisted thread snapshot. If
             # this App-Server build cannot confirm the applied value, do not
@@ -758,11 +899,13 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
             provider=provider,
         )
 
+        turn_options = {"effort": requested_effort} if requested_effort and backend == BACKEND_CODEX_NATIVE else {}
         response_text = client.send_message_and_wait(
             thread_id,
             text,
             timeout_seconds=turn_timeout_seconds,
             on_turn_started=lambda codex_turn_id: setattr(active, "codex_turn_id", codex_turn_id),
+            **turn_options,
         )
 
         chat_sessions.update_turn_status(
