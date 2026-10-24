@@ -344,6 +344,14 @@ def create_pane(
             f"At most {limit} open panes per project; hide one before adding another.",
             http_status=409,
         )
+    if model is None and plan_id is None:
+        from nexus.registry import workspace_ai_preferences
+        from nexus.workspace import ai_settings
+
+        if workspace_ai_preferences.read(project_id).get("development"):
+            # A saved preference only supplies the initial model. It does not
+            # authorize a turn, a mission, or a paid use.
+            model = ai_settings.require_saved(project_id, "development")["model_id"]
     if model is not None:
         _require_approved_model(model)
     # Authorization, worktree isolation and persistence of the session all

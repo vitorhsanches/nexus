@@ -40,6 +40,28 @@ def _catalog() -> dict:
     return list_dev_models()
 
 
+def _planning_model(project_id: str, model: str) -> dict | None:
+    """Resolve an explicitly saved planning route, or keep legacy choices."""
+    from nexus.registry import workspace_ai_preferences
+    from nexus.workspace import ai_settings
+
+    preference = workspace_ai_preferences.read(project_id).get("maestro")
+    if preference and preference["model_id"] == model:
+        selected = ai_settings.require_saved(project_id, "maestro")
+        return {"id": model, "cost_status": selected["cost_status"], "effort": selected["effort"]}
+    return next((item for item in _catalog()["models"] if item["id"] == model), None)
+
+
+def _planning_session_matches(session_id: str, selected: dict) -> bool:
+    """A saved effort must match the session that will execute the next turn."""
+    if selected.get("effort") is None:
+        return True
+    from nexus.registry import chat_sessions
+
+    session = chat_sessions.get_session(session_id)
+    return bool(session and session["requested_effort"] == selected["effort"])
+
+
 def _project(project_id: str) -> dict:
     from nexus.dev.service import validate_dev_project
     from nexus.registry.projects import get_project
@@ -67,7 +89,7 @@ def authorize_planning(project_id: str, model: str, *, confirm_cost: bool) -> di
 
     _project(project_id)
     catalog = _catalog()
-    row = next((item for item in catalog["models"] if item["id"] == model), None)
+    row = _planning_model(project_id, model)
     if row is None:
         raise DevServiceError(
             "MODEL_NOT_ALLOWED",
@@ -82,14 +104,15 @@ def authorize_planning(project_id: str, model: str, *, confirm_cost: bool) -> di
             http_status=403,
         )
     conversation = _conversation(project_id)
-    if conversation["chat_session_id"] and conversation["model"] == model:
+    if (conversation["chat_session_id"] and conversation["model"] == model
+            and _planning_session_matches(conversation["chat_session_id"], row)):
         # Reconfirmation of a legacy route retains the existing Chat thread.
         session_id = conversation["chat_session_id"]
     else:
         try:
             # Chat's own catalog never knows prices; the confirmation above
             # authorizes the exact non-free route for planning only.
-            session = chat_service.create_session(project_id, model, allow_unknown_cost=True)
+            session = chat_service.create_session(project_id, model, effort=row.get("effort"), allow_unknown_cost=True)
         except chat_service.ChatError as error:
             raise _chat_error(error) from error
         session_id = session["session_id"]
@@ -114,7 +137,9 @@ def send_message(project_id: str, text: str) -> dict:
         raise DevServiceError("MAESTRO_BUSY", "The Maestro is still answering the previous message.", http_status=409)
 
     catalog = _catalog()
-    selected = next((item for item in catalog["models"] if item["id"] == conversation["model"]), None)
+    selected = _planning_model(project_id, conversation["model"]) if conversation["model"] else None
+    if selected and conversation["chat_session_id"] and not _planning_session_matches(conversation["chat_session_id"], selected):
+        raise DevServiceError("AI_PREFERENCE_REAUTHORIZE", "O esforço salvo mudou; autorize novamente o planejamento antes de enviar outra mensagem.", http_status=409)
     from nexus.workspace import cost_authorizations
     if conversation["chat_session_id"] and (
         selected is None or (
@@ -310,7 +335,12 @@ def conversation_state(project_id: str) -> dict:
                            if row["author"] == "user" and row["status"] in {"PENDING", "PROCESSING"}
                            and row["chat_turn_id"]), None)
     if conversation["model"]:
-        model_row = next((item for item in _catalog()["models"] if item["id"] == conversation["model"]), None)
+        try:
+            model_row = _planning_model(project_id, conversation["model"])
+            if model_row and conversation["chat_session_id"] and not _planning_session_matches(conversation["chat_session_id"], model_row):
+                model_row = None
+        except DevServiceError:
+            model_row = None
     from nexus.workspace import cost_authorizations
     grant = next((item for item in cost_authorizations.list_authorizations(project_id)["authorizations"]
                   if item["model"] == conversation["model"] and item["status"] == "ACTIVE"), None) if conversation["model"] else None

@@ -149,6 +149,14 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
       files: [{ path: 'nexus/example.py', status: 'M', patch: '--- a/nexus/example.py\n+++ b/nexus/example.py' }] },
     maestro: { conversation_id: 'MAESTRO-1', busy: false, planning: { authorized: false, model: null }, messages: [] },
     authorizations: [],
+    aiSettings: { project_id: 'demo', catalog_error: null, executors: {
+      codex: { name: 'OpenAI Codex', installed: true, connected: true, status: 'Conectado', detail: 'Perfil OmniRoute disponível.' },
+      claude_code: { name: 'Claude Code', installed: true, connected: false, status: 'Não conectado', detail: 'Adaptador indisponível.' },
+    }, roles: {
+      maestro: { selection: null, valid: false, models: [{ id: 'free/planning', name: 'Planning', provider: 'test', cost_status: 'free', efforts: ['medium'] }] },
+      development: { selection: null, valid: false, models: [{ id: 'free/model', name: 'Coding', provider: 'test', cost_status: 'free', efforts: ['low'] }] },
+      review: { selection: null, valid: false, models: [{ id: 'free/review', name: 'Review', provider: 'test', cost_status: 'free', efforts: ['high'] }] },
+    } },
     postError: null, postWait: null, profileError: null };
   const timers = [];
   const frames = new Map();
@@ -180,6 +188,16 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
         box.discoveredCatalog.approved_models = box.discoveredCatalog.models.filter(model => model.can_execute)
           .map(model => ({ id: model.id, cost_status: model.cost_status }));
         data = box.discoveredCatalog;
+      } else if (url === '/api/dev/ai-settings') {
+        const body = JSON.parse(options.body);
+        box.aiSettings.roles[body.role].selection = { executor: body.executor, model_id: body.model_id, effort: body.effort };
+        box.aiSettings.roles[body.role].valid = true;
+        data = box.aiSettings;
+      } else if (url === '/api/dev/ai-settings/clear') {
+        const body = JSON.parse(options.body);
+        box.aiSettings.roles[body.role].selection = null;
+        box.aiSettings.roles[body.role].valid = false;
+        data = box.aiSettings;
       } else if (url === '/api/dev/model-management/candidate') {
         const body = JSON.parse(options.body);
         box.discoveredCatalog.models = box.discoveredCatalog.models.map(model => model.id === body.model_id
@@ -224,6 +242,8 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
       return { ok: true, json: async () => data };
     }
     if (url === '/api/projects') data = { projects: box.projects };
+    else if (url === '/api/dev/ai-settings/admin-check') data = { authenticated: Boolean(options.headers?.Authorization) };
+    else if (url.startsWith('/api/dev/ai-settings?')) data = box.aiSettings;
     else if (url === '/api/dev/model-management/admin-status') data = { admin_auth_configured: true };
     else if (url.startsWith('/api/dev/model-catalog')) {
       if (box.catalogError) throw box.catalogError;
@@ -299,6 +319,36 @@ test('persistent cost authorization captures bounded consent and can be revoked'
   revoke.dispatch('click');
   await app.settle();
   assert.ok(app.calls.some(call => call.url.includes('/api/workspace/cost-authorizations/AUTH-1?project_id=demo') && call.method === 'DELETE'));
+});
+
+test('AI settings show real executor status and save only with operator token', async () => {
+  const app = harness([]);
+  await app.settle();
+  app.byId['settings-ai-button'].dispatch('click');
+  await app.settle();
+  assert.match(app.byId['ai-executors'].textContent, /Claude Code.*Não conectado/);
+  const role = app.byId['ai-roles'].children[1];
+  const fields = role.children[1];
+  assert.equal(fields.children[0].children[1].disabled, true);
+  fields.children[1].value = 'free/model';
+  fields.children[1].dispatch('change');
+  fields.children[2].value = 'low';
+  role.children[2].children[0].dispatch('click');
+  await app.settle();
+  assert.equal(app.calls.some(call => call.url === '/api/dev/ai-settings' && call.method === 'POST'), false);
+  app.byId['ai-admin-token'].value = 'x'.repeat(32);
+  app.byId['ai-admin-unlock'].dispatch('click');
+  await app.settle();
+  role.children[2].children[0].dispatch('click');
+  await app.settle();
+  const save = app.calls.find(call => call.url === '/api/dev/ai-settings' && call.method === 'POST');
+  assert.deepEqual(save.body, { project_id: 'demo', role: 'development', executor: 'codex', model_id: 'free/model', effort: 'low' });
+  assert.equal(save.authorization, `Bearer ${'x'.repeat(32)}`);
+  assert.match(app.byId['ai-roles'].textContent, /Preferência salva/);
+  app.byId['ai-roles'].children[1].children[2].children[1].dispatch('click');
+  await app.settle();
+  assert.equal(app.box.aiSettings.roles.development.selection, null);
+  assert.equal(app.calls.some(call => call.url.includes('/api/workspace/panes/') && call.method === 'POST'), false);
 });
 
 const agent = index => ({

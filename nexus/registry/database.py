@@ -714,6 +714,17 @@ def initialize_database() -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS workspace_ai_preferences (
+                project_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('maestro', 'development', 'review')),
+                executor TEXT NOT NULL CHECK (executor = 'codex'),
+                model_id TEXT NOT NULL,
+                effort TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, role),
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS workspace_model_qualifications (
                 model_id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,

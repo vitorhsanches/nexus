@@ -758,6 +758,21 @@ class ModelQualificationRevokeRequest(BaseModel):
     model_id: str = Field(min_length=1, max_length=128)
 
 
+class AiPreferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    role: str = Field(min_length=1, max_length=32)
+    executor: str = Field(min_length=1, max_length=32)
+    model_id: str = Field(min_length=1, max_length=128)
+    effort: str = Field(min_length=1, max_length=32)
+
+
+class AiPreferenceClearRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    role: str = Field(min_length=1, max_length=32)
+
+
 class DevIntegrationReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     review_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
@@ -942,6 +957,55 @@ def model_management_state(refresh: bool = False):
 def model_management_admin_status():
     from nexus.dev.model_management import admin_auth_configured
     return {"admin_auth_configured": admin_auth_configured()}
+
+
+@router.get("/dev/ai-settings")
+def ai_settings_state(project_id: str = Query(min_length=1, max_length=128), refresh: bool = False):
+    from nexus.workspace import ai_settings
+    from nexus.dev.service import DevServiceError
+
+    try:
+        return ai_settings.state(project_id, refresh=refresh)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/ai-settings/admin-check")
+def ai_settings_admin_check(http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return {"authenticated": True}
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/ai-settings")
+def save_ai_preference(request: AiPreferenceRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+    from nexus.workspace import ai_settings
+
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return ai_settings.save(request.project_id, request.role, request.executor, request.model_id, request.effort)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/ai-settings/clear")
+def clear_ai_preference(request: AiPreferenceClearRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+    from nexus.workspace import ai_settings
+
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return ai_settings.clear(request.project_id, request.role)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
 
 
 @router.post("/dev/model-management/activation")

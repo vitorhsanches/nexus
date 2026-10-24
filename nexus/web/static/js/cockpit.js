@@ -44,6 +44,9 @@
   let modelCatalogError = '';
   let modelAdminToken = '';
   let modelCatalogRequest = 0;
+  let aiSettings = null;
+  let aiSettingsRequest = 0;
+  let aiSettingsOpen = false;
   let costAuthorizations = [];
   let testProfiles = [];
   let testProfilesLoading = false;
@@ -457,14 +460,15 @@
   const api = async (path, options = {}) => {
     const response = await fetch(path, {
       method: options.method || 'GET',
-      headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(modelAdminToken && options.method === 'POST' ? { Authorization: `Bearer ${modelAdminToken}` } : {}) },
+      headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(modelAdminToken && (options.method === 'POST' || options.admin) ? { Authorization: `Bearer ${modelAdminToken}` } : {}) },
       ...(options.body ? { body: JSON.stringify(options.body) } : {})
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data?.detail?.message || `HTTP ${response.status}`);
     return data;
   };
-  const costOf = model => modelCatalog.find(row => row.id === model)?.cost_status || 'unknown';
+  const costOf = model => modelCatalog.find(row => row.id === model)?.cost_status ||
+    Object.values(aiSettings?.roles || {}).flatMap(role => role.models || []).find(row => row.id === model)?.cost_status || 'unknown';
   const activeCostAuthorizationFor = model => costAuthorizations.find(auth => auth.model === model &&
     auth.status === 'ACTIVE' && Number(auth.uses_remaining) > 0);
   const agentAuthorizationApplies = agent => Boolean(agent.brief?.authorization?.applies ||
@@ -647,7 +651,8 @@
   const renderCostAuthorizations = () => {
     const selected = costAuthModel.value;
     costAuthModel.replaceChildren(element('option', '', 'Selecione um modelo aprovado'));
-    modelCatalog.filter(model => model.cost_status !== 'free').forEach(model => {
+    const payable = [...modelCatalog, ...discoveredModelCatalog.filter(model => model.cost_status !== 'free' && model.active && model.approval_status === 'approved' && model.discovered === true && !modelCatalog.some(approved => approved.id === model.id))];
+    payable.filter(model => model.cost_status !== 'free').forEach(model => {
       const option = element('option', '', `${model.id} · ${model.cost_status || 'unknown'}`);
       option.value = model.id;
       costAuthModel.append(option);
@@ -727,8 +732,114 @@
       }
     }
   };
-  modelCatalogRefreshButton.addEventListener('click', () => { void refreshModelCatalog(true); });
+  const aiSection = document.getElementById('settings-ai');
+  const aiStatus = document.getElementById('ai-settings-status');
+  const aiExecutors = document.getElementById('ai-executors');
+  const aiRoles = document.getElementById('ai-roles');
+  const aiRoleLabels = { maestro: 'Maestro · planejamento', development: 'Desenvolvimento', review: 'Revisão' };
+  const renderAiSettings = () => {
+    aiExecutors.replaceChildren();
+    aiRoles.replaceChildren();
+    if (!aiSettings) return;
+    Object.entries(aiSettings.executors || {}).forEach(([key, executor]) => {
+      const card = element('article', `ai-executor ${executor.connected ? 'is-connected' : 'is-disconnected'}`);
+      card.append(element('strong', '', executor.name), element('span', 'ai-state', executor.status), element('p', '', executor.detail));
+      if (key === 'claude_code' && executor.installed) card.append(element('small', '', 'Instalado · execução indisponível no Nexus'));
+      aiExecutors.append(card);
+    });
+    Object.entries(aiRoleLabels).forEach(([role, label]) => {
+      const data = aiSettings.roles?.[role] || { models: [], selection: null, valid: false };
+      const card = element('article', 'ai-role');
+      card.append(element('h3', '', label));
+      const executor = element('select'); executor.setAttribute('aria-label', `Ferramenta de ${label}`);
+      const codex = element('option', '', 'OpenAI Codex'); codex.value = 'codex';
+      const claude = element('option', '', 'Claude Code · não conectado'); claude.value = 'claude_code'; claude.disabled = true;
+      executor.append(codex, claude); executor.value = 'codex';
+      const model = element('select'); model.setAttribute('aria-label', `Modelo de ${label}`);
+      const effort = element('select'); effort.setAttribute('aria-label', `Esforço de ${label}`);
+      const updateEfforts = preferred => {
+        const row = data.models.find(item => item.id === model.value);
+        effort.replaceChildren(...(row?.efforts || []).map(value => {
+          const option = element('option', '', value); option.value = value; return option;
+        }));
+        if (preferred && row?.efforts.includes(preferred)) effort.value = preferred;
+      };
+      const empty = element('option', '', 'Selecione um modelo elegível'); empty.value = '';
+      model.append(empty, ...data.models.map(row => {
+        const option = element('option', '', `${row.name} · ${row.provider} · ${row.cost_status}`);
+        option.value = row.id; return option;
+      }));
+      if (data.valid) model.value = data.selection.model_id;
+      updateEfforts(data.valid ? data.selection.effort : null);
+      model.addEventListener('change', () => updateEfforts());
+      const note = element('p', 'ai-role-note', data.selection
+        ? (data.valid ? 'Preferência salva · revalidada antes de novas execuções.' : 'Preferência salva indisponível: verifique conexão, qualificação, ativação, capacidade ou custos.')
+        : 'Sem preferência salva. O comportamento anterior permanece.');
+      const save = element('button', '', 'Salvar'); save.type = 'button';
+      const clear = element('button', '', 'Limpar'); clear.type = 'button';
+      save.disabled = !aiSettings.executors?.codex?.connected || !data.models.length;
+      clear.disabled = !data.selection;
+      save.addEventListener('click', async () => {
+        if (!projectId || !modelAdminToken || !model.value || !effort.value) { notify('Selecione modelo e esforço e autentique o operador.'); return; }
+        save.disabled = true;
+        try {
+          aiSettings = await api('/api/dev/ai-settings', { method: 'POST', body: { project_id: projectId, role, executor: executor.value, model_id: model.value, effort: effort.value } });
+          renderAiSettings(); renderPlanningControls(); notify('Preferência de IA salva.');
+        } catch (error) { note.textContent = error.message; save.disabled = false; }
+      });
+      clear.addEventListener('click', async () => {
+        if (!projectId || !modelAdminToken) { notify('Autentique o operador para limpar a preferência.'); return; }
+        clear.disabled = true;
+        try {
+          aiSettings = await api('/api/dev/ai-settings/clear', { method: 'POST', body: { project_id: projectId, role } });
+          renderAiSettings(); renderPlanningControls(); notify('Preferência removida.');
+        } catch (error) { note.textContent = error.message; clear.disabled = false; }
+      });
+      const fields = element('div', 'ai-role-fields'); fields.append(executor, model, effort);
+      const actions = element('div', 'ai-role-actions'); actions.append(save, clear);
+      card.append(fields, actions, note); aiRoles.append(card);
+    });
+  };
+  const refreshAiSettings = async (force = false) => {
+    const request = ++aiSettingsRequest;
+    if (!projectId) { aiSettings = null; aiStatus.textContent = 'Selecione um projeto autorizado.'; renderAiSettings(); return; }
+    const selectedProject = projectId;
+    aiStatus.textContent = 'Verificando Codex, OmniRoute e modelos elegíveis…';
+    try {
+      const data = await api(`/api/dev/ai-settings?project_id=${encodeURIComponent(selectedProject)}${force ? '&refresh=true' : ''}`);
+      if (request !== aiSettingsRequest || selectedProject !== projectId) return;
+      aiSettings = data;
+      aiStatus.textContent = data.catalog_error ? `Catálogo indisponível: ${data.catalog_error}` : 'Preferências do projeto · modelos elegíveis por função';
+      renderAiSettings(); renderPlanningControls();
+    } catch (error) {
+      if (request !== aiSettingsRequest || selectedProject !== projectId) return;
+      aiSettings = null; aiStatus.textContent = `Configurações indisponíveis: ${error.message}`; renderAiSettings();
+    }
+  };
+  document.getElementById('ai-admin-unlock').addEventListener('click', async () => {
+    const token = document.getElementById('ai-admin-token').value.trim();
+    if (token.length < 32) { notify('Informe o token administrativo configurado no servidor.'); return; }
+    const previous = modelAdminToken; modelAdminToken = token;
+    try {
+      await api('/api/dev/ai-settings/admin-check', { admin: true });
+      document.getElementById('ai-admin-token').value = '';
+      document.getElementById('ai-admin-status').textContent = 'Operador autenticado nesta sessão do navegador';
+    } catch (error) { modelAdminToken = previous; notify(error.message); }
+  });
+  document.getElementById('ai-settings-refresh').addEventListener('click', () => { void refreshAiSettings(true); });
+  const openAiSettings = () => {
+    aiSettingsOpen = true;
+    aiSection.hidden = false;
+    aiSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('menu-toggle').setAttribute('aria-expanded', 'false');
+    void refreshAiSettings();
+  };
+  document.getElementById('settings-ai-button').addEventListener('click', openAiSettings);
+  document.getElementById('settings-ai-link').addEventListener('click', openAiSettings);
+  modelCatalogRefreshButton.addEventListener('click', () => { void refreshModelCatalog(true); if (aiSettingsOpen) void refreshAiSettings(true); });
   document.getElementById('settings-models-link').addEventListener('click', () => {
+    document.getElementById('settings-advanced').open = true;
     document.getElementById('settings-models').scrollIntoView({ behavior: 'smooth', block: 'start' });
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('menu-toggle').setAttribute('aria-expanded', 'false');
@@ -779,15 +890,20 @@
   const renderPlanningControls = () => {
     const planning = maestroState?.planning;
     const selected = planningSelect.value;
+    const preferred = aiSettings?.roles?.maestro;
+    const preferredModel = preferred?.valid ? preferred.selection.model_id : '';
+    const planningModels = [...modelCatalog];
+    const preferredRow = preferred?.models?.find(row => row.id === preferredModel);
+    if (preferredRow && !planningModels.some(row => row.id === preferredRow.id)) planningModels.unshift(preferredRow);
     const emptyOption = element('option', '', 'Modelo de planejamento…');
     emptyOption.value = '';
-    planningSelect.replaceChildren(emptyOption, ...modelCatalog.map(row => {
+    planningSelect.replaceChildren(emptyOption, ...planningModels.map(row => {
       const option = element('option', '', `${row.id} · ${row.cost_status || 'unknown'}`);
       option.value = row.id;
       return option;
     }));
-    planningSelect.value = modelCatalog.some(row => row.id === selected) ? selected :
-      (modelCatalog.some(row => row.id === planning?.model) ? planning.model : '');
+    planningSelect.value = planningModels.some(row => row.id === selected) ? selected :
+      (preferredModel || (planningModels.some(row => row.id === planning?.model) ? planning.model : ''));
     const planningGrant = activeCostAuthorizationFor(planningSelect.value);
     planningCostLabel.hidden = true;
     planningCost.checked = false;
@@ -1425,6 +1541,9 @@
     stopAllStreams();
     if (projectId) maestroDrafts.set(projectId, maestroComposer.input.value);
     projectId = id;
+    aiSettings = null;
+    aiSettingsRequest++;
+    renderAiSettings();
     maestroComposer.input.value = maestroDrafts.get(id) || '';
     maestroComposer.error.textContent = '';
     planningSelect.value = '';
@@ -1460,6 +1579,7 @@
           document.getElementById('data-status').textContent = `Perfis de teste indisponíveis: ${error.message}`;
         });
       refresh();
+      if (aiSettingsOpen) void refreshAiSettings();
     }
   };
   document.getElementById('project-toggle').addEventListener('click', () => {
