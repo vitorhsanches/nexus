@@ -65,8 +65,8 @@ import queue
 import threading
 from collections import deque
 
-from nexus.chat.appserver_client import AppServerClient, AppServerError
-from nexus.dev import feature_gate
+from nexus.chat.appserver_client import BACKEND_CODEX_NATIVE, BACKEND_OMNIROUTE, AppServerClient, AppServerError
+from nexus.dev import approvals, feature_gate
 from nexus.dev.service import DevServiceError, validate_dev_project
 from nexus.dev.worktree import (
     DevWorktreeError,
@@ -102,6 +102,9 @@ DEV_APPROVAL_POLICY = "on-request"
 DEV_SANDBOX = "workspace-write"
 
 DEFAULT_DEV_TURN_TIMEOUT_SECONDS = 180
+# Codex Native turns may wait for a human approval (nexus.dev.approvals), so
+# their budget must always exceed the approval window.
+NATIVE_DEV_TURN_TIMEOUT_SECONDS = 900
 MAX_CONCURRENT_DEV_TURNS = 2
 
 _active_lock = threading.Lock()
@@ -212,6 +215,55 @@ def _require_active_session(dev_session_id: str):
     return session, workspace_path, str(verified_worktree)
 
 
+def session_backend(session) -> str:
+    """The backend a Development session was created for; never switched silently."""
+    backend = session["backend"] if "backend" in session.keys() and session["backend"] else BACKEND_OMNIROUTE
+    if backend not in {BACKEND_OMNIROUTE, BACKEND_CODEX_NATIVE}:
+        raise DevServiceError("UNSUPPORTED_BACKEND", f"Session has an unsupported backend: {backend!r}", http_status=409)
+    return backend
+
+
+def validate_native_choice(model: str | None, effort: str | None) -> None:
+    """Codex Native: the model/effort must be offered by the local Codex login.
+
+    No OmniRoute catalog, OAuth gate or qualification is consulted.
+    """
+    if model is None:
+        if effort is not None:
+            raise DevServiceError("EFFORT_REQUIRES_MODEL", "Choose a model before choosing a reasoning effort.", http_status=422)
+        return
+    from nexus.chat.service import _native_model_catalog
+
+    try:
+        models, account = _native_model_catalog()
+    except Exception as error:
+        raise DevServiceError("NATIVE_CATALOG_UNAVAILABLE", sanitize_error_text(str(error)) or "Codex App-Server is unavailable.", http_status=503) from error
+    if not account["authenticated"]:
+        raise DevServiceError("CODEX_NOT_SIGNED_IN", "Codex is not signed in. Run 'codex login' first.", http_status=409)
+    selected = next((item for item in models if item["id"] == model), None)
+    if selected is None:
+        raise DevServiceError("MODEL_NOT_ALLOWED", "The selected model is not offered by the local Codex account.", http_status=422)
+    if effort is not None and effort not in selected["supported_efforts"]:
+        raise DevServiceError("EFFORT_NOT_SUPPORTED", "The selected reasoning effort is not supported by this model.", http_status=422)
+
+
+def _validate_omniroute_choice(selected_model: str | None, effort: str | None) -> None:
+    if selected_model:
+        from nexus.workspace.omniroute_oauth import require_connected_route
+        require_connected_route(selected_model)
+    if selected_model and selected_model.startswith(("cc/", "cx/")) and not effort:
+        raise DevServiceError("AI_EFFORT_REQUIRED", "Escolha o esforço da rota antes de executar.", http_status=422)
+    if effort is not None:
+        from nexus.dev.models import list_dev_models
+        row = next((item for item in list_dev_models(refresh=True)["models"]
+                    if item["id"] == selected_model), None)
+        if row is None or effort not in row.get("supported_efforts", []) or (
+            selected_model and selected_model.startswith(("cc/", "cx/"))
+            and effort not in row.get("confirmed_efforts", [])
+        ):
+            raise DevServiceError("EFFORT_NOT_SUPPORTED", "Esforço não confirmado para a rota exata de Development.", http_status=422)
+
+
 def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None,
                  effort: str | None = None) -> dict:
     """Start one Codex turn inside dev_session_id's isolated worktree.
@@ -239,20 +291,10 @@ def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None,
 
     session, _workspace_path, _worktree = _require_active_session(dev_session_id)
     selected_model = model or session["requested_model"]
-    if selected_model:
-        from nexus.workspace.omniroute_oauth import require_connected_route
-        require_connected_route(selected_model)
-    if selected_model and selected_model.startswith(("cc/", "cx/")) and not effort:
-        raise DevServiceError("AI_EFFORT_REQUIRED", "Escolha o esforço da rota antes de executar.", http_status=422)
-    if effort is not None:
-        from nexus.dev.models import list_dev_models
-        row = next((item for item in list_dev_models(refresh=True)["models"]
-                    if item["id"] == selected_model), None)
-        if row is None or effort not in row.get("supported_efforts", []) or (
-            selected_model and selected_model.startswith(("cc/", "cx/"))
-            and effort not in row.get("confirmed_efforts", [])
-        ):
-            raise DevServiceError("EFFORT_NOT_SUPPORTED", "Esforço não confirmado para a rota exata de Development.", http_status=422)
+    if session_backend(session) == BACKEND_CODEX_NATIVE:
+        validate_native_choice(selected_model, effort)
+    else:
+        _validate_omniroute_choice(selected_model, effort)
 
     try:
         turn_id = dev_sessions.create_turn(dev_session_id, prompt, requested_model=model)
@@ -316,27 +358,37 @@ def _run_dev_turn_body(
         # changed in the moment between run_dev_turn()'s own check and
         # this background thread actually starting.
         session, _workspace_path, worktree_path = _require_active_session(dev_session_id)
-        from nexus.workspace.omniroute_oauth import require_connected_route
-        require_connected_route(model or session["requested_model"] or "")
+        backend = session_backend(session)
+        native = backend == BACKEND_CODEX_NATIVE
+        if not native:
+            from nexus.workspace.omniroute_oauth import require_connected_route
+            require_connected_route(model or session["requested_model"] or "")
 
+        # OmniRoute keeps AppServerClient's fail-closed denial for every
+        # approval request. Codex Native defers command/file-change requests
+        # to an explicit human decision (nexus.dev.approvals).
+        client_ref: list = []
         client = AppServerClient(
             worktree_path,
             codex_home=session["codex_home"],
             sandbox_mode_override=DEV_SANDBOX,
             approval_policy_override=DEV_APPROVAL_POLICY,
             on_notification=lambda event: _on_event(active, event),
-            # No on_server_request handler: see module docstring --
-            # AppServerClient's own fail-closed default is the entire
-            # approval story for this MVP, deliberately.
+            backend=backend,
+            **({"on_deferred_server_request": approvals.deferred_handler(dev_session_id, turn_id, client_ref)} if native else {}),
         )
+        client_ref.append(client)
+        # Native threads honor the session's chosen model too; OmniRoute keeps
+        # its existing per-turn behaviour unchanged.
+        thread_model = (model or session["requested_model"]) if native else model
         active.client = client
         client.start()
 
         if session["codex_thread_id"]:
-            thread_result = client.thread_resume(session["codex_thread_id"], model=model)
+            thread_result = client.thread_resume(session["codex_thread_id"], model=thread_model)
         else:
             thread_result = client.thread_start(
-                model=model,
+                model=thread_model,
                 cwd=worktree_path,
                 sandbox=DEV_SANDBOX,
                 approval_policy=DEV_APPROVAL_POLICY,
@@ -347,7 +399,7 @@ def _run_dev_turn_body(
         active.thread_id = thread_id
         dev_sessions.update_thread(dev_session_id, codex_thread_id=thread_id, codex_home=client.codex_home)
 
-        if effort is not None:
+        if effort is not None and not native:
             client.thread_settings_update(thread_id, model=model or session["requested_model"], effort=effort)
             confirmed = client.thread_resume(thread_id, model=model or session["requested_model"])
             if confirmed.get("reasoningEffort") != effort or confirmed.get("model") != (model or session["requested_model"]):
@@ -356,8 +408,9 @@ def _run_dev_turn_body(
         response_text = client.send_message_and_wait(
             thread_id,
             prompt,
-            timeout_seconds=DEFAULT_DEV_TURN_TIMEOUT_SECONDS,
+            timeout_seconds=NATIVE_DEV_TURN_TIMEOUT_SECONDS if native else DEFAULT_DEV_TURN_TIMEOUT_SECONDS,
             on_turn_started=lambda codex_turn_id: setattr(active, "codex_turn_id", codex_turn_id),
+            **({"effort": effort} if native and effort else {}),
         )
 
         dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text=response_text)
@@ -380,6 +433,7 @@ def _run_dev_turn_body(
         _mark_active_done(active)
     finally:
         _mark_active_done(active)
+        approvals.close_turn(turn_id)
         if client is not None:
             try:
                 client.stop()
@@ -414,6 +468,7 @@ def interrupt_dev_turn(dev_session_id: str, turn_id: str | None = None) -> dict:
         return {"status": "STARTING", "turn_id": turn_id}
 
     active.interrupted.set()
+    approvals.close_turn(turn_id, interrupt=True)
     try:
         active.client.turn_interrupt(active.thread_id, active.codex_turn_id)
     except AppServerError as error:

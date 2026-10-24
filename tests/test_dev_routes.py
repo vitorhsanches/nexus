@@ -442,3 +442,47 @@ class LocalDevHttpProtectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class NativeDevelopmentEndpointTest(unittest.TestCase):
+    def test_native_backend_is_forwarded_when_creating_a_session(self):
+        client = _make_client()
+        with patch("nexus.dev.service.create_dev_session", return_value={"session_id": "DEV-1", "backend": "codex_native"}) as mock_create:
+            response = client.post("/api/dev/sessions", json={"project_id": "demo", "backend": "codex_native", "requested_model": "gpt-x"})
+        self.assertEqual(response.status_code, 200)
+        mock_create.assert_called_once_with("demo", requested_model="gpt-x", backend="codex_native")
+
+    def test_unknown_backend_is_a_validation_error(self):
+        client = _make_client()
+        response = client.post("/api/dev/sessions", json={"project_id": "demo", "backend": "bogus"})
+        self.assertEqual(response.status_code, 422)
+
+    def test_native_model_catalog_comes_from_the_local_codex(self):
+        client = _make_client()
+        with patch("nexus.chat.service.list_models", return_value={"models": [], "backend": "codex_native"}) as mock_list, \
+                patch("nexus.dev.models.list_dev_models", side_effect=AssertionError("OmniRoute catalog used")):
+            response = client.get("/api/dev/models?backend=codex_native")
+        self.assertEqual(response.status_code, 200)
+        mock_list.assert_called_once_with(refresh=False, backend="codex_native")
+
+    def test_approvals_are_listed_and_decided_with_a_strict_decision(self):
+        client = _make_client()
+        with patch("nexus.dev.service.get_session_detail", return_value={"session_id": "DEV-1"}), \
+                patch("nexus.dev.approvals.list_for_session", return_value=[{"approval_id": "APPROVAL-1"}]):
+            listed = client.get("/api/dev/sessions/DEV-1/approvals")
+        self.assertEqual(listed.json(), {"approvals": [{"approval_id": "APPROVAL-1"}]})
+        with patch("nexus.dev.approvals.decide", return_value={"status": "APPROVED"}) as mock_decide:
+            decided = client.post("/api/dev/sessions/DEV-1/approvals/APPROVAL-1", json={"decision": "accept"})
+        self.assertEqual(decided.status_code, 200)
+        mock_decide.assert_called_once_with("DEV-1", "APPROVAL-1", "accept")
+        for body in ({"decision": "acceptForSession"}, {"decision": "accept", "extra": 1}, {}):
+            self.assertEqual(client.post("/api/dev/sessions/DEV-1/approvals/APPROVAL-1", json=body).status_code, 422)
+
+    def test_a_decision_on_a_stale_request_maps_to_409(self):
+        client = _make_client()
+        with patch("nexus.dev.approvals.decide",
+                   side_effect=DevServiceError("APPROVAL_NOT_PENDING", "no longer pending", http_status=409)):
+            response = client.post("/api/dev/sessions/DEV-1/approvals/APPROVAL-1", json={"decision": "accept"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["code"], "APPROVAL_NOT_PENDING")
