@@ -16,6 +16,25 @@ def model_settings_db(tmp_path, monkeypatch):
     database.initialize_database()
 
 
+def test_read_initializes_missing_model_settings_schema(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "STORAGE_DIR", tmp_path / "storage")
+    monkeypatch.setattr(database, "DATABASE_PATH", tmp_path / "storage" / "nexus.db")
+
+    qualified = {"legacy/approved-route"}
+    assert workspace_model_settings.effective_active_ids(qualified) == qualified
+    assert workspace_model_settings.read()["selection_configured"] is False
+
+    with database.get_connection() as connection:
+        names = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert "workspace_model_settings_meta" in names
+    assert "workspace_model_settings" in names
+
+
 def test_selection_defaults_to_legacy_behavior_then_persists_across_restart(model_settings_db):
     qualified = {"qualified/a", "qualified/b", "qualified/c"}
     assert workspace_model_settings.effective_active_ids(qualified) == qualified
