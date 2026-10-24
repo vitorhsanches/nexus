@@ -23,6 +23,8 @@ def create_run(
     intent: str = "GO",
     status: str = "CREATED",
     risk: str | None = None,
+    manager_mode: str = "auto",
+    manager_requested_model: str | None = None,
 ) -> str:
     run_id = f"RUN-{uuid4().hex[:8].upper()}"
 
@@ -36,9 +38,11 @@ def create_run(
                 intent,
                 status,
                 risk,
-                created_at
+                created_at,
+                manager_mode,
+                manager_requested_model
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -48,6 +52,8 @@ def create_run(
                 status,
                 risk,
                 _now(),
+                manager_mode,
+                manager_requested_model,
             ),
         )
 
@@ -144,7 +150,9 @@ def get_run(run_id: str):
                 r.started_at,
                 r.finished_at,
                 r.result,
-                r.commit_sha
+                r.commit_sha,
+                r.manager_mode,
+                r.manager_requested_model
             FROM runs r
             JOIN projects p ON p.id = r.project_id
             WHERE r.id = ?

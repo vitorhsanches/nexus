@@ -1,0 +1,175 @@
+/* Nexus Development Mode Cockpit (F2.2 Phase 4) — reuses chat.css's shared
+   .chat-* shell classes for layout/composer, adds only Dev-specific rules. */
+
+#ws-dev {
+  display: none;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+body[data-view="dev"] #overview-dashboard,
+body[data-view="dev"] .commander-strip,
+body[data-view="dev"] #ws-empty,
+body[data-view="dev"] #ws-run,
+body[data-view="dev"] #ws-program,
+body[data-view="dev"] #ws-chat,
+body[data-view="dev"] #control-panel { display: none !important; }
+
+body[data-view="dev"] #ws-dev { display: flex; }
+
+body[data-view="dev"] .topbar-chip:nth-child(-n+2) { display: none; }
+
+.dev-gate-banner {
+  margin: 0 16px 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  font: 11px/1.5 var(--mono);
+}
+
+.dev-gate-banner.dev-gate-enabled { border-color: #2e7d32; color: #2e7d32; }
+.dev-gate-banner.dev-gate-disabled { border-color: var(--border); color: var(--text-dim); background: var(--bg-2); }
+.dev-gate-banner.dev-gate-error { border-color: #b00020; color: #b00020; }
+
+.dev-project-note {
+  margin: 4px 16px 0;
+  color: var(--text-dim);
+  font: 10px/1.5 var(--mono);
+}
+
+.dev-session-panel, .dev-result-panel, .dev-changed-files-panel {
+  margin: 10px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+
+.dev-mission-panel { margin: 10px 0; padding: 10px; border: 1px solid var(--border); background: var(--surface); }
+.dev-mission-panel h2 { margin: 0 0 6px; font: 600 11px var(--mono); color: var(--text); text-transform: uppercase; }
+.dev-mission-help { margin: 0 0 8px; color: var(--text-dim); font: 10px/1.5 var(--mono); }
+.dev-mission-panel textarea { box-sizing: border-box; width: 100%; resize: vertical; }
+.dev-mission-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; }
+.dev-mission-actions select, .dev-mission-actions button { font: 10px var(--mono); }
+.dev-mission-progress { max-height: 220px; overflow: auto; margin: 8px 0 0; padding: 8px; white-space: pre-wrap; color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); font: 10px/1.5 var(--mono); }
+
+.dev-session-panel h2, .dev-result-panel h2, .dev-changed-files-panel h2 {
+  margin: 0 0 8px;
+  color: var(--text-dim);
+  font: 700 9px var(--mono);
+  text-transform: uppercase;
+}
+
+.dev-session-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow: auto; }
+
+.dev-session-item {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  padding: 6px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 10px var(--mono);
+  cursor: pointer;
+}
+
+.dev-session-item:hover, .dev-session-item.selected { border-color: var(--border); background: var(--bg); color: var(--text); }
+.dev-session-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.dev-session-empty { margin: 0; color: var(--text-dim); font: 10px var(--mono); }
+
+.dev-session-detail p { margin: 4px 0; color: var(--text-muted); font: 10px/1.5 var(--mono); overflow-wrap: anywhere; }
+.dev-session-detail strong { color: var(--text-dim); }
+.dev-session-detail p.dev-auth-ok { color: #2e7d32; }
+.dev-session-detail p.dev-auth-revoked { color: #b00020; }
+
+.dev-changed-files-empty { margin: 0; color: var(--text-dim); font: 10px var(--mono); }
+
+.dev-changed-files-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; max-height: 200px; overflow: auto; }
+
+.dev-changed-file { font: 11px var(--mono); color: var(--text); overflow-wrap: anywhere; }
+
+.dev-changed-file-badge {
+  display: inline-block;
+  min-width: 56px;
+  padding: 1px 6px;
+  margin-right: 6px;
+  border-radius: var(--radius);
+  text-align: center;
+  text-transform: uppercase;
+  font: 700 9px var(--mono);
+}
+
+.dev-changed-file-added .dev-changed-file-badge { background: #1b3a1e; color: #4caf50; }
+.dev-changed-file-modified .dev-changed-file-badge { background: #3a2f0f; color: #f9a825; }
+.dev-changed-file-deleted .dev-changed-file-badge { background: #3a1414; color: #e57373; }
+.dev-changed-file-renamed .dev-changed-file-badge,
+.dev-changed-file-copied .dev-changed-file-badge { background: #142a3a; color: #64b5f6; }
+.dev-changed-file-changed .dev-changed-file-badge { background: var(--bg); color: var(--text-dim); }
+
+.dev-review-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dev-review-heading .chat-secondary-button { padding: 5px 9px; font: 10px var(--mono); }
+.dev-review-summary, .dev-review-changed { margin: 0 0 8px; color: var(--text-dim); font: 10px/1.5 var(--mono); }
+.dev-review-changed { color: #f9a825; }
+.dev-review-layout { display: grid; grid-template-columns: minmax(180px, 28%) minmax(0, 1fr); gap: 8px; min-width: 0; }
+.dev-review-files { max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.dev-review-file { display: block; width: 100%; padding: 6px 7px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; overflow-wrap: anywhere; font: 10px/1.4 var(--mono); cursor: pointer; }
+.dev-review-file:hover, .dev-review-file.selected { background: var(--bg); }
+.dev-review-file-status { display: inline-block; margin-right: 5px; color: var(--text-dim); text-transform: uppercase; }
+.dev-review-patch { min-width: 0; max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.dev-review-patch pre { margin: 0; min-width: max-content; color: var(--text); font: 10px/1.5 var(--mono); }
+.dev-review-line { display: block; padding: 0 8px; white-space: pre; }
+.dev-review-line-add { background: #15321d; color: #a5d6a7; }
+.dev-review-line-del { background: #3a1b1b; color: #ef9a9a; }
+.dev-review-line-meta { color: #90caf9; }
+.dev-review-empty { padding: 10px; color: var(--text-dim); font: 10px/1.5 var(--mono); }
+.dev-integration-panel { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.dev-integration-gate, .dev-integration-summary, .dev-integration-message, .dev-integration-history { margin: 6px 0; color: var(--text-dim); font: 10px/1.5 var(--mono); overflow-wrap: anywhere; }
+.dev-integration-gate.off { color: #ef9a9a; }
+.dev-integration-gate.on { color: #a5d6a7; }
+.dev-integration-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.dev-integration-actions button { padding: 6px 9px; font: 10px var(--mono); }
+.dev-integration-confirm { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font: 10px/1.4 var(--mono); }
+.dev-integration-message.error { color: #ef9a9a; }
+.dev-integration-message.ready { color: #a5d6a7; }
+.dev-integration-history summary { cursor: pointer; }
+.dev-integration-history-row { padding: 5px 0; border-top: 1px solid var(--border); }
+.dev-integration-issue { color: #ef9a9a; }
+@media (max-width: 700px) { .dev-review-layout { grid-template-columns: minmax(0, 1fr); } .dev-review-files { max-height: 150px; } .dev-review-patch { max-height: 300px; } }
+
+.dev-turn-result {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  font: 11px/1.5 var(--mono);
+}
+
+.dev-activity-status { font-weight: 700; }
+.dev-activity-status-running { color: #f9a825; }
+.dev-activity-status-completed { color: #2e7d32; }
+.dev-activity-status-failed { color: #b00020; }
+.dev-activity-status-interrupted { color: #ef6c00; }
+.dev-activity-status-idle { color: var(--text-dim); }
+
+.dev-connection-status {
+  padding: 1px 8px;
+  border-radius: var(--radius);
+  font: 700 9px var(--mono);
+  text-transform: uppercase;
+}
+
+.dev-connection-status-connected { color: #2e7d32; }
+.dev-connection-status-reconnecting { color: #f9a825; background: #3a2f0f; }
+.dev-connection-status-lost { color: #e57373; background: #3a1414; }

@@ -465,7 +465,7 @@ class CapabilityAndRiskGateTestCase(unittest.TestCase):
             ),
             resources=resources(
                 opencode=99,
-                codex=1,
+                codex=50,
             ),
         )
 
@@ -682,7 +682,7 @@ class ExactHeadroomRankingTestCase(unittest.TestCase):
 
 class RouteSelectionTestCase(unittest.TestCase):
 
-    def test_claude_80_beats_codex_3(self):
+    def test_claude_80_beats_codex_50_when_cost_equal(self):
         selected = select_best_route(
             RoutingRequest(
                 capability="standard-coding"
@@ -702,10 +702,7 @@ class RouteSelectionTestCase(unittest.TestCase):
             "claude",
         )
 
-        self.assertEqual(
-            selected.fallbacks[0].route.provider,
-            "codex",
-        )
+        self.assertEqual(selected.fallbacks, ())
 
     def test_exhausted_provider_excluded(self):
         selected = select_best_route(
@@ -822,7 +819,7 @@ class RouteSelectionTestCase(unittest.TestCase):
             resources=resources(
                 high=90,
                 mid=25,
-                low=5,
+                low=20,
             ),
         )
 
@@ -903,6 +900,26 @@ class RouteSelectionTestCase(unittest.TestCase):
                 ),
                 resources={},
             )
+
+    def test_route_exhaustion_reports_structured_candidate_rejections(self):
+        request = RoutingRequest(
+            capability="advanced-coding",
+            blocked_models=frozenset({CLAUDE.model_id}),
+        )
+
+        with self.assertRaises(NoEligibleRouteError) as ctx:
+            select_best_route(request, catalog=(CLAUDE,), resources={})
+
+        self.assertEqual(
+            ctx.exception.rejections,
+            ({
+                "model": CLAUDE.model_id,
+                "provider": CLAUDE.provider,
+                "effort": CLAUDE.effort,
+                "reason": "blocked_model",
+            },),
+        )
+        self.assertIn("Candidate rejections:", str(ctx.exception))
 
     def test_reason_contains_capability_risk_and_resource(self):
         selected = select_best_route(

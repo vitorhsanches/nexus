@@ -1,43 +1,107 @@
+"""Shared Run/Program ownership with conservative native process checks."""
+
+import ctypes
+import errno
 import os
 import socket
-import ctypes
-from datetime import datetime, timezone
+from ctypes import wintypes
+from datetime import UTC, datetime, timedelta
+from functools import lru_cache
+
 from nexus.registry.database import get_connection
+
+# Acquisition timestamps in old Python/Windows environments can have lower
+# resolution than process FILETIME. A small positive delta is not PID reuse.
+PID_REUSE_CLOCK_MARGIN = timedelta(seconds=1)
+
+
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
+
+
 def current_host():
     return socket.gethostname()
+
+
 def current_pid():
     return os.getpid()
+
+
+def _valid_pid(pid):
+    if isinstance(pid, bool) or not isinstance(pid, (int, str)):
+        return None
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value <= 0xFFFFFFFF else None
+
+
+@lru_cache(maxsize=1)
+def _windows_api():
+    # HANDLE is pointer-sized on Windows x64. Do not use ctypes' default int
+    # return type or share mutable function prototypes with unrelated callers.
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    api.OpenProcess.restype = wintypes.HANDLE
+    api.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    api.GetExitCodeProcess.restype = wintypes.BOOL
+    filetime_pointer = ctypes.POINTER(wintypes.FILETIME)
+    api.GetProcessTimes.argtypes = [wintypes.HANDLE] + [filetime_pointer] * 4
+    api.GetProcessTimes.restype = wintypes.BOOL
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    return api
+
+
+def _windows_process_info(pid):
+    """Return (alive/dead/unknown, creation time); only evidence allows dead."""
+    handle = None
+    try:
+        api = _windows_api()
+        handle = api.OpenProcess(0x1000, False, pid)
+        if not handle:
+            # A valid, positive DWORD PID absent from the process table gives
+            # ERROR_INVALID_PARAMETER. Access denied and all other errors are
+            # unavailable evidence, not proof that the owner has exited.
+            return ("dead" if ctypes.get_last_error() == 87 else "unknown"), None
+        exit_code = wintypes.DWORD()
+        if not api.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return "unknown", None
+        if exit_code.value != 259:  # STILL_ACTIVE
+            return "dead", None
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not api.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+            return "alive", None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        if ticks < 116444736000000000:
+            return "alive", None
+        # Avoid floating point rounding of 64-bit FILETIME timestamps.
+        timestamp = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=(ticks - 116444736000000000) // 10)
+        return "alive", timestamp
+    except (OSError, AttributeError, OverflowError, ValueError):
+        return "unknown", None
+    finally:
+        if handle:
+            api.CloseHandle(handle)
+
+
 def is_pid_alive(pid):
-    if pid is None:
-        return False
+    """True=active, False=proven exited, None=invalid or unavailable evidence."""
+    value = _valid_pid(pid)
+    if value is None:
+        return None
+    if os.name == "nt":
+        status, _created = _windows_process_info(value)
+        return {"alive": True, "dead": False, "unknown": None}[status]
     try:
-        pid=int(pid)
-    except Exception:
-        return False
-    if pid<=0:
-        return False
-    try:
-        if os.name=="nt":
-            k32=ctypes.windll.kernel32
-            handle=k32.OpenProcess(0x1000, False, pid)
-            if handle:
-                k32.CloseHandle(handle)
-                return True
+        os.kill(value, 0)
+        return True
+    except OSError as error:
+        if error.errno == errno.ESRCH:
             return False
-        else:
-            os.kill(pid,0)
-            return True
-    except OSError as e:
-        import errno
-        if getattr(e,'errno',None)==errno.ESRCH:
-            return False
-        if getattr(e,'errno',None)==errno.EPERM:
-            return True
-        return False
-    except Exception:
-        return False
+        return None
+
 def ensure_ownership_columns():
     with get_connection() as conn:
         cols=[r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()]
@@ -69,18 +133,50 @@ def establish_ownership(run_id):
             return
         conn.execute("UPDATE runs SET owner_host=?, owner_pid=?, owner_acquired_at=? WHERE id=?",(host,pid,now,run_id))
         conn.commit()
-def classify_ownership(owner_host, owner_pid):
-    if owner_host is None or owner_pid is None:
+
+def get_process_created_at(pid):
+    """Return a native UTC creation time, or None when identity is unavailable."""
+    value = _valid_pid(pid)
+    if value is None or os.name != "nt":
+        return None
+    status, created = _windows_process_info(value)
+    return created if status == "alive" else None
+
+
+def classify_ownership(owner_host, owner_pid, owner_acquired_at=None):
+    if owner_host is None and owner_pid is None:
         return "unowned"
+    if not owner_host:
+        return "unknown"
     if owner_host != current_host():
-        if not owner_host:
-            return "unknown"
         return "foreign_host"
-    if int(owner_pid) == current_pid():
+    pid = _valid_pid(owner_pid)
+    if pid is None:
+        return "unknown"
+    if pid == current_pid():
         return "current_process"
-    if is_pid_alive(int(owner_pid)):
-        return "live_same_host"
-    return "dead_same_host"
+    alive = is_pid_alive(pid)
+    if alive is None:
+        return "unknown"
+    if alive is False:
+        return "dead_same_host"
+    if owner_acquired_at is not None:
+        created = get_process_created_at(pid)
+        if created is not None:
+            try:
+                acquired = datetime.fromisoformat(owner_acquired_at)
+                if acquired.tzinfo is None:
+                    return "unknown"
+                if created > acquired + PID_REUSE_CLOCK_MARGIN:
+                    return "dead_same_host"
+                if created > acquired:
+                    # Within clock precision, identity is ambiguous. Block
+                    # recovery rather than calling a known live PID dead.
+                    return "unknown"
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                return "unknown"
+    return "live_same_host"
+
 def try_acquire_for_recovery(run_id):
     ensure_ownership_columns()
     host=current_host()
@@ -99,7 +195,7 @@ def try_acquire_for_recovery(run_id):
         owner_host=row["owner_host"]
         owner_pid=row["owner_pid"]
         cls=classify_ownership(owner_host, owner_pid)
-        if cls!="dead_same_host":
+        if cls not in ("dead_same_host", "unowned"):
             conn.rollback()
             return False
         conn.execute("UPDATE runs SET owner_host=?, owner_pid=?, owner_acquired_at=? WHERE id=?",(host,pid,now,run_id))

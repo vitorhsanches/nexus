@@ -7,6 +7,9 @@ graph logic can be unit tested without any global state.
 
 from dataclasses import dataclass
 
+from nexus.orchestration.graph import GraphCycleError
+from nexus.orchestration.graph import detect_cycle as _generic_detect_cycle
+
 
 class MissionDependencyError(ValueError):
     """Raised when a Mission's Task dependency graph is invalid."""
@@ -69,31 +72,19 @@ def validate_dependencies(mission_id, mission_tasks, known_tasks):
 
 
 def _detect_cycle(mission_tasks):
-    """Raise MissionDependencyError if the Mission's Tasks form a cycle."""
+    """Raise MissionDependencyError if the Mission's Tasks form a cycle.
+
+    Delegates to the generic, shared cycle-detection primitive in
+    nexus.orchestration.graph so the Task DAG (this module) and the GO
+    plan Worker DAG (nexus.orchestration.dag) run the exact same
+    algorithm instead of two independently-maintained implementations.
+    """
     graph = {task.task_id: _dependency_ids(task) for task in mission_tasks}
 
-    WHITE, GRAY, BLACK = 0, 1, 2
-    color = {task_id: WHITE for task_id in graph}
-
-    def visit(task_id, stack):
-        color[task_id] = GRAY
-        for dep_id in graph.get(task_id, []):
-            if dep_id not in graph:
-                # Dependency outside this Mission's task set (already
-                # validated as belonging to this Mission or rejected above).
-                continue
-            if color[dep_id] == GRAY:
-                raise MissionDependencyError(
-                    "Dependency cycle detected involving task "
-                    f"{dep_id!r} (via {' -> '.join(stack + [dep_id])})."
-                )
-            if color[dep_id] == WHITE:
-                visit(dep_id, stack + [dep_id])
-        color[task_id] = BLACK
-
-    for task_id in graph:
-        if color[task_id] == WHITE:
-            visit(task_id, [task_id])
+    try:
+        _generic_detect_cycle(graph)
+    except GraphCycleError as error:
+        raise MissionDependencyError(str(error)) from error
 
 
 def is_eligible(task, tasks_by_id):

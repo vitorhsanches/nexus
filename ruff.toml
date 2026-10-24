@@ -1,0 +1,13 @@
+# Nexus Quality Gates (F3.5): minimal Ruff configuration.
+#
+# No rules are disabled or globally ignored here. The pinned Ruff version
+# in requirements-dev.txt determines the default rule selection; this file
+# only sets Python compatibility and never hides findings to produce a
+# green report. The existing baseline (830 violations with Ruff 0.17.1,
+# documented in docs/NEXUS_ARCHITECTURE_CONSOLIDATION_PLAN.md section 4.3)
+# is handled by making the CI lint step non-blocking for now -- see
+# .github/workflows/ci.yml -- not by suppressing rules here. The intended
+# path is gradual: as violations are cleaned up (directory by directory,
+# or file by file), the CI step can be promoted from monitoring-only to a
+# real, blocking gate once a scope is actually proven clean.
+target-version = "py312"

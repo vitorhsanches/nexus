@@ -220,16 +220,25 @@ class RuntimeCatalogOverlayTests(unittest.TestCase):
         # deny-list check remains authoritative downstream in the router.
 
     def test_approved_model_present_at_runtime_stays_enabled(self):
+        # Only include models that are already enabled in the approved catalog.
+        # Routes enabled in the static catalog must remain enabled when their
+        # model is present at runtime; statically-disabled routes (such as
+        # oc/big-pickle, whose execution context is not yet qualified) are
+        # intentionally excluded here because the overlay preserves their
+        # disabled status regardless of runtime discovery.
+        enabled_model_ids = {
+            r.model_id for r in APPROVED_CATALOG if r.enabled
+        }
         snapshot = OmniRouteTelemetrySnapshot(
-            discovered_models=(
-                DiscoveredModel(model_id="cc/claude-sonnet-5-low", provider="claude"),
-                DiscoveredModel(model_id="cc/claude-sonnet-5-high", provider="claude"),
-                DiscoveredModel(model_id="oc/big-pickle", provider="opencode"),
+            discovered_models=tuple(
+                DiscoveredModel(model_id=mid, provider="claude")
+                for mid in enabled_model_ids
             )
         )
         overlay = build_runtime_catalog(APPROVED_CATALOG, snapshot)
         for route in overlay:
-            self.assertTrue(route.enabled)
+            if route.model_id in enabled_model_ids:
+                self.assertTrue(route.enabled, f"{route.model_id} should be enabled")
 
 
 class QuotaNormalizationTests(unittest.TestCase):

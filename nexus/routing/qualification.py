@@ -172,3 +172,136 @@ def promoted_route_for_qualified_high_coding() -> ModelRoute:
         cost_class=reference.cost_class,
         quality_tier=reference.quality_tier,
     )
+
+
+# ---------------------------------------------------------------------------
+# Nexus D4.5 NVIDIA Nemotron advanced-coding qualification
+# ---------------------------------------------------------------------------
+#
+# Qualified on 2026-09-25.
+#
+# Exact identity:
+#   model_id        = nvidia/nemotron-3-super-120b-a12b
+#   provider        = nvidia
+#   execution_path  = OMNIROUTE
+#   effort          = low
+#   capability      = advanced-coding
+#   max_risk_level  = medium
+#
+# Qualification evidence (D4.4 framework):
+#   exact-identity-check: PASS (returned identity matches requested)
+#   host-validation: PASS (valid JSON 200 via OmniRoute /v1/responses)
+#   semantic-review: PASS (deterministic sentinel NEXUS_D44_SENTINEL_7F3A)
+#
+# Provider: NVIDIA direct (not OpenRouter variant). Provides provider
+# diversity for the advanced-coding fleet beyond Claude-only.
+#
+# OpenRouter returns the provider-canonical identity without its routing
+# namespace; qualification compares that identity through the generic
+# benchmark canonicalization contract.
+#
+# Cost metadata absent from OmniRoute for the nvidia provider.
+# cost_class set to "unknown"; no pricing value invented.
+
+CANDIDATE_NVIDIA_NEMOTRON_CODING_ROUTE = ModelRoute(
+    model_id="nvidia/nemotron-3-super-120b-a12b",
+    provider="nvidia",
+    execution_path="OMNIROUTE",
+    effort="low",
+    capabilities=frozenset({"advanced-coding"}),
+    max_risk_level=RiskLevel.MEDIUM.value,
+    approved=False,
+    enabled=True,
+    experimental=True,
+    cost_class="unknown",
+    quality_tier="standard",
+)
+
+
+def is_exact_nvidia_nemotron_coding_candidate_identity(
+    model_id: str,
+    provider: str,
+    execution_path: str,
+    effort: str,
+) -> bool:
+    """Match only the exact D4.5 NVIDIA Nemotron advanced-coding candidate."""
+
+    reference = CANDIDATE_NVIDIA_NEMOTRON_CODING_ROUTE
+
+    return (
+        model_id == reference.model_id
+        and provider == reference.provider
+        and execution_path == reference.execution_path
+        and effort == reference.effort
+    )
+
+
+def promoted_route_for_qualified_nvidia_nemotron_coding() -> ModelRoute:
+    """Build the exact production route after successful D4.5 qualification."""
+
+    reference = CANDIDATE_NVIDIA_NEMOTRON_CODING_ROUTE
+
+    return ModelRoute(
+        model_id=reference.model_id,
+        provider=reference.provider,
+        execution_path=reference.execution_path,
+        effort=reference.effort,
+        capabilities=reference.capabilities,
+        max_risk_level=reference.max_risk_level,
+        approved=True,
+        enabled=True,
+        experimental=False,
+        cost_class=reference.cost_class,
+        quality_tier=reference.quality_tier,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter North Mini Code advanced-coding qualification
+# ---------------------------------------------------------------------------
+
+CANDIDATE_NORTH_MINI_CODING_ROUTE = ModelRoute(
+    model_id="openrouter/cohere/north-mini-code:free",
+    provider="openrouter",
+    execution_path="OMNIROUTE",
+    effort="low",
+    capabilities=frozenset({"advanced-coding"}),
+    max_risk_level=RiskLevel.MEDIUM.value,
+    approved=False,
+    enabled=True,
+    experimental=True,
+    cost_class="free",
+    quality_tier="standard",
+)
+
+
+def is_exact_north_mini_coding_candidate_identity(
+    model_id: str,
+    provider: str,
+    execution_path: str,
+    effort: str,
+) -> bool:
+    reference = CANDIDATE_NORTH_MINI_CODING_ROUTE
+    return (
+        model_id == reference.model_id
+        and provider == reference.provider
+        and execution_path == reference.execution_path
+        and effort == reference.effort
+    )
+
+
+def promoted_route_for_qualified_north_mini_coding() -> ModelRoute:
+    reference = CANDIDATE_NORTH_MINI_CODING_ROUTE
+    return ModelRoute(
+        model_id=reference.model_id,
+        provider=reference.provider,
+        execution_path=reference.execution_path,
+        effort=reference.effort,
+        capabilities=reference.capabilities,
+        max_risk_level=reference.max_risk_level,
+        approved=True,
+        enabled=True,
+        experimental=False,
+        cost_class=reference.cost_class,
+        quality_tier=reference.quality_tier,
+    )

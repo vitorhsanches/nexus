@@ -782,6 +782,42 @@ def resume_run(run_id: str) -> dict:
 
     checkpoints = list_checkpoints(run_id)
 
+    # -- 0. Phase 2 Multi-Agent MVP: refuse to resume a Run that was
+    # executed by the round-based concurrent scheduler. This resume
+    # mechanism (ordinal contiguity, per-Worker checkpoint sequencing)
+    # assumes Worker lifecycle checkpoints are never interleaved, an
+    # assumption the concurrent scheduler in orchestration/go.py can
+    # violate (two Workers of the same round persist their EXECUTION_START
+    # / WORKER_ATTEMPT / REVIEW / LIFECYCLE checkpoints in whatever order
+    # their threads happen to reach the database). Rather than silently
+    # re-executing a Worker or corrupting state, fail closed with a clear,
+    # distinct diagnostic. A Run with no execution_model at all (recorded
+    # before Phase 2 existed) or "sequential" (single-Worker plans, still
+    # fully supported) is unaffected and proceeds exactly as before.
+    plan_approved_checkpoints = [
+        checkpoint
+        for checkpoint in checkpoints
+        if checkpoint.get("boundary") == "PLAN_APPROVED"
+    ]
+
+    if plan_approved_checkpoints:
+        last_plan_approved_payload = plan_approved_checkpoints[-1].get(
+            "payload"
+        ) or {}
+
+        if last_plan_approved_payload.get("execution_model") == "round_based":
+            raise ResumeError(
+                "CONCURRENT_RESUME_UNSUPPORTED",
+                f"Run {run_id!r} was executed by the round-based "
+                "concurrent Worker scheduler (more than one Worker, "
+                "executed via ThreadPoolExecutor); resuming a partially "
+                "executed concurrent Run is not supported in this phase "
+                "because its per-Worker checkpoint sequence may be "
+                "interleaved. Re-run the request from scratch instead of "
+                "resuming this run_id.",
+                run_id=run_id,
+            )
+
     # -- 1. Durable PLAN_APPROVED checkpoint is mandatory. -------------
     manager_id = _resolve_manager_id(run_id, checkpoints)
 
@@ -919,6 +955,37 @@ def resume_run(run_id: str) -> dict:
                         "error",
                         "No further escalation route available.",
                     ),
+                    run_id=run_id,
+                )
+
+            if reason == "INITIAL_ROUTING_UNAVAILABLE":
+                # Resume always supplies resume_state, so
+                # resolve_initial_worker_route() (the only source of this
+                # reason) never runs here today -- this branch exists for
+                # defense in depth and to keep resume.py's failure labels
+                # consistent with go.py's: this is not a Manager Review
+                # outcome and must never be reported as one.
+                update_run_status(run_id, "BLOCKED")
+                record_checkpoint(
+                    run_id=run_id,
+                    boundary="RUN_TERMINAL",
+                    payload={
+                        "status": "BLOCKED",
+                        "reason": "INITIAL_ROUTING_UNAVAILABLE",
+                        "error": outcome.get("error"),
+                        "error_type": outcome.get("error_type"),
+                        "route_class": outcome.get("route_class"),
+                        "capability": outcome.get("capability"),
+                        "risk": outcome.get("risk"),
+                    },
+                    worker_ordinal=worker_ordinal,
+                )
+                raise ResumeError(
+                    "INITIAL_ROUTING_UNAVAILABLE",
+                    "Initial adaptive routing could not resolve a Worker "
+                    "route for this plan; no Worker executed and no "
+                    "review step ran: "
+                    f"{outcome.get('error', reason)}",
                     run_id=run_id,
                 )
 

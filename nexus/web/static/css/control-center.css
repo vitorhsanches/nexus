@@ -1,0 +1,867 @@
+/* Nexus Control Center — Phase 2 information architecture.
+   Extends the shared tokens and preserves all legacy detail-view selectors. */
+
+:root {
+  --nexus-amber: #f59e0b;
+  --nexus-amber-soft: rgba(245, 158, 11, 0.12);
+  --panel-black: #0a0e13;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.brand-icon {
+  background: var(--nexus-amber);
+  color: #14100a;
+  border-radius: 3px;
+}
+
+.brand-name,
+.brand-subtitle { display: block; }
+
+.brand-subtitle {
+  margin-top: 1px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
+
+.primary-nav {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 2px;
+  color: var(--text-muted);
+  background: transparent;
+  font: 600 11px/1.2 var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-item span {
+  color: var(--text-dim);
+  font: 9px var(--mono);
+}
+
+.nav-item:hover,
+.nav-item:focus-visible {
+  color: var(--text);
+  background: var(--bg-2);
+}
+
+.nav-item.active {
+  color: var(--nexus-amber);
+  border-left-color: var(--nexus-amber);
+  background: var(--nexus-amber-soft);
+}
+
+.sidebar-footer {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.sidebar-footer-link {
+  color: var(--text-dim);
+  font-size: 9px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.sidebar-footer-link:hover { color: var(--text); }
+.sidebar-footer-link.disabled { opacity: 0.55; }
+
+.topbar {
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.context-tabs,
+.topbar-context {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.context-tabs { gap: 2px; overflow: hidden; }
+.topbar-context { gap: 12px; flex-shrink: 0; }
+
+/* Context tabs label the runtime; they are not navigation, so they stay quiet. */
+.context-tab {
+  padding: 4px 8px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  border-bottom: 1px solid transparent;
+  font: 10px var(--mono);
+  white-space: nowrap;
+}
+
+.context-tab.active {
+  color: var(--nexus-amber);
+  border-bottom-color: var(--nexus-amber);
+  opacity: 1;
+}
+
+.view-mode-badge.vm-overview {
+  color: var(--nexus-amber);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.overview-dashboard {
+  order: 1;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px;
+  background:
+    linear-gradient(rgba(42, 51, 71, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(42, 51, 71, 0.06) 1px, transparent 1px),
+    var(--bg);
+  background-size: 32px 32px;
+}
+
+body[data-view="detail"] .overview-dashboard { display: none; }
+body[data-view="overview"] .workspace-area { display: none; }
+body[data-view="overview"] .control-panel { display: none; }
+
+.workspace-area { order: 2; }
+.commander-strip { order: 3; }
+
+.overview-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 14px;
+}
+
+.eyebrow,
+.panel-kicker {
+  color: var(--nexus-amber);
+  font: 700 9px/1.2 var(--mono);
+  letter-spacing: 0.14em;
+}
+
+.overview-header h1 {
+  margin: 5px 0 2px;
+  color: #e6edf3;
+  font: 600 23px/1.2 var(--sans);
+  letter-spacing: -0.02em;
+}
+
+.overview-header p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.overview-statuses {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ops-badge {
+  padding: 4px 7px;
+  border: 1px solid var(--border-2);
+  border-radius: 3px;
+  color: var(--text-muted);
+  background: var(--bg-1);
+  font: 700 9px var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.ops-badge.online,
+.ops-badge.trusted { color: var(--green); border-color: rgba(34, 197, 94, 0.35); }
+.ops-badge.degraded,
+.ops-badge.safe { color: var(--yellow); border-color: rgba(234, 179, 8, 0.35); }
+.ops-badge.offline { color: var(--red); border-color: rgba(239, 68, 68, 0.35); }
+
+.runtime-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: 1px solid var(--border);
+  background: rgba(10, 14, 19, 0.92);
+  margin-bottom: 10px;
+}
+
+.runtime-strip > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-right: 1px solid var(--border);
+  min-width: 0;
+}
+
+.runtime-strip > div:last-child { border-right: 0; }
+.runtime-strip span { color: var(--text-dim); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+.runtime-strip strong { color: var(--text); font: 700 10px var(--mono); white-space: nowrap; }
+.runtime-strip strong[data-state="good"] { color: var(--green); }
+.runtime-strip strong[data-state="warn"] { color: var(--yellow); }
+.runtime-strip strong[data-state="bad"] { color: var(--red); }
+
+/* Counts read as one instrument strip: quieter than the featured Program. */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-strip);
+}
+
+.kpi-card {
+  min-width: 0;
+  padding: 8px 12px;
+  border-right: 1px solid var(--border);
+  transition: background 0.15s ease;
+}
+
+.kpi-card:last-child { border-right: 0; }
+.kpi-card:hover { background: rgba(32, 39, 54, 0.45); }
+
+.kpi-card > span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.kpi-card strong {
+  display: block;
+  margin: 3px 0 1px;
+  color: var(--text);
+  font: 600 17px/1.1 var(--mono);
+}
+
+.kpi-card small { color: var(--text-dim); font-size: 8.5px; }
+
+.ops-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(310px, 0.85fr);
+  grid-template-areas:
+    "program routing"
+    "terminal side";
+  gap: 10px;
+  align-items: stretch;
+}
+
+.ops-panel {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: rgba(13, 17, 23, 0.96);
+  box-shadow: var(--shadow-1);
+}
+
+/* Featured Program: the one amber-accented panel that anchors the page. */
+.program-progress {
+  grid-area: program;
+  position: relative;
+  border-color: rgba(245, 158, 11, 0.28);
+  box-shadow: var(--glow-featured);
+}
+
+.program-progress::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: linear-gradient(90deg, var(--nexus-amber), transparent);
+}
+
+.program-progress .panel-heading h2 { font-size: 14px; }
+.routing-panel { grid-area: routing; }
+.live-terminal { grid-area: terminal; min-height: 330px; display: flex; flex-direction: column; }
+.ops-side-stack { grid-area: side; display: grid; grid-template-rows: minmax(150px, 1fr) minmax(150px, 1fr); gap: 10px; min-width: 0; }
+
+.panel-heading {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-heading h2 {
+  margin: 3px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.text-action,
+.command-open {
+  border: 1px solid var(--border-2);
+  border-radius: 2px;
+  background: var(--bg-1);
+  color: var(--text-muted);
+  padding: 4px 7px;
+  font: 700 9px var(--mono);
+  cursor: pointer;
+}
+
+.text-action:hover:not(:disabled),
+.text-action.active,
+.command-open:hover { color: var(--nexus-amber); border-color: rgba(245, 158, 11, 0.45); }
+.text-action.active { box-shadow: 0 0 8px rgba(245, 158, 11, 0.18); }
+.text-action:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* One consistent keyboard focus treatment across the control center. */
+.nav-item:focus-visible,
+.text-action:focus-visible,
+.command-open:focus-visible,
+.kpi-card:focus-visible,
+.mission-actions summary:focus-visible {
+  outline: 1px solid var(--status-info);
+  outline-offset: 2px;
+}
+
+.ops-panel { transition: border-color 0.15s ease; }
+.ops-panel:hover { border-color: var(--border-2); }
+.program-progress:hover { border-color: rgba(245, 158, 11, 0.4); }
+.panel-count { color: var(--text-muted); font: 10px var(--mono); }
+
+.program-meta {
+  padding: 8px 11px 0;
+  color: var(--text-muted);
+  font: 10px/1.5 var(--mono);
+}
+
+.program-progress-bar {
+  height: 3px;
+  margin: 9px 11px 7px;
+  overflow: hidden;
+  background: var(--bg-3);
+}
+
+.program-progress-bar span {
+  display: block;
+  height: 100%;
+  background: var(--nexus-amber);
+  transition: width 0.2s ease;
+}
+
+.program-phase-track {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 1px;
+  padding: 0 11px 11px;
+}
+
+.phase-step {
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel-black);
+}
+
+.phase-step .phase-index { color: var(--text-dim); font: 8px var(--mono); }
+.phase-step .phase-title { overflow: hidden; color: var(--text-muted); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+.phase-step .phase-status { color: var(--text-dim); font: 700 8px var(--mono); }
+.phase-step.done .phase-status { color: var(--green); }
+.phase-step.running { border-color: rgba(59, 130, 246, 0.5); }
+.phase-step.running .phase-status { color: var(--accent-hl); }
+.phase-step.failed .phase-status,
+.phase-step.blocked .phase-status { color: var(--red); }
+
+.routing-policy {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font: 9px var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routing-table-wrap { max-height: 190px; overflow: auto; }
+.routing-table { width: 100%; border-collapse: collapse; font-size: 9.5px; }
+.routing-table th { position: sticky; top: 0; z-index: 1; color: var(--text-dim); background: var(--bg-1); text-align: left; text-transform: uppercase; font-size: 8px; letter-spacing: 0.05em; }
+.routing-table th,
+.routing-table td { padding: 6px 7px; border-bottom: 1px solid rgba(42, 51, 71, 0.7); vertical-align: top; }
+.route-provider { display: block; color: var(--text-dim); font-size: 8px; text-transform: uppercase; }
+.route-model { display: block; max-width: 200px; color: var(--text); font: 9px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.route-capability {
+  color: var(--text-dim);
+  font-size: 9px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.route-state {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+  font: 700 8px/1.5 var(--mono);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.route-state.healthy,
+.route-state.yes,
+.route-state.available { color: var(--status-ok); }
+.route-state.auth-required,
+.route-state.unknown { color: var(--status-warn); }
+.route-state.degraded,
+.route-state.no,
+.route-state.unavailable,
+.route-state.disabled { color: var(--status-err); }
+
+.routing-table tbody tr:hover td { background: rgba(32, 39, 54, 0.4); }
+
+.terminal-actions { display: flex; gap: 5px; }
+.terminal-context { display: flex; justify-content: space-between; gap: 10px; padding: 5px 10px; border-bottom: 1px solid var(--border); color: var(--text-dim); font: 8.5px var(--mono); }
+.terminal-context > span:first-child::before { content: "› "; color: var(--status-info); }
+.terminal-output { flex: 1; min-height: 230px; max-height: 390px; overflow: auto; padding: 8px 10px; background: var(--surface-inset); font: 10px/1.55 var(--mono); }
+.terminal-output:focus-visible { outline: 1px solid var(--status-info); outline-offset: -1px; }
+.terminal-line { display: grid; grid-template-columns: 68px 58px minmax(110px, 0.45fr) minmax(0, 1fr); gap: 8px; padding: 1px 4px; margin: 0 -4px; border-radius: 2px; color: var(--text-muted); }
+.terminal-line:hover { background: rgba(59, 130, 246, 0.06); }
+.terminal-time { color: var(--text-dim); }
+.terminal-level { color: var(--cyan); }
+.terminal-level.warn { color: var(--yellow); }
+.terminal-level.error { color: var(--red); }
+.terminal-event { color: var(--accent-hl); overflow: hidden; text-overflow: ellipsis; }
+.terminal-detail { overflow-wrap: anywhere; }
+.terminal-empty,
+.ops-empty { padding: 12px; color: var(--text-dim); font-size: 10px; text-align: center; }
+
+.compact-panel { min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.signal-list { min-height: 0; overflow: auto; }
+.signal-item { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 7px; padding: 6px 9px; border-bottom: 1px solid rgba(42, 51, 71, 0.65); }
+.signal-time { color: var(--text-dim); font: 8px var(--mono); }
+.signal-title {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.signal-title strong { display: block; color: var(--text); font: 9px var(--mono); }
+.signal-item.warn strong { color: var(--status-warn); }
+.signal-item.error strong { color: var(--status-err); }
+.signal-item.success strong { color: var(--status-ok); }
+.signal-item:hover { background: rgba(32, 39, 54, 0.4); }
+
+/* Recent activity is supporting context: quieter than recovery signals. */
+#overview-activity { opacity: 0.82; }
+#overview-activity .signal-title { color: var(--text-dim); }
+
+.commander-strip {
+  display: block;
+  padding: 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+  background: #090d12;
+}
+
+.command-palette {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 0.5fr);
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+}
+
+.command-palette label { color: var(--nexus-amber); font: 700 11px var(--mono); }
+.command-palette input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: 10.5px var(--mono); }
+.command-palette input::placeholder { color: var(--text-dim); }
+.command-feedback { overflow: hidden; color: var(--text-dim); font: 9px var(--mono); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+
+.mission-actions { border-top: 1px solid var(--border); }
+.mission-actions summary { padding: 5px 12px; color: var(--text-dim); font: 700 9px var(--mono); cursor: pointer; list-style-position: inside; }
+.mission-actions[open] summary { color: var(--nexus-amber); }
+.mission-action-body { display: grid; grid-template-columns: 150px 190px auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 0 12px 8px; }
+.action-disabled-reason { grid-column: 1 / -1; margin: 0; color: var(--yellow); font: 9.5px var(--mono); }
+
+body[data-view="overview"] .ws-empty-state { display: none; }
+
+@media (max-width: 1280px) {
+  .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ops-grid { grid-template-columns: minmax(0, 1.45fr) minmax(290px, 0.8fr); }
+  .context-tab:nth-child(n+4) { display: none; }
+  .overview-dashboard { padding: 16px; }
+}
+
+@media (max-width: 1100px) {
+  :root { --sidebar-w: 196px; }
+  .ops-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "program" "terminal" "routing" "side";
+  }
+  .ops-side-stack { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(180px, auto); }
+  .runtime-strip { grid-template-columns: repeat(2, 1fr); }
+  .runtime-strip > div:nth-child(2) { border-right: 0; }
+  .runtime-strip > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+  .topbar-chip:nth-child(-n+2) { display: none; }
+  .routing-table-wrap { max-height: 260px; }
+}
+
+@media (max-width: 900px) {
+  .context-tabs { display: none; }
+  .topbar { justify-content: flex-end; }
+  .overview-header { flex-direction: column; gap: 10px; }
+  .overview-statuses { justify-content: flex-start; }
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ops-side-stack { grid-template-columns: 1fr; }
+  .command-palette { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .command-feedback { display: none; }
+  .mission-action-body { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Run view: terminal workflow ─────────────────────────────────────────
+   Run-view layout: a dominant live trace, a compact side column, and the
+   agent cards behind a disclosure. Element IDs and classes used by the
+   scripts are unchanged; this block only adjusts presentation. */
+
+/* The run header already names the project and run, so the top bar chips
+   would repeat that context. */
+body[data-view="detail"] .topbar-chip:nth-child(-n+2) { display: none; }
+
+/* Pipeline: a thin connected process line instead of boxed stages. */
+.lifecycle-bar {
+  padding: 12px 22px 10px;
+  background: transparent;
+  border-bottom: 1px solid var(--border);
+}
+
+.lifecycle-stage { gap: 6px; }
+
+.lifecycle-stage:not(:last-child)::after {
+  top: 8px;
+  height: 1px;
+  background: var(--border-2);
+}
+
+.lifecycle-stage.done:not(:last-child)::after { background: var(--status-ok); }
+
+.stage-dot {
+  width: 18px;
+  height: 18px;
+  font-size: 9px;
+}
+
+.stage-label {
+  font: 600 9.5px var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Two-column body. */
+.run-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* The stack never shrinks its sections: the body scrolls as a whole. An
+   explicit min-height on panel cards would otherwise let the flex column
+   squeeze a section into the space of the one below it. */
+.run-body > * { flex-shrink: 0; }
+
+.run-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(260px, 0.75fr);
+  gap: 12px;
+  align-items: start;
+}
+
+/* Agent panes: promoted to a full-width row above the trace/side columns --
+   the central, always-visible focus of the run view (Cockpit Phase 1). */
+.agent-panes { grid-column: 1 / -1; }
+
+.run-trace { overflow: visible; }
+/* The timeline scrolls itself; a clipping trace would let the grid size
+   its row from the side column alone and overlap the bottom panels. */
+.run-trace .timeline { max-height: 60vh; overflow-y: auto; }
+.run-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.run-bottom { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* Column headers share the terminal prompt marker. */
+.run-col-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font: 700 9.5px var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.run-col-title::before { content: "› "; color: var(--status-info); }
+.run-col-note { color: var(--text-dim); font-weight: 400; letter-spacing: 0; text-transform: none; }
+
+.run-side-block {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+/* System status: label/value rows, not cards. */
+.sys-list { margin: 0; padding: 2px 0; }
+
+.sys-list > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--row-divider);
+}
+
+.sys-list > div:last-child { border-bottom: 0; }
+.sys-list dt { color: var(--text-muted); font-size: 10.5px; }
+.sys-list dd { margin: 0; color: var(--text); font: 700 10px var(--mono); white-space: nowrap; }
+.sys-list dd[data-state="good"] { color: var(--status-ok); }
+.sys-list dd[data-state="warn"] { color: var(--status-warn); }
+.sys-list dd[data-state="bad"] { color: var(--status-err); }
+
+/* Sidebar disclosures (Programs, Recent runs): collapsed by default, the
+   +/– marker shows expand state. */
+.sidebar-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.sidebar-disclosure > summary::-webkit-details-marker { display: none; }
+
+.sidebar-disclosure > summary::after {
+  content: "+";
+  margin-left: auto;
+  color: var(--text-dim);
+  font: 700 12px var(--mono);
+}
+
+.sidebar-disclosure[open] > summary::after { content: "–"; }
+.sidebar-disclosure > summary:focus-visible { outline: 1px solid var(--status-info); outline-offset: -1px; }
+
+/* Agent panes health summary, shown inline in the panes header. */
+.agent-disclosure-summary { color: var(--text-muted); font: 10px var(--mono); }
+.agent-disclosure-summary[data-state="good"] { color: var(--status-ok); }
+.agent-disclosure-summary[data-state="active"] { color: var(--status-info); }
+.agent-disclosure-summary[data-state="bad"] { color: var(--status-err); }
+
+.agent-panes > .phase-groups { padding: 10px 12px; max-height: 48vh; overflow-y: auto; }
+
+/* Sidebar disclosures: Programs and Recent runs are secondary navigation. */
+.sidebar-disclosure { border-top: 1px solid var(--border); }
+.sidebar-disclosure > summary { padding: 8px 12px; background: transparent; }
+.sidebar-disclosure > summary:hover { background: var(--bg-2); }
+
+/* Result stays prominent on terminal runs; long output scrolls inside it. */
+.panel-result { border-color: rgba(34, 197, 94, 0.22); }
+.panel-result .panel-card-body { max-height: 340px; overflow: auto; }
+
+/* The Program control panel is empty in run view; hide it there only. */
+body:has(#ws-run.visible) .control-panel { display: none; }
+
+@media (max-width: 1100px) {
+  .run-main { grid-template-columns: minmax(0, 1fr); }
+  .run-bottom { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── Phase 3: state-aware run view ──────────────────────────────────────
+   The run's phase (data-phase, set from its status) decides what dominates.
+   Running: the live trace leads. Terminal runs (completed, failed, blocked,
+   recoverable): the Result leads and the trace is still there, shorter. */
+
+.run-result { display: none; overflow: visible; }
+
+#ws-run[data-phase="completed"] .run-result,
+#ws-run[data-phase="failed"] .run-result,
+#ws-run[data-phase="blocked"] .run-result,
+#ws-run[data-phase="recoverable"] .run-result { display: block; }
+
+#ws-run[data-phase="completed"] .run-trace .timeline,
+#ws-run[data-phase="failed"] .run-trace .timeline,
+#ws-run[data-phase="blocked"] .run-trace .timeline,
+#ws-run[data-phase="recoverable"] .run-trace .timeline { max-height: 34vh; }
+
+#ws-run[data-phase="running"] .run-trace .timeline { max-height: 66vh; }
+
+.run-result .panel-card-body { max-height: none; overflow: visible; }
+.run-result .result-wrap { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+
+#ws-run[data-phase="completed"] .run-result { border-color: rgba(34, 197, 94, 0.3); }
+#ws-run[data-phase="failed"] .run-result,
+#ws-run[data-phase="blocked"] .run-result {
+  border-color: rgba(239, 68, 68, 0.45);
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.12);
+}
+
+/* Result: status first, then facts, then the summary. */
+.result-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.result-title { font: 700 13px var(--mono); letter-spacing: 0.08em; }
+.result-title.ok { color: var(--status-ok); }
+.result-title.fail { color: var(--status-err); }
+
+.result-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0;
+  border: 1px solid var(--row-divider);
+  border-radius: 2px;
+  margin-bottom: 10px;
+}
+
+.result-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 10px;
+  border-right: 1px solid var(--row-divider);
+  border-bottom: 1px solid var(--row-divider);
+}
+
+.result-fact-k { color: var(--text-dim); font: 700 8.5px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.result-fact-v { color: var(--text); font-size: 11px; overflow-wrap: anywhere; }
+.result-fact-v.mono { font-family: var(--mono); font-size: 10.5px; }
+.result-fact-v.dim { color: var(--text-dim); }
+.result-summary.dim { color: var(--text-dim); font-size: 10.5px; }
+
+.result-actions { display: flex; gap: 6px; margin: 10px 0 6px; flex-wrap: wrap; }
+
+.result-full { margin-top: 6px; border-top: 1px solid var(--row-divider); }
+.result-full > summary { padding: 6px 0; color: var(--text-muted); font: 700 9px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; }
+.result-full pre { max-height: 360px; overflow: auto; }
+
+.result-excerpt { border-left: 2px solid var(--status-err); }
+
+/* Current models: one row per model this run used. */
+.model-list { list-style: none; margin: 0; padding: 2px 0; }
+
+.model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--row-divider);
+}
+
+.model-row:last-child { border-bottom: 0; }
+.model-id { grid-column: 1; grid-row: 1; overflow: hidden; color: var(--text); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.model-roles { grid-column: 1; grid-row: 2; color: var(--text-dim); font: 9px var(--mono); }
+.model-state { grid-column: 2; grid-row: 1 / span 2; font: 700 8.5px var(--mono); letter-spacing: 0.08em; }
+.model-state.active { color: var(--status-info); }
+.model-state.good { color: var(--status-ok); }
+.model-state.bad { color: var(--status-err); }
+.model-empty { padding: 8px 12px; color: var(--text-dim); font-size: 10px; }
+
+/* Trace filters: display only; hide lanes that do not match. */
+.trace-filters {
+  display: flex;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--row-divider);
+  background: var(--bg-1);
+  flex-wrap: wrap;
+}
+
+.timeline[data-filter="manager"] .tl-item:not([data-lane="manager"]),
+.timeline[data-filter="workers"] .tl-item:not([data-lane="workers"]),
+.timeline[data-filter="review"] .tl-item:not([data-lane="review"]),
+.timeline[data-filter="system"] .tl-item:not([data-lane="system"]) { display: none; }
+
+/* Context header: breadcrumb, not a second copy of the top bar. */
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font: 600 10px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.crumb-sep { opacity: 0.45; }
+
+/* Mission drawer: a compact trigger that expands; the drawer scrolls. */
+.mission-actions summary {
+  display: inline-block;
+  margin: 6px 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: 2px;
+  color: var(--status-info);
+  font: 700 9.5px var(--mono);
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  list-style: none;
+}
+.mission-actions summary::-webkit-details-marker { display: none; }
+.mission-actions[open] summary { color: var(--nexus-amber); border-color: rgba(245, 158, 11, 0.45); }
+.mission-action-body { max-height: 40vh; overflow: auto; }
+
+/* Program view: the same header, status and terminal language as Runs. */
+.program-phase-strip {
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-muted);
+  font: 10px var(--mono);
+  letter-spacing: 0.04em;
+}

@@ -121,6 +121,9 @@ class ServerHealth:
     credential_failed: int | None = None
     catalog_count: int | None = None
     configured_count: int | None = None
+    cryptography_status: str | None = None
+    cryptography_provider: str | None = None
+    setup_complete: bool | None = None
     provider_health: dict[str, bool | None] = field(default_factory=dict)
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
 
@@ -539,6 +542,7 @@ class OmniRouteTelemetryClient:
 
         credential_health = payload.get("credentialHealth") or {}
         provider_summary = payload.get("providerSummary") or {}
+        cryptography = payload.get("cryptography") or {}
 
         diagnostics = []
 
@@ -563,6 +567,9 @@ class OmniRouteTelemetryClient:
             credential_failed=credential_health.get("failed"),
             catalog_count=provider_summary.get("catalogCount"),
             configured_count=provider_summary.get("configuredCount"),
+            cryptography_status=cryptography.get("status"),
+            cryptography_provider=cryptography.get("provider"),
+            setup_complete=payload.get("setupComplete"),
             provider_health=provider_health,
             diagnostics=tuple(diagnostics),
         )

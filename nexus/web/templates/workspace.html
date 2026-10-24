@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus Workspace</title>
+  <link rel="stylesheet" href="/static/css/tokens.css?v={{ asset_version }}">
+  <link rel="stylesheet" href="/static/css/workspace.css?v={{ asset_version }}">
+</head>
+<body class="ws-body">
+<header class="ws-topbar">
+  <div class="ws-brand"><span class="ws-brand-mark">N</span><span>Nexus</span><span class="ws-brand-sub">workspace</span></div>
+  <label class="ws-project">
+    <span class="ws-visually-hidden">Projeto</span>
+    <select id="ws-project-select" aria-label="Projeto"></select>
+  </label>
+  <div class="ws-topbar-status" id="ws-gates" role="status" aria-live="polite"></div>
+  <div class="ws-topbar-actions">
+    <button type="button" class="ws-button ws-button-primary" id="ws-add-pane" disabled>+ Agente</button>
+    <details class="ws-menu" id="ws-hidden-menu">
+      <summary class="ws-button">Ocultos <span id="ws-hidden-count">0</span></summary>
+      <div class="ws-menu-body" id="ws-hidden-list"></div>
+    </details>
+    <a class="ws-button ws-button-ghost" id="ws-advanced" href="/nexus">Avançado</a>
+  </div>
+</header>
+
+<main class="ws-main" id="ws-main" data-density="empty">
+  <section class="ws-maestro" aria-labelledby="ws-maestro-title">
+    <div class="ws-maestro-head">
+      <h1 class="ws-maestro-title" id="ws-maestro-title">Maestro</h1>
+      <div class="ws-maestro-planning" id="ws-maestro-planning" role="status" aria-live="polite"></div>
+    </div>
+    <p class="ws-maestro-hint" id="ws-maestro-hint">Converse com o Maestro. Ele analisa o projeto em modo somente leitura, propõe os agentes e só cria algo quando você aprova.</p>
+    <ol class="ws-maestro-log" id="ws-maestro-log" aria-live="polite"></ol>
+    <form class="ws-maestro-form" id="ws-maestro-form">
+      <label class="ws-visually-hidden" for="ws-maestro-input">Mensagem para o Maestro</label>
+      <textarea id="ws-maestro-input" rows="2" maxlength="20000" placeholder="Ex.: implemente a API de pedidos e escreva testes para ela"></textarea>
+      <button type="submit" class="ws-button ws-button-primary" id="ws-maestro-send" disabled>Enviar</button>
+    </form>
+    <p class="ws-error" id="ws-error" role="alert" hidden></p>
+  </section>
+
+  <section class="ws-grid" id="ws-grid" aria-label="Agentes"></section>
+  <p class="ws-empty" id="ws-empty">Nenhum agente aberto.</p>
+</main>
+
+<dialog class="ws-dialog" id="ws-add-dialog" aria-labelledby="ws-add-title">
+  <form method="dialog" id="ws-add-form">
+    <h2 id="ws-add-title">Novo agente</h2>
+    <label>Função <select id="ws-add-role"></select></label>
+    <label>Nome <input id="ws-add-name" maxlength="80" placeholder="opcional"></label>
+    <label>Modelo <select id="ws-add-model"></select></label>
+    <p class="ws-dialog-note">Cada agente recebe uma sessão Development própria, com worktree isolado.</p>
+    <div class="ws-dialog-actions">
+      <button type="button" class="ws-button" id="ws-add-cancel">Cancelar</button>
+      <button type="submit" class="ws-button ws-button-primary" id="ws-add-confirm">Criar agente</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/js/workspace.js?v={{ asset_version }}"></script>
+</body>
+</html>

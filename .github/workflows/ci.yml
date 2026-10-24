@@ -1,0 +1,46 @@
+name: CI
+
+# Minimal CI (F3.5): reuses pytest and Ruff exactly as they are already
+# used locally -- no pre-commit, no tox/nox, no additional linter, no
+# build matrix. A Windows runner is used deliberately, not Linux: the
+# codebase launches Codex via a PowerShell wrapper
+# (nexus/process_env.py, nexus/dispatchers/*) and several tests are only
+# proven to pass on Windows (this is where the full local suite has
+# actually been run, repeatedly). See
+# docs/NEXUS_ARCHITECTURE_CONSOLIDATION_PLAN.md section 4.3 for the
+# gradual-adoption strategy behind the lint step being non-blocking.
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Ruff lint (monitoring only -- not yet a blocking gate)
+        run: ruff check . --output-format=github
+        continue-on-error: true
+
+      - name: Python test suite (pytest)
+        run: pytest -q
+
+      - name: Frontend test suite (node --test)
+        run: node --test tests/frontend/*.cjs

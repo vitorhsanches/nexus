@@ -276,7 +276,13 @@ class OmniRouteAdapterRunnerTestCase(unittest.TestCase):
         stdin content here would be an unused/incorrect transport and could
         mask the -Task flag as the source of truth.
         """
-        with patch("nexus.agents.adapters.omniroute.subprocess.run") as mock_run:
+        with (
+            patch("nexus.agents.adapters.omniroute.subprocess.run") as mock_run,
+            patch(
+                "nexus.agents.adapters.omniroute.codex_subprocess_env",
+                return_value={},
+            ),
+        ):
             mock_run.return_value = type(
                 "Completed", (), {"returncode": 0, "stdout": "ok", "stderr": ""}
             )()

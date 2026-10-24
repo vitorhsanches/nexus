@@ -9,16 +9,21 @@ class EscalationUnavailable(RuntimeError):
 
 
 ROUTE_LADDERS = {
+    # NOTE: "provider" here is the real resource/model provider identity
+    # (e.g. "claude", "opencode"), never the OmniRoute execution
+    # path/gateway. "execution_path" already carries "OMNIROUTE" -- the
+    # gateway must never be duplicated into the provider field, since
+    # next_route() copies these fields verbatim onto the escalated worker.
     "mechanical": [
         {
             "execution_path": "OMNIROUTE",
-            "provider": "omniroute",
+            "provider": "opencode",
             "model": "oc/big-pickle",
             "effort": "low",
         },
         {
             "execution_path": "OMNIROUTE",
-            "provider": "omniroute",
+            "provider": "claude",
             "model": "cc/claude-sonnet-5-low",
             "effort": "low",
         },
@@ -26,10 +31,56 @@ ROUTE_LADDERS = {
     "standard-coding": [
         {
             "execution_path": "OMNIROUTE",
-            "provider": "omniroute",
+            "provider": "claude",
             "model": "cc/claude-sonnet-5-low",
             "effort": "low",
         }
+    ],
+    # Only one approved advanced-coding route currently exists
+    # (cc/claude-sonnet-5-high, effort=low, max_risk=high). No stronger
+    # route is invented: escalating past it fails closed via
+    # EscalationUnavailable.
+    "complex-coding": [
+        {
+            "execution_path": "OMNIROUTE",
+            "provider": "claude",
+            "model": "cc/claude-sonnet-5-high",
+            "effort": "low",
+        },
+    ],
+    # review-critical and security-critical both resolve through the
+    # "review" capability (see
+    # nexus.orchestration.progressive.INITIAL_ROUTE_CAPABILITY_BY_CLASS)
+    # and therefore share the same two approved review-capable rungs:
+    # the medium-risk-capped low-effort route, then the HIGH-risk-capped
+    # high-effort route qualified under Nexus v2.0-D.2.
+    "review-critical": [
+        {
+            "execution_path": "OMNIROUTE",
+            "provider": "claude",
+            "model": "cc/claude-sonnet-5-low",
+            "effort": "low",
+        },
+        {
+            "execution_path": "OMNIROUTE",
+            "provider": "claude",
+            "model": "cc/claude-sonnet-5-high",
+            "effort": "high",
+        },
+    ],
+    "security-critical": [
+        {
+            "execution_path": "OMNIROUTE",
+            "provider": "claude",
+            "model": "cc/claude-sonnet-5-low",
+            "effort": "low",
+        },
+        {
+            "execution_path": "OMNIROUTE",
+            "provider": "claude",
+            "model": "cc/claude-sonnet-5-high",
+            "effort": "high",
+        },
     ],
 }
 

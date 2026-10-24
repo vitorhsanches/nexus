@@ -215,7 +215,10 @@ class OmniRouteSummaryTestCase(unittest.TestCase):
             with patch(
                 "nexus.agents.adapters.omniroute.subprocess.run",
                 return_value=FakeCompleted(),
-            ) as mock_run:
+            ) as mock_run, patch(
+                "nexus.agents.adapters.omniroute.codex_subprocess_env",
+                return_value={},
+            ):
                 summary = execution_service.execute_task(task.task_id)
                 mock_run.assert_called_once()
 

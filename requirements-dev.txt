@@ -1,0 +1,11 @@
+# Development-only dependencies (F3.5): testing and linting.
+#
+# Neither pytest nor ruff was previously declared anywhere in this
+# repository, despite both being in active local use (ruff: see the
+# `# noqa: PLC0415`-style comments already present throughout nexus/web/
+# and elsewhere; pytest: the entire tests/ suite). This file makes that
+# formal and reproducible, for both local use and CI -- it does not add
+# any new tool beyond the two this mission exists to formalize.
+-r requirements.txt
+pytest==9.1.1
+ruff==0.17.1

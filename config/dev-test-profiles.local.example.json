@@ -1,0 +1,11 @@
+{
+  "profiles": [
+    {
+      "id": "python-unittest",
+      "name": "Python unittest discovery",
+      "project_ids": ["example-project"],
+      "argv": ["{python}", "-m", "unittest", "discover", "-v"],
+      "timeout_seconds": 300
+    }
+  ]
+}

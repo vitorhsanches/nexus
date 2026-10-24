@@ -128,7 +128,9 @@ class HeadroomOverrideEnvParsingTestCase(unittest.TestCase):
 
 
 class AdaptiveRoutingServiceSelectionTestCase(unittest.TestCase):
-    def test_mechanical_no_overrides_selects_big_pickle(self):
+    def test_mechanical_no_overrides_selects_cc_sonnet_low(self):
+        # oc/big-pickle is disabled (enabled=False); cc/claude-sonnet-5-low is
+        # now the winning mechanical/LOW route when opencode is unavailable.
         service = AdaptiveRoutingService(
             telemetry_client=OmniRouteTelemetrySnapshot(),
             overrides=ProviderOverrides({}),
@@ -136,7 +138,8 @@ class AdaptiveRoutingServiceSelectionTestCase(unittest.TestCase):
         decision = service.select_route_for_task(
             required_capabilities=["mechanical"]
         )
-        self.assertEqual(decision.model, "oc/big-pickle")
+        self.assertEqual(decision.model, "cc/claude-sonnet-5-low")
+        self.assertNotEqual(decision.model, "oc/big-pickle")
         self.assertFalse(decision.degraded)
 
     def test_standard_coding_selects_sonnet(self):
@@ -157,15 +160,19 @@ class AdaptiveRoutingServiceSelectionTestCase(unittest.TestCase):
         )
         self.assertEqual(decision.model, "cc/claude-sonnet-5-low")
 
-    def test_mechanical_opencode_high_claude_low_selects_big_pickle(self):
+    def test_mechanical_opencode_high_claude_low_selects_cc_sonnet_low(self):
+        # Previously big-pickle (free cost_class) won over claude with low
+        # headroom.  With big-pickle disabled, cc/claude-sonnet-5-low is the
+        # only eligible route regardless of provider headroom balance.
         service = AdaptiveRoutingService(
             telemetry_client=OmniRouteTelemetrySnapshot(),
-            overrides=ProviderOverrides({"opencode": 80, "claude": 3}),
+            overrides=ProviderOverrides({"opencode": 80, "claude": 20}),
         )
         decision = service.select_route_for_task(
             required_capabilities=["mechanical"]
         )
-        self.assertEqual(decision.model, "oc/big-pickle")
+        self.assertEqual(decision.model, "cc/claude-sonnet-5-low")
+        self.assertNotEqual(decision.model, "oc/big-pickle")
 
     def test_capability_hard_gate_is_authoritative(self):
         # Even with huge headroom for a provider whose only route lacks the
@@ -526,10 +533,12 @@ class AdaptiveRoutingServiceSelectionTestCase(unittest.TestCase):
 
             client_cls.assert_called_once_with()
             client_cls.return_value.collect.assert_called_once_with()
+            # oc/big-pickle is disabled; cc/claude-sonnet-5-low is selected.
             self.assertEqual(
                 decision.model,
-                "oc/big-pickle",
+                "cc/claude-sonnet-5-low",
             )
+            self.assertNotEqual(decision.model, "oc/big-pickle")
 
     def test_default_adapter_uses_live_telemetry_path(self):
         snapshot = OmniRouteTelemetrySnapshot(
@@ -580,12 +589,17 @@ class AdaptiveRoutingServiceSelectionTestCase(unittest.TestCase):
 
             client_cls.assert_called_once_with()
             client_cls.return_value.collect.assert_called_once_with()
+            # oc/big-pickle is disabled; cc/claude-sonnet-5-low is routed.
             self.assertEqual(
                 result.routed_model,
+                "cc/claude-sonnet-5-low",
+            )
+            self.assertNotIn(
                 "oc/big-pickle",
+                captured["command"],
             )
             self.assertIn(
-                "oc/big-pickle",
+                "cc/claude-sonnet-5-low",
                 captured["command"],
             )
 
@@ -704,10 +718,13 @@ class AdaptiveRoutingServiceSelectionTestCase(unittest.TestCase):
         )
 
         self.assertTrue(decision.degraded)
+        # oc/big-pickle is disabled; cc/claude-sonnet-5-low is now the
+        # enabled mechanical outage fallback that survives hard-gate revalidation.
         self.assertEqual(
             decision.model,
-            "oc/big-pickle",
+            "cc/claude-sonnet-5-low",
         )
+        self.assertNotEqual(decision.model, "oc/big-pickle")
 
     def test_unhealthy_provider_gate_is_proven_with_runtime_model_present(self):
         snapshot = OmniRouteTelemetrySnapshot(

@@ -1,0 +1,11 @@
+# Configurações de IA do cockpit
+
+O botão de engrenagem abre **Configurações → IA**. A tela mostra apenas as conexões OAuth ativas do OmniRoute para Claude Code (`cc/`) e OpenAI Codex (`cx/`). O Nexus consulta a interface de gerenciamento autenticada `GET /api/providers` com a chave configurada no backend e, se necessário, tenta `omniroute --output json oauth status`. Aceita os envelopes `connections`, `providers` e `items`. Exige `authType` OAuth, `isActive=true` e `testStatus=active`. Uma falha de consulta deixa o provedor indisponível. O catálogo de 340 modelos, a presença da CLI e os metadados do Codex App Server não provam OAuth.
+
+O operador pode ativar ou desativar cada provedor no Nexus. O estado fica no SQLite e é independente do estado do OmniRoute. A preferência por projeto e função é mantida quando um provedor desconecta ou é desativado, mas novos usos são bloqueados. A escrita exige o token administrativo do Nexus e acesso loopback. O token e os registros brutos de conexão nunca são enviados ao navegador.
+
+As preferências de Maestro, desenvolvimento e revisão guardam o modelo base, sem esforço fixo. A escolha de esforço é feita ao autorizar ou enviar uma mensagem, iniciar uma missão ou executar um agente. O backend resolve a rota exata, revalida conexão, qualificação, ativação, capacidade, risco e autorização de custo, e recusa esforço ausente quando houver mais de uma opção ou uma resolução ambígua. O Codex App Server precisa confirmar o modelo e o esforço antes de iniciar inferência. Ativar um provedor ou salvar uma preferência não autoriza custos nem habilita Development Execution.
+
+Somente `cc/claude-sonnet-5-low` e `cc/claude-sonnet-5-high` têm agrupamento explícito como variantes do mesmo Sonnet 5. Outras versões e produtos mantêm identidades separadas. Quando duas rotas qualificadas competem pelo mesmo esforço, o Nexus aceita apenas uma correspondência única com o sufixo de esforço da variante verificada; se não existir, não oferece esse esforço. A interface mantém o catálogo OmniRoute completo em **Configurações avançadas**.
+
+Claude Code nesta tela significa **OAuth Claude Code via OmniRoute, executado pelo Codex App Server**. A execução nativa pela CLI Claude Code ainda não foi implementada. Inferência real não foi usada para comprovar essas conexões ou rotas nesta fase.

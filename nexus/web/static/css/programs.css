@@ -1,0 +1,512 @@
+/* Nexus – Program Control Panel (Phase UI-1)
+   Right-hand column: Program overview, phase pipeline, acceptance,
+   failure/recovery, routing timeline, telemetry, active agents, files.
+   Reuses the shared tokens.css palette -- no new colors introduced. */
+
+/* ── View-mode badge (topbar): the single source of truth for which
+   context -- RUN or PROGRAM -- is currently the primary workspace. ── */
+.view-mode-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 3px 9px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-2);
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.view-mode-badge.vm-run     { color: var(--accent-hl); border-color: rgba(59,130,246,0.4); }
+.view-mode-badge.vm-program { color: var(--purple);    border-color: rgba(167,139,250,0.4); }
+
+/* ── Program live workspace (center, PROGRAM VIEW) ──
+   Hidden by default; .visible shows it. Mirrors #ws-run exactly so the
+   two workspaces are visually interchangeable, never shown together. */
+#ws-program {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+#ws-program.visible { display: flex; }
+
+.program-phase-strip {
+  padding: 6px 16px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.control-panel {
+  /* Section 15: legible without dominating the screen -- grows a little
+     on very wide monitors, shrinks on the 1200px/900px breakpoints below. */
+  width: clamp(300px, 22vw, 360px);
+  min-width: 300px;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.cp-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.cp-body {
+  flex: 1;
+  overflow-y: auto;
+  display: none;
+}
+.cp-body.visible { display: block; }
+.cp-empty-state.hidden { display: none; }
+
+.cp-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.cp-section:last-child { border-bottom: none; }
+
+.cp-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+/* ── Waiting-for-user banner ── */
+.cp-waiting-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(234, 179, 8, 0.12);
+  border-bottom: 1px solid rgba(234, 179, 8, 0.35);
+  color: var(--yellow);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.cp-waiting-icon { font-size: 14px; }
+
+/* ── Program overview ── */
+.cp-program-id {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.cp-program-name {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  word-break: break-word;
+}
+.cp-overview-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.cp-overview-dim { color: var(--text-dim); }
+.cp-overview-sep { color: var(--text-dim); }
+.cp-overview-item { color: var(--text-muted); font-family: var(--mono); }
+
+.cp-status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.cp-status-badge.st-running   { background: rgba(59,130,246,0.16); color: var(--accent-hl); }
+.cp-status-badge.st-completed { background: rgba(34,197,94,0.16);  color: var(--green); }
+.cp-status-badge.st-blocked   { background: rgba(239,68,68,0.16);  color: var(--red); }
+.cp-status-badge.st-bootstrapped,
+.cp-status-badge.st-specified { background: rgba(122,133,153,0.16); color: var(--text-muted); }
+
+/* ── Phase pipeline ── */
+.cp-phase-list { display: flex; flex-direction: column; gap: 4px; }
+
+.cp-phase-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+.cp-phase-row.current { background: var(--bg-2); }
+
+.cp-phase-icon {
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.cp-phase-icon.done    { color: var(--green); }
+.cp-phase-icon.running { color: var(--accent-hl); }
+.cp-phase-icon.blocked,
+.cp-phase-icon.failed  { color: var(--red); }
+.cp-phase-icon.pending { color: var(--text-dim); }
+
+.cp-phase-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.cp-phase-row.pending .cp-phase-title { color: var(--text-dim); }
+
+.cp-phase-state {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.cp-phase-run-chip {
+  flex-shrink: 0;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.cp-phase-run-chip:hover { color: var(--accent-hl); background: var(--bg-3); }
+
+/* ── Acceptance ── */
+.cp-acc-headline {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.cp-acc-headline b { font-family: var(--mono); color: var(--green); }
+
+.cp-acc-totals {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.cp-acc-totals span { color: var(--text-muted); }
+.cp-acc-totals b { color: var(--text); font-family: var(--mono); }
+.cp-acc-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+  display: flex;
+  margin-bottom: 8px;
+}
+.cp-acc-bar-seg.satisfied   { background: var(--green); }
+.cp-acc-bar-seg.unsatisfied { background: var(--red); }
+.cp-acc-bar-seg.unverified  { background: var(--yellow); }
+.cp-acc-bar-seg.pending     { background: var(--border-2); }
+
+.cp-acc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11.5px;
+  padding: 3px 0;
+  line-height: 1.35;
+}
+.cp-acc-mark { flex-shrink: 0; width: 12px; text-align: center; }
+.cp-acc-mark.satisfied   { color: var(--green); }
+.cp-acc-mark.unsatisfied { color: var(--red); }
+.cp-acc-mark.unverified,
+.cp-acc-mark.pending     { color: var(--text-dim); }
+.cp-acc-desc { color: var(--text-muted); }
+
+/* ── Failure / recovery ── */
+.cp-failure-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.cp-failure-row:first-child { border-top: none; padding-top: 0; }
+.cp-failure-class {
+  display: inline-block;
+  align-self: flex-start;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(239,68,68,0.14);
+  color: var(--red);
+}
+.cp-failure-class.recoverable {
+  background: rgba(234,179,8,0.14);
+  color: var(--yellow);
+}
+
+.cp-failure-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.cp-failure-k {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  width: 46px;
+  flex-shrink: 0;
+}
+.cp-failure-action {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--cyan);
+}
+.cp-failure-action.blocked { color: var(--red); }
+.cp-failure-action.waiting { color: var(--yellow); }
+
+.cp-failure-scope {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  padding-left: 52px;
+}
+
+.cp-failure-details {
+  padding-left: 52px;
+  margin-top: 2px;
+}
+.cp-failure-details summary {
+  font-size: 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.cp-failure-detail { color: var(--text-muted); word-break: break-word; margin-top: 2px; }
+
+/* ── Routing timeline ── */
+.cp-routing-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  padding: 3px 0;
+  font-family: var(--mono);
+}
+.cp-routing-kind {
+  flex-shrink: 0;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.cp-routing-kind.INITIAL_ROUTE       { color: var(--cyan); }
+.cp-routing-kind.RETRY_SAME_TIER,
+.cp-routing-kind.RETRY               { color: var(--yellow); }
+.cp-routing-kind.FALLBACK_ROUTE_ATTEMPT { color: var(--orange); }
+.cp-routing-kind.ESCALATE            { color: var(--purple); }
+.cp-routing-kind.FALLBACK_EXHAUSTED,
+.cp-routing-kind.BLOCKED             { color: var(--red); }
+.cp-routing-model {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Telemetry ── */
+.cp-tel-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  font-size: 11.5px;
+}
+.cp-tel-k { color: var(--text-muted); }
+.cp-tel-v { color: var(--text); font-family: var(--mono); text-align: right; }
+
+/* ── Active agents (compact) ── */
+.cp-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.cp-agent-row:first-child { border-top: none; }
+.cp-agent-role {
+  flex-shrink: 0;
+  font-weight: 700;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.cp-agent-model {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  color: var(--text);
+}
+.cp-agent-status { flex-shrink: 0; font-size: 10px; font-weight: 700; }
+.cp-agent-planned {
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
+  padding: 3px 0 0;
+}
+.cp-agent-report-btn {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.cp-agent-report-btn:hover { color: var(--text); border-color: var(--accent); }
+.cp-agent-report-btn.open { color: var(--accent-hl); border-color: var(--accent-hl); }
+.cp-agent-report-panel {
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  margin: 2px 0 6px;
+  padding: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.cp-agent-report-text {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+/* ── File activity ── */
+.cp-file-stage { margin-bottom: 8px; }
+.cp-file-stage-title { font-size: 10.5px; color: var(--text-dim); margin-bottom: 2px; }
+.cp-file-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-file-name::before { content: "+ "; color: var(--green); }
+
+.cp-empty-inline { color: var(--text-dim); font-size: 11.5px; }
+
+/* ── Sidebar: Programs list ── */
+.sidebar-programs-section { flex-shrink: 0; }
+.sidebar-programs-scroll {
+  max-height: 160px;
+  overflow-y: auto;
+}
+.sidebar-program-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 14px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.sidebar-program-item:hover { background: var(--bg-2); }
+.sidebar-program-item.active {
+  background: var(--bg-2);
+  border-left-color: var(--accent);
+}
+.sidebar-program-top { display: flex; align-items: center; gap: 6px; }
+.sidebar-program-id {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.sidebar-program-sub {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  padding-left: 2px;
+}
+.sidebar-program-waiting {
+  color: var(--yellow);
+  font-size: 11px;
+}
+
+/* ── Responsive: collapse the control panel on narrow viewports ── */
+@media (max-width: 1200px) {
+  .control-panel { width: 260px; min-width: 260px; }
+}
+
+@media (max-width: 900px) {
+  .control-panel { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Ops-console polish pass — consistent card framing + spacing rhythm
+   across every control-panel section, additive only (no id/class
+   renamed, no selector removed). ══════════════════════════════════ */
+
+.cp-section {
+  box-shadow: inset -1px 0 0 transparent; /* keeps section a flat card, no new border weight */
+}
+.cp-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Status badges share the same visual language as the rest of the app */
+.cp-status-badge,
+.cp-phase-run-chip {
+  font-family: var(--sans);
+}
+
+/* Phase rows: the "current" phase gets the shared live glow, not just
+   a flat background swap */
+.cp-phase-row.current {
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.14);
+}
+.cp-phase-icon.running {
+  text-shadow: 0 0 6px var(--glow-live-color);
+}
+
+/* Telemetry + acceptance read as dense data tables: align values */
+.cp-tel-grid { row-gap: 7px; }
+
+/* Sidebar programs list matches the sidebar-item affordance */
+.sidebar-program-item {
+  border-radius: 0 var(--radius) var(--radius) 0;
+  margin-right: 6px;
+}
+.sidebar-program-item.active {
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.12);
+}

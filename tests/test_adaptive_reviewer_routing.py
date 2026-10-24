@@ -24,6 +24,7 @@ from nexus.routing.telemetry import (
     ProviderTelemetry,
 )
 
+import nexus.dispatchers.review as review_module
 from nexus.dispatchers.review import (
     ReviewRoutingError,
     review_worker,
@@ -727,6 +728,40 @@ class AdaptiveRoutingUnavailableFailsClosedTests(unittest.TestCase):
         self.assertEqual(result["status"], "BLOCKED")
         find_codex.assert_not_called()
         self.assertEqual(launcher_calls, [])
+
+
+class DefaultProcessLauncherOmnirouteProfileTestCase(unittest.TestCase):
+    """Regression test: every approved route is execution_path="OMNIROUTE",
+    so the real (non-injected) reviewer launcher must request the omniroute
+    codex_subprocess_env profile -- not the "default" profile, which only
+    mirrors the user's own interactive ~/.codex/config.toml and has no
+    [model_providers.omniroute] table. Before this fix, a real review of any
+    approved-catalog route failed immediately with:
+        "Model provider `omniroute` not found"
+    """
+
+    def test_default_launcher_requests_omniroute_profile(self):
+        captured_profiles = []
+
+        def fake_codex_subprocess_env(profile="default"):
+            captured_profiles.append(profile)
+            return {}
+
+        class _FakePopen:
+            def __init__(self, *args, **kwargs):
+                self.stdout = iter(())
+
+            def wait(self):
+                return 0
+
+        with patch.object(
+            review_module, "codex_subprocess_env", fake_codex_subprocess_env
+        ), patch.object(review_module.subprocess, "Popen", _FakePopen):
+            review_module._default_process_launcher(
+                ["codex", "exec", "-C", r"C:\fake\reviewed-worktree"]
+            )
+
+        self.assertEqual(captured_profiles, ["omniroute"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,64 @@
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+from nexus.web.app import app
+
+
+def test_mission_start_route_contract():
+    payload = {"mission_id": "M1", "status": "PENDING"}
+    with patch("nexus.dev.mission_runner.start_mission", return_value=payload) as start:
+        response = TestClient(app, base_url="http://127.0.0.1").post(
+            "/api/dev/sessions/DEV-1/missions",
+            json={"description": "do work", "model": "model-a", "allowed_models": ["model-a"], "test_profile": "nexus-f36b"},
+        )
+    assert response.status_code == 200 and response.json() == payload
+    start.assert_called_once()
+
+
+def test_mission_read_progress_tests_result_and_interrupt_routes():
+    mission = {
+        "mission_id": "M1", "status": "READY_FOR_REVIEW", "attempt_count": 1,
+        "current_turn_id": "T1", "updated_at": "now", "error_code": None,
+        "error_message": None, "tests": [{"status": "PASSED"}], "result": {"ok": True},
+    }
+    with patch("nexus.dev.mission_runner.list_missions", return_value=[mission]), patch(
+        "nexus.dev.mission_runner.get_mission", return_value=mission
+    ), patch("nexus.dev.mission_runner.interrupt_mission", return_value={"status": "NOT_ACTIVE"}):
+        client = TestClient(app, base_url="http://127.0.0.1")
+        assert client.get("/api/dev/sessions/DEV-1/missions").json()["missions"] == [mission]
+        assert client.get("/api/dev/sessions/DEV-1/missions/M1").json() == mission
+        assert client.get("/api/dev/sessions/DEV-1/missions/M1/progress").json()["status"] == "READY_FOR_REVIEW"
+        assert client.get("/api/dev/sessions/DEV-1/missions/M1/tests").json()["tests"][0]["status"] == "PASSED"
+        assert client.get("/api/dev/sessions/DEV-1/missions/M1/result").json()["result"] == {"ok": True}
+        assert client.post("/api/dev/sessions/DEV-1/missions/M1/interrupt").json()["status"] == "NOT_ACTIVE"
+
+
+def test_operational_model_and_profile_catalog_routes():
+    with patch(
+        "nexus.dev.models.list_dev_models",
+        return_value={"models": [{"id": "free/model"}], "default_model": "free/model", "catalog_error": None},
+    ), patch("nexus.dev.service.validate_dev_project", return_value="C:/demo"), patch(
+        "nexus.dev.test_profiles.list_test_profiles",
+        return_value=[{"id": "unit", "name": "Unit", "timeout_seconds": 30, "source": "local"}],
+    ):
+        client = TestClient(app, base_url="http://127.0.0.1")
+        assert client.get("/api/dev/models").json()["default_model"] == "free/model"
+        response = client.get("/api/dev/test-profiles", params={"project_id": "demo"})
+        assert response.status_code == 200
+        assert response.json()["profiles"][0]["id"] == "unit"
+
+
+def test_discovered_model_catalog_route_supports_explicit_refresh():
+    payload = {
+        "models": [{"id": "provider/model", "approval_status": "not_qualified"}],
+        "approved_models": [],
+        "default_model": None,
+        "catalog_error": None,
+    }
+    with patch("nexus.dev.models.list_dev_model_catalog", return_value=payload) as catalog:
+        response = TestClient(app, base_url="http://127.0.0.1").get(
+            "/api/dev/model-catalog", params={"refresh": "true"}
+        )
+    assert response.status_code == 200 and response.json() == payload
+    catalog.assert_called_once_with(refresh=True)

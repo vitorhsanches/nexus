@@ -10,7 +10,9 @@ UI without touching the existing Mission/Task Board projection at all.
 
 import json
 
+from nexus.failure_contract import resolve_run_failure
 from nexus.registry import agents as agents_registry
+from nexus.registry.checkpoints import list_checkpoints
 from nexus.registry import runs as runs_registry
 
 
@@ -18,6 +20,36 @@ def _row_to_dict(row):
     if row is None:
         return None
     return dict(row)
+
+
+def _add_display_status(run):
+    """Show orphaned, recoverable runs separately from live work."""
+    if run is None:
+        return None
+
+    status = str(run.get("status", "")).upper()
+    display_status = status
+    detail = None
+
+    if status in {"CREATED", "ROUTING", "RUNNING", "REVIEWING"}:
+        checkpoints = list_checkpoints(run["id"])
+        orphan_sequences = [
+            cp.get("sequence", 0)
+            for cp in checkpoints
+            if cp.get("boundary") == "LIFECYCLE_ORPHAN_DETECTED"
+        ]
+        resume_sequences = [
+            cp.get("sequence", 0)
+            for cp in checkpoints
+            if cp.get("boundary") == "RESUME_START"
+        ]
+        if orphan_sequences and max(orphan_sequences) > max(resume_sequences, default=0):
+            display_status = "RECOVERABLE"
+            detail = "The orchestration process stopped; this run is available for recovery."
+
+    run["display_status"] = display_status
+    run["status_detail"] = detail
+    return run
 
 
 def _decode_reviewer_routing(branch):
@@ -42,12 +74,15 @@ def _decode_reviewer_routing(branch):
 
 def get_operational_runs():
     """Return every real Run recorded in the SQLite registry."""
-    return [_row_to_dict(row) for row in runs_registry.list_runs()]
+    return [
+        _add_display_status(_row_to_dict(row))
+        for row in runs_registry.list_runs()
+    ]
 
 
 def get_operational_run(run_id):
     """Return a single real Run, or None when it does not exist."""
-    return _row_to_dict(runs_registry.get_run(run_id))
+    return _add_display_status(_row_to_dict(runs_registry.get_run(run_id)))
 
 
 def get_operational_agents(run_id=None):
@@ -66,6 +101,8 @@ def get_operational_agents(run_id=None):
     result = []
     for row in rows:
         item = _row_to_dict(row)
+        if "has_full_result" in item:
+            item["has_full_result"] = bool(item["has_full_result"])
         if item.get("role") == "ManagerReview":
             item["reviewer_routing"] = _decode_reviewer_routing(
                 item.get("branch")
@@ -75,6 +112,18 @@ def get_operational_agents(run_id=None):
     return result
 
 
+def get_operational_agent_result(agent_id):
+    """Return one agent's bounded preview plus complete full result.
+
+    Separate, explicit endpoint-backing call: never bundled into the
+    agent-listing/run-detail projections above, so a large deliverable is
+    never returned by a default bulk read. Returns None when the agent id
+    does not exist; historical agents persisted before full-result support
+    existed come back with has_full_result=False rather than a guess.
+    """
+    return agents_registry.get_agent_result(agent_id)
+
+
 def get_operational_run_detail(run_id):
     """Return a Run with its full real Agent lineage, or None if unknown."""
     run = get_operational_run(run_id)
@@ -82,6 +131,7 @@ def get_operational_run_detail(run_id):
         return None
 
     run["agents"] = get_operational_agents(run_id=run_id)
+    run["failure"] = resolve_run_failure(list_checkpoints(run_id))
     return run
 
 

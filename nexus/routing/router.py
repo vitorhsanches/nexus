@@ -20,8 +20,9 @@ from nexus.routing.models import (
     RoutingRequest,
     SelectedRoute,
 )
-from nexus.routing.resources import classify_headroom
+from nexus.routing.resources import capacity_sufficient, classify_headroom
 from nexus.routing.scoring import (
+    cost_tier,
     explain,
     score_route,
     sort_key,
@@ -34,6 +35,13 @@ class InvalidRoutingRequestError(ValueError):
 
 class NoEligibleRouteError(RuntimeError):
     """Raised when no route survives all hard eligibility gates."""
+
+    def __init__(self, message: str, *, rejections: tuple[dict, ...] = ()):
+        super().__init__(message)
+        self.rejections = rejections
+
+
+MAX_REPORTED_REJECTIONS = 20
 
 
 def _resource_for(
@@ -73,37 +81,37 @@ def _eligible(
     route: ModelRoute,
     request: RoutingRequest,
     resources: dict[str, ResourceSnapshot],
-) -> tuple[bool, ResourceSnapshot | None]:
+) -> tuple[bool, ResourceSnapshot | None, str | None]:
 
     if is_blocked_model(route.model_id):
-        return False, None
+        return False, None, "blocked_model"
 
     if route.model_id in request.blocked_models:
-        return False, None
+        return False, None, "blocked_model"
 
     if route.provider in request.blocked_providers:
-        return False, None
+        return False, None, "blocked_provider"
 
     if not capability_eligible(
         route,
         request.capability,
     ):
-        return False, None
+        return False, None, "capability"
 
     if not risk_eligible(
         route,
         request.risk_level,
     ):
-        return False, None
+        return False, None, "risk"
 
     if not route.approved or not route.enabled:
-        return False, None
+        return False, None, "not_approved"
 
     if (
         route.experimental
         and not request.allow_experimental
     ):
-        return False, None
+        return False, None, "experimental"
 
     snapshot = _resource_for(
         route.provider,
@@ -111,14 +119,16 @@ def _eligible(
     )
 
     if not snapshot.healthy:
-        return False, None
+        return False, None, "unhealthy"
 
     band = classify_headroom(snapshot)
 
     if band.value == "exhausted":
-        return False, None
+        return False, None, "exhausted"
+    if capacity_sufficient(snapshot, request.capability, request.risk_level) is False:
+        return False, None, "capacity_insufficient"
 
-    return True, snapshot
+    return True, snapshot, None
 
 
 def select_best_route(
@@ -126,11 +136,10 @@ def select_best_route(
     catalog: tuple[ModelRoute, ...] | None = None,
     resources: dict[str, ResourceSnapshot] | None = None,
 ) -> SelectedRoute:
-    """Select the highest ranked eligible route.
+    """Select the cheapest capable route with defensible capacity.
 
-    Capability, risk, approval, health, blocked-route policy and exhaustion
-    are hard gates. Resource availability only ranks candidates that already
-    satisfy those requirements.
+    Capability/risk/policy, health and known capacity are hard gates.
+    Known sufficient quota wins over UNKNOWN; cost ranks within each group.
     """
 
     _validate_request(request)
@@ -144,15 +153,23 @@ def select_best_route(
     resources = resources or {}
 
     candidates: list[RoutingCandidate] = []
-
+    rejections: list[dict] = []
     for route in source_catalog:
-        eligible, snapshot = _eligible(
+        eligible, snapshot, reject_reason = _eligible(
             route,
             request,
             resources,
         )
 
         if not eligible:
+            rejections.append(
+                {
+                    "model": route.model_id,
+                    "provider": route.provider,
+                    "effort": route.effort,
+                    "reason": reject_reason,
+                }
+            )
             continue
 
         band = classify_headroom(snapshot)
@@ -181,23 +198,46 @@ def select_best_route(
         )
 
     if not candidates:
+        reported = tuple(rejections[:MAX_REPORTED_REJECTIONS])
+        summary = "; ".join(
+            f"{item['model']} ({item['provider']}/{item['effort']}): "
+            f"{item['reason']}"
+            for item in reported
+        )
+        omitted = len(rejections) - len(reported)
+        if omitted:
+            summary += f"; {omitted} additional candidate(s) omitted"
         raise NoEligibleRouteError(
             "No eligible route found for "
             f"capability={request.capability!r}, "
-            f"risk_level={request.risk_level!r}."
+            f"risk_level={request.risk_level!r}. "
+            f"Candidate rejections: {summary or 'catalog_empty'}.",
+            rejections=reported,
         )
 
-    candidates.sort(
-        key=lambda candidate: sort_key(
-            candidate.route,
-            candidate.score,
-        )
-    )
+    # Known sufficient capacity outranks UNKNOWN; within either group,
+    # cost is the first preference after all eligibility gates.
+    cost_order = {"free": 0, "low_cost": 1, "standard": 2, "premium": 3}
+    candidates.sort(key=lambda candidate: (
+        candidate.headroom_band.value == "neutral",
+        cost_order.get(cost_tier(candidate.route), 4),
+        *sort_key(candidate.route, candidate.score),
+    ))
 
     winner = candidates[0]
     fallbacks = tuple(candidates[1:])
 
     reason = winner.reason
+    cost_order = {"free": 0, "low_cost": 1, "standard": 2, "premium": 3}
+    known_costs = {
+        cost_tier(candidate.route)
+        for candidate in candidates
+        if cost_tier(candidate.route) in cost_order
+    }
+    if known_costs and cost_tier(winner.route) == min(
+        known_costs, key=cost_order.__getitem__
+    ):
+        reason = f"CHEAPEST_CAPABLE: {reason}"
 
     if fallbacks:
         first_fallback = fallbacks[0]

@@ -1,14 +1,8 @@
 ﻿from nexus.dispatchers.omniroute import run_omniroute_worker
 from nexus.registry.agents import create_agent, update_agent_status
 from nexus.registry.database import initialize_database
-from nexus.registry.projects import sync_projects
+from nexus.registry.projects import get_project, sync_projects
 from nexus.registry.runs import create_run, update_run_status
-
-
-POC_REPO = (
-    r"C:\Users\Vitor Sanches\Desktop\Devops"
-    r"\codex-omniroute-poc"
-)
 
 
 TASK = """
@@ -25,9 +19,14 @@ Requirements:
 """.strip()
 
 
-def main() -> None:
+def main():
     initialize_database()
     sync_projects()
+    project = get_project("orchestrator-poc")
+    if project is None:
+        raise RuntimeError(
+            "Register the orchestrator-poc project in config/projects.local.json first."
+        )
 
     run_id = create_run(
         project_id="orchestrator-poc",
@@ -57,7 +56,7 @@ def main() -> None:
     try:
         result = run_omniroute_worker(
             run_id=run_id,
-            repo=POC_REPO,
+            repo=project["path"],
             task=TASK,
             model="cc/claude-sonnet-5-low",
             effort="low",

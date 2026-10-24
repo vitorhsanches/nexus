@@ -55,6 +55,35 @@ def classify_headroom(
     return HeadroomBand.PREFERRED
 
 
+# Conservative percentage floors plus a 5-point safety reserve. These are
+# policy units, not token predictions; UNKNOWN remains usable only as fallback.
+_DEMAND_FLOOR = {
+    "mechanical": 5.0,
+    "standard-coding": 15.0,
+    "advanced-coding": 30.0,
+    "review": 10.0,
+    "planning": 10.0,
+    "high-risk": 30.0,
+}
+SAFETY_RESERVE_PCT = 5.0
+
+
+def estimated_demand_pct(capability: str, risk_level: str) -> float:
+    """Deterministic SMALL/MEDIUM/LARGE demand proxy from existing routing facts."""
+    floor = _DEMAND_FLOOR.get(capability, 15.0)
+    if risk_level in {"high", "critical"}:
+        floor = max(floor, 30.0)
+    return floor
+
+
+def capacity_sufficient(snapshot: ResourceSnapshot, capability: str, risk_level: str) -> bool | None:
+    """True/False for known quota, None when no reliable total exists."""
+    if snapshot.state == QuotaState.EXHAUSTED:
+        return False
+    if not snapshot.is_known:
+        return None
+    return float(snapshot.headroom_pct) >= estimated_demand_pct(capability, risk_level) + SAFETY_RESERVE_PCT
+
 def _validate_override_value(
     provider: str,
     value,

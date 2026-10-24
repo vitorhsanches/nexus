@@ -25,7 +25,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from nexus.routing.catalog import default_catalog
+from nexus.routing.catalog import default_catalog, production_eligible
 from nexus.routing.models import (
     CapabilityClass,
     ModelRoute,
@@ -246,27 +246,46 @@ class AdaptiveRoutingService:
             if approved_catalog is not None
             else default_catalog()
         )
+        self._uses_operator_model_selection = approved_catalog is None
 
         # Legacy static routes, used only for total-telemetry-outage
-        # fallback. (model, provider, effort, execution_path).
+        # fallback. Each capability maps to an ORDERED tuple of candidate
+        # route identities: (model, provider, effort, execution_path).
+        #
+        # A capability may list more than one candidate (weakest first).
+        # _legacy_fallback_decision() builds a restricted catalog view from
+        # every listed candidate that is actually present in the approved
+        # catalog, then revalidates ALL of them through the exact same
+        # select_best_route() hard gates used everywhere else (capability,
+        # risk, approved/enabled, experimental, blocked models, provider
+        # health, headroom). This is what lets a cheap LOW/MEDIUM-risk
+        # candidate keep winning on cost/effort scoring while a HIGH-risk
+        # request that only a stronger candidate can satisfy still resolves
+        # instead of failing closed. No candidate here is new or invented:
+        # each identity already exists in
+        # nexus.routing.catalog.APPROVED_CATALOG.
         self._legacy_fallback = legacy_fallback or {
             CapabilityClass.MECHANICAL.value: (
-                "oc/big-pickle",
-                "opencode",
-                "low",
-                "OMNIROUTE",
+                # oc/big-pickle is listed first (cheapest) but is currently
+                # disabled (enabled=False in APPROVED_CATALOG). It is kept
+                # here so the outage fallback automatically re-activates it
+                # once execution-context qualification is complete and
+                # enabled is restored.  select_best_route() enforces the
+                # enabled hard gate, so a disabled route is never selected.
+                ("oc/big-pickle", "opencode", "low", "OMNIROUTE"),
+                # cc/claude-sonnet-5-low is the approved, enabled fallback
+                # for mechanical/LOW while oc/big-pickle remains disabled.
+                ("cc/claude-sonnet-5-low", "claude", "low", "OMNIROUTE"),
             ),
             CapabilityClass.STANDARD_CODING.value: (
-                "cc/claude-sonnet-5-low",
-                "claude",
-                "low",
-                "OMNIROUTE",
+                ("cc/claude-sonnet-5-low", "claude", "low", "OMNIROUTE"),
+            ),
+            CapabilityClass.ADVANCED_CODING.value: (
+                ("cc/claude-sonnet-5-high", "claude", "low", "OMNIROUTE"),
             ),
             CapabilityClass.REVIEW.value: (
-                "cc/claude-sonnet-5-low",
-                "claude",
-                "low",
-                "OMNIROUTE",
+                ("cc/claude-sonnet-5-low", "claude", "low", "OMNIROUTE"),
+                ("cc/claude-sonnet-5-high", "claude", "high", "OMNIROUTE"),
             ),
         }
 
@@ -307,37 +326,67 @@ class AdaptiveRoutingService:
             for error in snapshot.errors
         )
 
+    @staticmethod
+    def _normalized_fallback_identities(raw):
+        """Accept both a single identity tuple and an ordered tuple of them.
+
+        Backward compatible with any previously injected
+        ``legacy_fallback={capability: (model, provider, effort, path)}``
+        shape while allowing the default table to list more than one
+        ordered candidate per capability.
+        """
+
+        if not raw:
+            return ()
+
+        if isinstance(raw[0], str):
+            return (tuple(raw),)
+
+        return tuple(tuple(identity) for identity in raw)
+
     def _legacy_fallback_decision(
         self,
         capability: str,
         risk_level: str,
+        blocked_models: frozenset[str] = frozenset(),
+        blocked_providers: frozenset[str] = frozenset(),
+        approved_catalog: tuple[ModelRoute, ...] | None = None,
     ) -> RoutingDecision:
         """Return the legacy route only after normal router hard gates.
 
         Resource overrides are deliberately ignored during complete telemetry
         outage so degraded operation preserves the existing static routing
         behavior. Capability, risk, approval, enabled state and Terra blocking
-        remain authoritative because the candidate is revalidated through
-        select_best_route().
+        remain authoritative because every candidate is revalidated through
+        select_best_route() -- exactly the same hard-gate pipeline used for
+        live telemetry. A capability may configure more than one candidate
+        identity (weakest first); select_best_route()'s existing
+        capability/risk gate and effort tie-break naturally keep a cheaper
+        candidate winning for LOW/MEDIUM risk while only a stronger
+        candidate survives for a HIGH-risk request -- with no bypass of any
+        kind.
         """
 
-        fallback = self._legacy_fallback.get(capability)
+        identities = self._normalized_fallback_identities(
+            self._legacy_fallback.get(capability)
+        )
 
-        if fallback is None:
+        if not identities:
             raise AdaptiveRoutingUnavailableError(
                 "No approved legacy fallback exists for "
                 f"capability={capability!r}."
             )
 
-        model, provider, effort, execution_path = fallback
-
         fallback_catalog = tuple(
             route
-            for route in self._approved_catalog
-            if route.model_id == model
-            and route.provider == provider
-            and route.effort == effort
-            and route.execution_path == execution_path
+            for route in (approved_catalog if approved_catalog is not None else self._approved_catalog)
+            if (
+                route.model_id,
+                route.provider,
+                route.effort,
+                route.execution_path,
+            )
+            in identities
         )
 
         if not fallback_catalog:
@@ -349,10 +398,20 @@ class AdaptiveRoutingService:
         request = RoutingRequest(
             capability=capability,
             risk_level=risk_level,
+            blocked_models=blocked_models,
+            blocked_providers=blocked_providers,
         )
 
         # Empty resource mapping means UNKNOWN/NEUTRAL headroom.
         # No manual headroom override may influence complete-outage fallback.
+        #
+        # NoEligibleRouteError is deliberately NOT wrapped here: it
+        # propagates exactly as it did before this fix (fail-closed), and
+        # every caller (resolve_initial_worker_route, review_worker) already
+        # catches both NoEligibleRouteError and
+        # AdaptiveRoutingUnavailableError identically, so preserving the
+        # original exception type keeps existing fail-closed regression
+        # tests (e.g. total-outage CRITICAL-risk gate tests) exact.
         selected = select_best_route(
             request,
             catalog=fallback_catalog,
@@ -410,6 +469,8 @@ class AdaptiveRoutingService:
         self,
         capability: str,
         risk_level=None,
+        blocked_models: frozenset[str] = frozenset(),
+        blocked_providers: frozenset[str] = frozenset(),
     ) -> RoutingDecision:
         """Select the best route for an explicit router capability class.
 
@@ -434,17 +495,54 @@ class AdaptiveRoutingService:
 
         normalized_risk = normalize_risk_level(risk_level)
 
-        return self._select_route(capability, normalized_risk)
+        return self._select_route(
+            capability, normalized_risk, blocked_models=blocked_models,
+            blocked_providers=blocked_providers
+        )
 
     def _select_route(
         self,
         capability: str,
         risk_level: str,
+        blocked_models: frozenset[str] = frozenset(),
+        blocked_providers: frozenset[str] = frozenset(),
     ) -> RoutingDecision:
         """Shared routing pipeline for both explicit and Task-derived
         capability selection. Contains no policy duplication: all hard
         gates and scoring live in nexus.routing.router/scoring/telemetry.
+
+        ``blocked_models`` reuses ``RoutingRequest.blocked_models`` (the
+        existing hard-eligibility gate in ``router._eligible``) so a caller
+        that already knows a specific model was proven insufficient for
+        this exact capability (e.g. Nexus Program's bounded phase retry
+        after a CAPABILITY_FAILURE Manager Review verdict) can exclude it
+        from selection deterministically -- the remaining eligible routes
+        are still ranked by the same cost-aware scoring, never a hardcoded
+        model. Total-telemetry-outage legacy fallback is unaffected: it is
+        a rare, already-approved single-route path that predates this
+        parameter.
         """
+
+        approved_catalog = self._approved_catalog
+        if self._uses_operator_model_selection:
+            from nexus.registry import workspace_model_settings
+            from nexus.routing.catalog import default_active_model_ids
+
+            # Qualification is operator-managed at runtime, so re-read the
+            # persisted policy before every new routing decision.
+            approved_catalog = default_catalog()
+            qualified_ids = {
+                route.model_id for route in production_eligible(approved_catalog)
+            }
+            active_ids = workspace_model_settings.effective_active_ids(
+                qualified_ids, default_active_model_ids()
+            )
+            approved_catalog = tuple(
+                route for route in approved_catalog if route.model_id in active_ids
+            )
+
+        from nexus.workspace.omniroute_oauth import filter_connected_routes
+        approved_catalog = filter_connected_routes(approved_catalog)
 
         snapshot = self._collect_telemetry()
 
@@ -461,8 +559,8 @@ class AdaptiveRoutingService:
 
         if total_outage:
             return self._legacy_fallback_decision(
-                capability,
-                risk_level,
+                capability, risk_level, blocked_models, blocked_providers,
+                approved_catalog=approved_catalog,
             )
 
         telemetry_attempted = (
@@ -483,14 +581,14 @@ class AdaptiveRoutingService:
 
         if models_discovery_authoritative:
             runtime_catalog = build_runtime_catalog(
-                self._approved_catalog,
+                approved_catalog,
                 snapshot,
             )
         else:
-            runtime_catalog = self._approved_catalog
+            runtime_catalog = approved_catalog
 
         resources = build_routing_resources(
-            self._approved_catalog,
+            approved_catalog,
             snapshot,
             overrides=self._overrides,
         )
@@ -498,6 +596,8 @@ class AdaptiveRoutingService:
         request = RoutingRequest(
             capability=capability,
             risk_level=risk_level,
+            blocked_models=blocked_models,
+            blocked_providers=blocked_providers,
         )
 
         selected = select_best_route(

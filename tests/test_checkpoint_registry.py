@@ -316,6 +316,14 @@ class CheckpointRegistryTestCase(unittest.TestCase):
                 "worker": {"status": "COMPLETED"},
                 "review": {"verdict": "PASS"},
             },
+        ), patch(
+            "nexus.orchestration.go.run_integrated_plan",
+            return_value=[{
+                "status": "COMPLETED",
+                "worker": {"status": "COMPLETED"},
+                "review": {"verdict": "PASS"},
+                "_planned_scope": "Fix the thing.",
+            }],
         ):
             result = run_go("Norte: fix a bug", project_query="norte")
 
@@ -557,6 +565,14 @@ class CheckpointRegistryTestCase(unittest.TestCase):
                 "worker": {"status": "COMPLETED"},
                 "review": {"verdict": "PASS"},
             },
+        ), patch(
+            "nexus.orchestration.go.run_integrated_plan",
+            return_value=[{
+                "status": "COMPLETED",
+                "worker": {"status": "COMPLETED"},
+                "review": {"verdict": "PASS"},
+                "_planned_scope": "Fix the thing.",
+            }],
         ):
             result = run_go(
                 "Norte: checkpoint manager",

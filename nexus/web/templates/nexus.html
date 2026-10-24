@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus</title>
+  <link rel="stylesheet" href="/static/css/tokens.css?v={{ asset_version }}">
+  <link rel="stylesheet" href="/static/css/nexus.css?v={{ asset_version }}">
+  <link rel="stylesheet" href="/static/css/programs.css?v={{ asset_version }}">
+  <link rel="stylesheet" href="/static/css/control-center.css?v={{ asset_version }}">
+  <link rel="stylesheet" href="/static/css/chat.css?v={{ asset_version }}">
+  <link rel="stylesheet" href="/static/css/dev.css?v={{ asset_version }}">
+</head>
+<body data-view="overview">
+<div class="shell">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon">N</div>
+      <div>
+        <span class="brand-name">NEXUS</span>
+        <span class="brand-subtitle">CONTROL CENTER</span>
+      </div>
+    </div>
+
+    <a class="workspace-entry" id="nav-workspace" href="/nexus/workspace">Open agent workspace →</a>
+
+    <nav class="primary-nav" aria-label="Control Center">
+      <button class="nav-item active" id="nav-overview" type="button" data-target="overview-dashboard"><span>01</span>Overview</button>
+      <button class="nav-item" id="nav-chat" type="button" data-target="chat-view"><span>02</span>Chat</button>
+      <button class="nav-item" id="nav-dev" type="button" data-target="dev-view"><span>03</span>Development</button>
+      <button class="nav-item" type="button" data-target="sidebar-projects"><span>04</span>Projects</button>
+      <button class="nav-item" type="button" data-target="overview-program"><span>05</span>Programs</button>
+      <button class="nav-item" type="button" data-target="overview-terminal"><span>06</span>Executions</button>
+      <button class="nav-item" type="button" data-target="overview-routing"><span>07</span>Models &amp; Routing</button>
+      <button class="nav-item" type="button" data-target="overview-recovery"><span>08</span>Recovery</button>
+      <button class="nav-item" type="button" data-target="overview-system"><span>09</span>System</button>
+    </nav>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Projects</div>
+      <div id="sidebar-projects"></div>
+    </div>
+
+    <section class="chat-sessions-section" aria-labelledby="chat-sessions-title">
+      <div class="chat-sessions-heading">
+        <div class="sidebar-section-title" id="chat-sessions-title">Chat sessions</div>
+        <button class="chat-new-button" id="chat-new-conversation" type="button" disabled
+          aria-label="New conversation" title="Select a project to start a conversation">+</button>
+      </div>
+      <div id="chat-session-groups" class="chat-session-groups" aria-live="polite"></div>
+      <p class="chat-session-state" id="chat-session-state-disconnected" data-session-state="disconnected" role="status">Chat backend not connected.</p>
+      <p class="chat-session-state" data-session-state="loading" hidden>Loading conversations…</p>
+      <p class="chat-session-state" data-session-state="empty" hidden>No conversations for this project yet.</p>
+      <p class="chat-session-state" data-session-state="error" role="alert" hidden>Could not load conversations.</p>
+    </section>
+
+    <details class="sidebar-disclosure sidebar-programs-section">
+      <summary class="sidebar-section-title">Programs</summary>
+      <div class="sidebar-programs-scroll" id="sidebar-programs"></div>
+    </details>
+
+    <details class="sidebar-disclosure sidebar-runs-section">
+      <summary class="sidebar-section-title">Recent runs</summary>
+      <div class="sidebar-runs-scroll" id="sidebar-runs"></div>
+    </details>
+
+    <div class="sidebar-footer">
+      <a href="/" class="sidebar-footer-link">Workspace</a>
+      <span class="sidebar-footer-link disabled" aria-disabled="true">Settings</span>
+      <a href="/docs" class="sidebar-footer-link">Documentation</a>
+    </div>
+  </aside>
+
+  <!-- ── Main panel ── -->
+  <div class="main">
+
+    <!-- ── Top bar ── -->
+    <header class="topbar">
+      <div class="context-tabs" aria-label="Runtime context">
+        <span class="context-tab active">nexus-core</span>
+        <span class="context-tab">control-center</span>
+        <span class="context-tab">routing</span>
+        <span class="context-tab">runtime</span>
+        <span class="context-tab">workers</span>
+      </div>
+      <div class="topbar-context">
+        <div class="topbar-chip">
+          <span class="topbar-label">Project</span>
+          <span class="topbar-value" id="top-project">—</span>
+        </div>
+        <div class="topbar-chip">
+          <span class="topbar-label">Run</span>
+          <span class="topbar-value" id="top-run">—</span>
+        </div>
+        <div class="topbar-chip">
+          <span class="topbar-label">v{{ app_version }}</span>
+        </div>
+        <span class="view-mode-badge vm-none" id="view-mode-badge">OVERVIEW</span>
+        <div class="nexus-status idle" id="nexus-status">
+          <div class="status-dot"></div>
+          <span id="nexus-status-text">IDLE</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Operational overview. All values are populated from read-only Nexus APIs. -->
+    <main class="overview-dashboard" id="overview-dashboard">
+      <section class="overview-header" id="overview-system">
+        <div>
+          <div class="eyebrow">OPERATIONAL OVERVIEW</div>
+          <h1>Nexus Control Center</h1>
+          <p>Observe orchestration, routing, recovery, and execution state from one surface.</p>
+        </div>
+        <div class="overview-statuses" aria-label="Runtime status">
+          <span class="ops-badge neutral" id="overview-runtime-badge">RUNTIME UNKNOWN</span>
+        </div>
+      </section>
+
+      <section class="runtime-strip" aria-label="OmniRoute state">
+        <div><span>OmniRoute</span><strong id="runtime-omniroute">UNKNOWN</strong></div>
+        <div><span>Credential Store</span><strong id="runtime-credentials">UNKNOWN</strong></div>
+        <div><span>Providers</span><strong id="runtime-providers">UNKNOWN</strong></div>
+        <div><span>Callable Routes</span><strong id="runtime-routes">—</strong></div>
+      </section>
+
+      <section class="kpi-grid" aria-label="Operational metrics">
+        <article class="kpi-card"><span>Active Programs</span><strong id="kpi-programs">—</strong><small>durable program state</small></article>
+        <article class="kpi-card"><span>Active Workers</span><strong id="kpi-tasks">—</strong><small>running worker agents</small></article>
+        <article class="kpi-card"><span>Waiting Review</span><strong id="kpi-review">—</strong><small>review queue</small></article>
+        <article class="kpi-card"><span>Blocked</span><strong id="kpi-blocked">—</strong><small>programs + runs</small></article>
+        <article class="kpi-card"><span>Providers Ready</span><strong id="kpi-providers">—</strong><small>authenticated &amp; observed</small></article>
+      </section>
+
+      <section class="ops-grid">
+        <article class="ops-panel program-progress" id="overview-program">
+          <header class="panel-heading">
+            <div><span class="panel-kicker">PROGRAM PROGRESS</span><h2 id="overview-program-name">No active program</h2></div>
+            <button class="text-action" id="overview-open-program" type="button" disabled>OPEN DETAIL</button>
+          </header>
+          <div class="program-meta" id="overview-program-meta">No durable Program state is available.</div>
+          <div class="program-progress-bar" aria-label="Program completion"><span id="overview-program-progress" style="width:0%"></span></div>
+          <div class="program-phase-track" id="overview-program-phases"><div class="ops-empty">No phase data.</div></div>
+        </article>
+
+        <article class="ops-panel routing-panel" id="overview-routing">
+          <header class="panel-heading">
+            <div><span class="panel-kicker">MODELS &amp; ROUTING</span><h2>Approved routes</h2></div>
+            <span class="panel-count" id="routing-count">—</span>
+          </header>
+          <div class="routing-policy" id="routing-policy">capability → availability → cost → fallback</div>
+          <div class="routing-table-wrap">
+            <table class="routing-table">
+              <thead><tr><th>Provider / Model</th><th>Capability</th><th>Health</th><th>Eligible</th></tr></thead>
+              <tbody id="routing-rows"><tr><td colspan="4" class="ops-empty">Loading routing state…</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="ops-panel live-terminal" id="overview-terminal">
+          <header class="panel-heading">
+            <div><span class="panel-kicker">LIVE EXECUTION</span><h2>Event stream</h2></div>
+            <div class="terminal-actions">
+              <button class="text-action active" id="terminal-follow" type="button" aria-pressed="true">FOLLOW</button>
+              <button class="text-action" id="terminal-clear" type="button">CLEAR VIEW</button>
+            </div>
+          </header>
+          <div class="terminal-context"><span id="terminal-run-id">NO RUN SELECTED</span><span id="terminal-event-count">0 EVENTS</span></div>
+          <div class="terminal-output" id="terminal-output" role="log" aria-label="Nexus execution events" tabindex="0">
+            <div class="terminal-empty">No persisted execution events.</div>
+          </div>
+        </article>
+
+        <div class="ops-side-stack">
+          <article class="ops-panel compact-panel" id="overview-recovery">
+            <header class="panel-heading"><div><span class="panel-kicker">RECOVERY / ALERTS</span><h2>Recent signals</h2></div></header>
+            <div class="signal-list" id="recovery-list"><div class="ops-empty">No recovery events recorded.</div></div>
+          </article>
+          <article class="ops-panel compact-panel" id="overview-activity">
+            <header class="panel-heading"><div><span class="panel-kicker">RECENT ACTIVITY</span><h2>Operational timeline</h2></div></header>
+            <div class="signal-list" id="activity-list"><div class="ops-empty">No recent activity.</div></div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <!-- ── Mission Commander (compact strip) ── -->
+    <div class="commander-strip" aria-label="Nexus command bar">
+      <form class="command-palette" id="command-palette">
+        <label for="nexus-command-input">nexus&gt;</label>
+        <input id="nexus-command-input" type="text" autocomplete="off" placeholder="overview · open program &lt;id&gt; · view execution &lt;id&gt; · models · recovery">
+        <button class="command-open" type="submit">OPEN</button>
+        <span class="command-feedback" id="command-feedback" aria-live="polite"></span>
+      </form>
+      <details class="mission-actions" id="mission-actions">
+        <summary>+ NEW MISSION</summary>
+        <div class="mission-action-body">
+          <label class="sr-only" for="project-select">Project</label>
+          <select class="project-select" id="project-select">
+            <option value="">— Select project —</option>
+          </select>
+          <div class="manager-model-field" id="manager-model-field">
+            <label class="sr-only" for="manager-model-filter">Filter Manager models</label>
+            <input
+              type="text"
+              class="manager-model-filter"
+              id="manager-model-filter"
+              placeholder="Filter manager models…"
+              autocomplete="off"
+            >
+            <label class="sr-only" for="manager-model-select">Manager model</label>
+            <select class="manager-model-select" id="manager-model-select">
+              <option value="">Auto — Nexus default</option>
+            </select>
+            <p class="manager-model-reason" id="manager-model-reason"></p>
+          </div>
+          <label class="sr-only" for="mission-input">Mission description</label>
+          <textarea
+            class="mission-textarea"
+            id="mission-input"
+            placeholder="Describe the mission… e.g. Add OAuth2 login with GitHub provider to the existing Flask API"
+            rows="2"
+          ></textarea>
+          <label class="prepare-deps-field" for="prepare-dependencies-check" title="Runs `npm ci --ignore-scripts` + a baseline test in the disposable integration worktree before the Worker starts. No-op for non-npm projects. Fails before launching the Worker if not achievable.">
+            <input type="checkbox" id="prepare-dependencies-check">
+            Prepare JS dependencies (npm ci)
+          </label>
+          <div class="commander-actions">
+            <button class="run-btn" id="run-btn" type="button">&#9654; RUN MISSION</button>
+            <span class="msg-line" id="run-msg"></span>
+          </div>
+          <p class="action-disabled-reason" id="run-disabled-reason"></p>
+        </div>
+      </details>
+    </div>
+
+    <!-- ── Workspace area (fills remaining space) ── -->
+    <div class="workspace-area">
+
+      <!-- Empty / no-run state -->
+      <div id="ws-empty" class="ws-empty-state">
+        <div class="ws-empty-icon">&#11041;</div>
+        <div class="ws-empty-hint">Select a run from the sidebar or launch a mission above.</div>
+        <div class="ws-empty-sub">Ctrl+Enter to run mission</div>
+      </div>
+
+      <!-- Active run view (hidden until a run is opened) -->
+      <div id="ws-run">
+
+        <!-- Run header strip -->
+        <div class="run-header-strip">
+          <nav class="crumb" aria-label="Context">
+            <span>NEXUS</span><span class="crumb-sep">/</span>
+            <span id="ws-run-project">—</span><span class="crumb-sep">/</span>
+            <span class="run-hdr-id" id="ws-run-id">—</span>
+          </nav>
+          <span class="run-hdr-status ast-created" id="ws-run-status">—</span>
+          <span class="run-hdr-mission" id="ws-run-mission">—</span>
+          <span class="run-hdr-manager" id="ws-run-manager">—</span>
+          <span class="run-hdr-timing" id="ws-run-timing"></span>
+        </div>
+
+        <!-- Execution pipeline bar -->
+        <div class="lifecycle-bar">
+          <div class="lifecycle-stage waiting" id="lc-manager">
+            <div class="stage-dot">M</div>
+            <span class="stage-label">Planning</span>
+          </div>
+          <div class="lifecycle-stage waiting" id="lc-scouts">
+            <div class="stage-dot">S</div>
+            <span class="stage-label">Scouting</span>
+          </div>
+          <div class="lifecycle-stage waiting" id="lc-workers">
+            <div class="stage-dot">W</div>
+            <span class="stage-label">Execution</span>
+          </div>
+          <div class="lifecycle-stage waiting" id="lc-review">
+            <div class="stage-dot">R</div>
+            <span class="stage-label">Review</span>
+          </div>
+          <div class="lifecycle-stage waiting" id="lc-integration">
+            <div class="stage-dot">&#10003;</div>
+            <span class="stage-label">Done</span>
+          </div>
+        </div>
+
+        <!-- Scrollable workspace body -->
+        <div class="ws-body run-body">
+
+          <!-- Dominant column: the execution trace -->
+          <!-- Result: dominant on terminal runs (phase-driven), hidden while running -->
+          <section class="run-result panel-card panel-result" aria-label="Result">
+            <div class="panel-card-title">Result</div>
+            <div class="panel-card-body" id="result-content">
+              <div class="empty-state"><div class="empty-icon">&#9675;</div>Awaiting completion.</div>
+            </div>
+          </section>
+
+          <div class="run-main">
+          <section class="agent-panes run-side-block" id="agent-panes" aria-label="Agent panes">
+            <div class="run-col-title">
+              <span>Agents</span>
+              <span class="agent-disclosure-summary" id="agent-disclosure-summary">—</span>
+            </div>
+            <!-- Mission progress: one compact row per real agent (no fictional
+                 roles), built from the same data as the cards below. -->
+            <div class="mission-progress" id="mission-progress"></div>
+            <!-- agent-grid: agents rendered in phase groups, always visible -->
+            <div id="phase-groups" class="phase-groups agent-grid"></div>
+          </section>
+
+          <section class="run-trace tl-section" aria-label="Live execution">
+            <div class="run-col-title">
+              <span>Live execution</span>
+              <span class="run-col-note">checkpoint trace</span>
+            </div>
+            <div class="trace-filters" role="group" aria-label="Trace filter">
+              <button type="button" class="text-action active" data-trace-filter="all" aria-pressed="true">ALL</button>
+              <button type="button" class="text-action" data-trace-filter="manager" aria-pressed="false">MANAGER</button>
+              <button type="button" class="text-action" data-trace-filter="workers" aria-pressed="false">WORKERS</button>
+              <button type="button" class="text-action" data-trace-filter="review" aria-pressed="false">REVIEW</button>
+              <button type="button" class="text-action" data-trace-filter="system" aria-pressed="false">SYSTEM</button>
+            </div>
+            <div class="timeline" id="timeline"></div>
+          </section>
+
+          <!-- Side column: compact system state -->
+          <aside class="run-side" aria-label="Run summary">
+
+            <section class="run-side-block">
+              <div class="run-col-title"><span>System</span></div>
+              <dl class="sys-list">
+                <div><dt>OmniRoute</dt><dd data-mirror="runtime-omniroute">—</dd></div>
+                <div><dt>Credentials</dt><dd data-mirror="runtime-credentials">—</dd></div>
+                <div><dt>Providers</dt><dd data-mirror="runtime-providers">—</dd></div>
+                <div><dt>Callable routes</dt><dd data-mirror="runtime-routes">—</dd></div>
+                <div><dt>Workers</dt><dd id="sys-workers">—</dd></div>
+                <div><dt>Reviews</dt><dd id="sys-reviews">—</dd></div>
+              </dl>
+            </section>
+
+            <section class="run-side-block" aria-label="Current models">
+              <div class="run-col-title"><span>Current models</span></div>
+              <ul class="model-list" id="current-models"><li class="model-empty">No models in this run yet.</li></ul>
+            </section>
+
+          </aside>
+          </div><!-- /run-main -->
+
+          <!-- Bottom panels: Review | Integration -->
+          <div class="bottom-panels run-bottom">
+
+            <div class="panel-card">
+              <div class="panel-card-title">Review</div>
+              <div class="panel-card-body" id="review-content">
+                <div class="empty-state"><div class="empty-icon">&#9675;</div>No reviews yet.</div>
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-card-title">Integration</div>
+              <div class="panel-card-body" id="integration-content">
+                <div class="empty-state"><div class="empty-icon">&#9675;</div>No integration events yet.</div>
+              </div>
+            </div>
+
+          </div><!-- /bottom-panels -->
+
+        </div><!-- /ws-body -->
+      </div><!-- /ws-run -->
+
+      <!-- Program live workspace (PROGRAM VIEW; hidden until a Program is selected) -->
+      <div id="ws-program">
+
+        <div class="run-header-strip">
+          <span class="run-hdr-id" id="ws-program-id">—</span>
+          <span class="run-hdr-status ast-created" id="ws-program-status">—</span>
+          <span class="run-hdr-mission" id="ws-program-name">—</span>
+          <span class="run-hdr-timing" id="ws-program-timing"></span>
+        </div>
+
+        <div class="program-phase-strip" id="ws-program-phase">—</div>
+
+        <div class="ws-body">
+          <div id="program-phase-groups" class="phase-groups agent-grid">
+            <div class="empty-state"><div class="empty-icon">&#9675;</div>No agents active yet.</div>
+          </div>
+        </div>
+      </div><!-- /ws-program -->
+
+      <!-- Chat shell. No network client or conversation data is connected in T1. -->
+      <section id="ws-chat" aria-labelledby="chat-title" aria-hidden="true">
+        <header class="chat-header">
+          <div class="chat-heading">
+            <div class="chat-eyebrow">INTERACTIVE CHAT</div>
+            <h1 id="chat-title">Nexus Chat</h1>
+          </div>
+          <label class="chat-project-picker">Project
+            <select id="chat-project-select" aria-label="Chat project" disabled>
+              <option value="">Loading projects…</option>
+            </select>
+          </label>
+          <div class="chat-header-context">
+            <div><span>Session</span><strong id="chat-session-value">Select a project</strong></div>
+          </div>
+          <button id="chat-return" class="chat-return" type="button" hidden>Return to previous view</button>
+        </header>
+
+        <div id="chat-layout" class="chat-layout">
+          <section class="chat-conversation" aria-label="Conversation">
+            <div class="chat-connection-banner" id="chat-backend-status" role="status" aria-live="polite">
+              <span class="chat-status-dot" aria-hidden="true"></span>
+              <span id="chat-status-text">Connecting to Chat backend…</span>
+            </div>
+
+            <div class="chat-transcript" id="chat-transcript" role="log" aria-label="Chat messages" aria-live="polite" aria-relevant="additions text" tabindex="0">
+              <div class="chat-empty-state" id="chat-empty-state">
+                <div class="chat-empty-mark" aria-hidden="true">N</div>
+                <h2 id="chat-empty-title">Choose a project</h2>
+                <p id="chat-empty-description">Select a registered project, then start a conversation or reopen one from the session list.</p>
+                <span class="chat-empty-note" id="chat-history-note">No messages or tool activity are available yet.</span>
+              </div>
+            </div>
+            <!-- Backend history pages forward chronologically (asc) from the
+                 start of the thread, never backward from the end -- this
+                 control fetches the next (more recent) page, not older
+                 content, so it sits below the transcript. -->
+            <button type="button" id="chat-load-older" class="chat-load-older" hidden>Load more messages</button>
+
+            <form class="chat-composer" id="chat-composer" aria-label="Message composer">
+              <div class="chat-model-picker">
+                <label for="chat-model-search">New session configuration</label>
+                <input id="chat-model-search" type="search" placeholder="Search approved routes" aria-label="Search approved models" disabled>
+                <select id="chat-model-filter" aria-label="Filter models"><option value="all">All</option><option value="favorites">Favorites</option></select>
+                <span id="chat-model-result-count" aria-live="polite"></span>
+                <select id="chat-model-select" aria-label="Model for new Chat session" disabled></select>
+                <select id="chat-effort-select" aria-label="Reasoning effort" disabled><option value="">Model default (unconfirmed)</option></select>
+                <label class="chat-cost-confirm"><input id="chat-unknown-cost-confirm" type="checkbox"> Allow route with unknown cost</label>
+                <button type="button" id="chat-model-favorite" class="chat-secondary-button" aria-pressed="false" disabled>☆ Favorite</button>
+                <span id="chat-session-model-note" class="chat-model-session-note">Selection applies to the next new conversation.</span>
+              </div>
+              <span id="chat-model-error" class="chat-model-error" role="alert" hidden></span>
+              <label class="sr-only" for="chat-message-input">Message</label>
+              <textarea id="chat-message-input" rows="3" placeholder="Select a session to send a message…" aria-describedby="chat-composer-help chat-backend-status" disabled></textarea>
+              <div class="chat-composer-footer">
+                <div class="chat-composer-meta">
+                  <span class="chat-model-placeholder" id="chat-model-placeholder">Provider/model: unavailable</span>
+                  <span class="chat-readonly-badge" id="chat-readonly-badge">READ-ONLY</span>
+                  <span id="chat-composer-help" class="chat-composer-help">Enter to send · Shift+Enter for a new line.</span>
+                </div>
+                <div class="chat-composer-actions">
+                  <button type="button" id="chat-stop-button" class="chat-secondary-button" disabled>Stop</button>
+                  <button type="submit" id="chat-send-button" class="chat-send-button" disabled>Send</button>
+                </div>
+              </div>
+            </form>
+          </section>
+
+          <aside class="chat-context-panel" aria-label="Chat context">
+            <div class="chat-context-header">
+              <h2>Context</h2>
+              <button type="button" id="chat-context-toggle" class="chat-context-toggle" aria-expanded="true" aria-controls="chat-context-body">Collapse</button>
+            </div>
+            <div id="chat-context-body" class="chat-context-body">
+              <section class="chat-context-section">
+                <h3>Project / workspace</h3>
+                <p id="chat-workspace-detail">Select a registered project.</p>
+              </section>
+              <section class="chat-context-section">
+                <h3>Session</h3>
+                <p id="chat-session-detail">Session information appears after backend connection.</p>
+              </section>
+              <section class="chat-context-section">
+                <h3>Selected route</h3>
+                <p id="chat-route-detail">Not available for Chat yet.</p>
+              </section>
+              <section class="chat-context-section">
+                <h3>Execution activity</h3>
+                <p id="chat-activity-status">Idle</p>
+                <p id="chat-activity-model">Model: not reported</p>
+                <p id="chat-activity-elapsed">Elapsed: —</p>
+                <ul id="chat-activity-events" class="chat-activity-events" aria-live="polite"></ul>
+              </section>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- Development Mode shell (F2.2). A separate area from Chat -- its
+           own project/session picker, its own composer, its own SSE
+           stream. Never shares DOM or JS state with #ws-chat. -->
+      <section id="ws-dev" aria-labelledby="dev-title" aria-hidden="true">
+        <header class="chat-header">
+          <div class="chat-heading">
+            <div class="chat-eyebrow">DEVELOPMENT MODE</div>
+            <h1 id="dev-title">Nexus Development</h1>
+          </div>
+          <label class="chat-project-picker">Project
+            <select id="dev-project-select" aria-label="Development project" disabled>
+              <option value="">Loading projects…</option>
+            </select>
+          </label>
+          <button id="dev-create-session" class="chat-secondary-button" type="button" disabled>+ New session</button>
+          <button id="dev-return" class="chat-return" type="button" hidden>Return to previous view</button>
+        </header>
+
+        <div id="dev-gate-banner" class="dev-gate-banner" role="status" hidden></div>
+
+        <div id="dev-layout" class="chat-layout">
+          <section class="chat-conversation" aria-label="Development session">
+            <div class="chat-connection-banner" id="dev-backend-status" role="status" aria-live="polite">
+              <span class="chat-status-dot" aria-hidden="true"></span>
+              <span id="dev-status-text">Connecting to Development backend…</span>
+            </div>
+
+            <p class="dev-project-note" id="dev-project-note"></p>
+
+            <div class="dev-session-panel">
+              <h2>Sessions</h2>
+              <div id="dev-session-list" class="dev-session-list">
+                <p class="dev-session-empty">Select a project to see its Development sessions.</p>
+              </div>
+              <div id="dev-session-detail" class="dev-session-detail"></div>
+            </div>
+
+            <div class="dev-result-panel">
+              <h2>Result</h2>
+              <pre id="dev-turn-result" class="dev-turn-result">No turn run yet.</pre>
+            </div>
+
+            <section class="dev-mission-panel" aria-label="Autonomous mission runner">
+              <h2>Autonomous mission</h2>
+              <p class="dev-mission-help">Runs one implementation turn, a trusted server test profile, and at most one repair. The result always stops for human review.</p>
+              <textarea id="dev-mission-description" rows="3" placeholder="Describe the bounded mission…" disabled></textarea>
+              <div class="dev-mission-actions">
+                <select id="dev-mission-test-profile" aria-label="Trusted test profile" disabled>
+                  <option value="">Select a project first</option>
+                </select>
+                <button type="button" id="dev-mission-start" class="chat-send-button" disabled>Start mission</button>
+                <button type="button" id="dev-mission-stop" class="chat-secondary-button" disabled>Interrupt mission</button>
+              </div>
+              <pre id="dev-mission-progress" class="dev-mission-progress" aria-live="polite">Select an active Development session.</pre>
+            </section>
+
+            <div class="dev-changed-files-panel">
+              <div class="dev-review-heading">
+                <h2>Changes review (read-only)</h2>
+                <button type="button" id="dev-review-refresh" class="chat-secondary-button">Refresh review</button>
+              </div>
+              <p id="dev-review-summary" class="dev-review-summary" role="status" aria-live="polite">Select a session to review its worktree.</p>
+              <div id="dev-review-changed" class="dev-review-changed" hidden>Worktree changed since the previous review.</div>
+              <div class="dev-review-layout">
+                <div id="dev-review-files" class="dev-review-files"><p class="dev-changed-files-empty">No review loaded.</p></div>
+                <div id="dev-review-patch" class="dev-review-patch"><p class="dev-changed-files-empty">Select a changed file.</p></div>
+              </div>
+              <section class="dev-integration-panel" aria-label="Human-approved integration">
+                <p id="dev-integration-gate" class="dev-integration-gate" role="status">Checking integration gate…</p>
+                <div class="dev-integration-actions">
+                  <button type="button" id="dev-create-review" class="chat-secondary-button">Review changes</button>
+                  <button type="button" id="dev-integration-preflight" class="chat-secondary-button" disabled>Check integration readiness</button>
+                  <button type="button" id="dev-reject-review" class="chat-secondary-button" disabled>Reject proposal</button>
+                  <label class="dev-integration-confirm"><input type="checkbox" id="dev-apply-confirm" disabled> I reviewed this exact snapshot and approve applying it.</label>
+                  <button type="button" id="dev-apply-review" class="chat-send-button" disabled>Apply approved changes</button>
+                </div>
+                <div id="dev-integration-summary" class="dev-integration-summary" aria-live="polite">Create a persisted review snapshot before checking readiness.</div>
+                <div id="dev-integration-message" class="dev-integration-message" role="status" aria-live="polite"></div>
+                <details class="dev-integration-history"><summary>Integration history</summary><div id="dev-integration-history-list">No integration history loaded.</div></details>
+              </section>
+              <div id="dev-changed-files" hidden></div>
+            </div>
+
+            <form class="chat-composer" id="dev-composer" aria-label="Development task composer">
+              <div class="chat-model-picker">
+                <label for="dev-model-search">Model &amp; effort for the next turn</label>
+                <input id="dev-model-search" type="search" placeholder="Search approved routes" aria-label="Search approved models">
+                <span id="dev-model-result-count" aria-live="polite"></span>
+                <select id="dev-model-select" aria-label="Model for the next Development turn"></select>
+                <select id="dev-effort-select" aria-label="Reasoning effort" disabled><option value="">Model default</option></select>
+              </div>
+              <label class="sr-only" for="dev-prompt-input">Development task</label>
+              <textarea id="dev-prompt-input" rows="4" placeholder="Describe the coding task to run in the isolated worktree…" disabled></textarea>
+              <div class="chat-composer-footer">
+                <div class="chat-composer-meta">
+                  <span class="chat-readonly-badge" id="dev-activity-status">Idle</span>
+                  <span id="dev-connection-status" class="dev-connection-status dev-connection-status-idle" role="status" aria-live="polite" hidden></span>
+                  <span id="dev-activity-elapsed">Elapsed: —</span>
+                </div>
+                <div class="chat-composer-actions">
+                  <button type="button" id="dev-stop-button" class="chat-secondary-button" disabled>Stop</button>
+                  <button type="button" id="dev-run-button" class="chat-send-button" disabled>Run</button>
+                </div>
+              </div>
+            </form>
+          </section>
+
+          <aside class="chat-context-panel" aria-label="Development activity">
+            <div class="chat-context-header"><h2>Activity</h2></div>
+            <div class="chat-context-body">
+              <section class="chat-context-section">
+                <h3>Tool activity</h3>
+                <ul id="dev-activity-events" class="chat-activity-events" aria-live="polite"></ul>
+              </section>
+              <section class="chat-context-section">
+                <h3>Restrictions</h3>
+                <p>Missions never commit, push, merge, or apply automatically. Review, Preflight, and Apply remain explicit human actions.</p>
+              </section>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </div><!-- /workspace-area -->
+
+  </div><!-- /main -->
+
+  <!-- ── Control Panel (Program status / phases / acceptance / routing) ── -->
+  <aside class="control-panel" id="control-panel">
+
+    <div id="cp-empty" class="cp-empty-state">
+      <div class="ws-empty-icon">&#8862;</div>
+      <div class="ws-empty-hint">Select a Program to see its live status.</div>
+    </div>
+
+    <div id="cp-body" class="cp-body">
+
+      <!-- Waiting-for-user banner (hidden unless Nexus itself flags it) -->
+      <div class="cp-waiting-banner" id="cp-waiting-banner" style="display:none">
+        <span class="cp-waiting-icon">&#9888;</span>
+        <span id="cp-waiting-text">Waiting for user</span>
+      </div>
+
+      <!-- Program overview -->
+      <div class="cp-section">
+        <div class="cp-program-id" id="cp-program-id">—</div>
+        <div class="cp-program-name" id="cp-program-name">—</div>
+        <div class="cp-overview-row">
+          <span class="cp-status-badge" id="cp-status">—</span>
+          <span class="cp-overview-item" id="cp-phase-of">Phase — / —</span>
+        </div>
+        <div class="cp-overview-row cp-overview-dim">
+          <span id="cp-autonomy">—</span>
+          <span class="cp-overview-sep">·</span>
+          <span id="cp-duration">—</span>
+        </div>
+      </div>
+
+      <!-- Phase pipeline -->
+      <div class="cp-section">
+        <div class="cp-section-title">Phases</div>
+        <div id="cp-phases" class="cp-phase-list"></div>
+      </div>
+
+      <!-- Acceptance -->
+      <div class="cp-section">
+        <div class="cp-section-title">Acceptance</div>
+        <div id="cp-acceptance" class="cp-acceptance"></div>
+      </div>
+
+      <!-- Failure / recovery -->
+      <div class="cp-section">
+        <div class="cp-section-title">Failure / Recovery</div>
+        <div id="cp-failure" class="cp-failure"></div>
+      </div>
+
+      <!-- Routing timeline -->
+      <div class="cp-section">
+        <div class="cp-section-title">Routing</div>
+        <div id="cp-routing" class="cp-routing"></div>
+      </div>
+
+      <!-- Telemetry -->
+      <div class="cp-section">
+        <div class="cp-section-title">Telemetry</div>
+        <div id="cp-telemetry" class="cp-telemetry"></div>
+      </div>
+
+      <!-- Active agents (this phase) -->
+      <div class="cp-section">
+        <div class="cp-section-title">Active agents</div>
+        <div id="cp-agents" class="cp-agents"></div>
+      </div>
+
+      <!-- File activity -->
+      <div class="cp-section">
+        <div class="cp-section-title">File activity</div>
+        <div id="cp-files" class="cp-files"></div>
+      </div>
+
+    </div><!-- /cp-body -->
+  </aside><!-- /control-panel -->
+
+</div><!-- /shell -->
+
+<script src="/static/js/nexus.js?v={{ asset_version }}"></script>
+<script src="/static/js/chat.js?v={{ asset_version }}"></script>
+<script src="/static/js/dev.js?v={{ asset_version }}"></script>
+<script src="/static/js/programs.js?v={{ asset_version }}"></script>
+<script src="/static/js/control-center.js?v={{ asset_version }}"></script>
+</body>
+</html>

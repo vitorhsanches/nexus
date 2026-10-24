@@ -10,3 +10,18 @@ nexus/storage/*.db-wal
 
 logs/
 .env
+config/projects.local.json
+nexus/storage/programs/
+
+# Local test/run artifacts
+.pytest_cache/
+.pytest-tmp*/
+%SystemDrive%/
+nexus/storage/.fuse_hidden*
+*.log
+*.tar.gz
+e2e_output.txt
+nexus_tree.txt
+phase4_*_diff.txt
+phase4_*_tests.txt
+config/dev-test-profiles.local.json
