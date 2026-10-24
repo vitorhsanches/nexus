@@ -69,7 +69,7 @@ def test_model_catalog_exposes_qualification_activation_and_candidate_separately
             {"id": "gpt-5.6-terra", "name": "Blocked", "provider": "one", "availability": "listed", "selectable": False},
         ], "catalog_error": None,
     })
-    monkeypatch.setattr(models, "_qualified_dev_route_ids", lambda: {"qualified/a"})
+    monkeypatch.setattr(models, "_qualified_model_ids", lambda: {"qualified/a"})
     workspace_model_settings.set_active("qualified/a", False, {"qualified/a"})
     workspace_model_settings.set_candidate("discovered/new", True)
 
@@ -107,11 +107,128 @@ def test_candidate_requires_discovery_and_never_accepts_qualified_or_blocked(mod
     assert workspace_model_settings.read()["selection_configured"] is False
 
 
-def test_policy_writes_require_loopback_operator(model_settings_db):
-    model_management.require_local_operator(SimpleNamespace(client=SimpleNamespace(host="127.0.0.1")))
+def test_policy_writes_require_loopback_operator(model_settings_db, monkeypatch):
+    monkeypatch.setenv("NEXUS_ADMIN_TOKEN", "x" * 32)
+    model_management.require_local_operator(SimpleNamespace(client=SimpleNamespace(host="127.0.0.1")), "Bearer " + "x" * 32)
     with pytest.raises(model_management.DevServiceError) as remote:
-        model_management.require_local_operator(SimpleNamespace(client=SimpleNamespace(host="192.168.1.4")))
+        model_management.require_local_operator(SimpleNamespace(client=SimpleNamespace(host="192.168.1.4")), "Bearer " + "x" * 32)
     assert remote.value.code == "LOCAL_OPERATOR_REQUIRED"
+    with pytest.raises(model_management.DevServiceError) as unauthenticated:
+        model_management.require_local_operator(SimpleNamespace(client=SimpleNamespace(host="127.0.0.1")))
+    assert unauthenticated.value.code == "ADMIN_AUTH_REQUIRED"
+
+
+def test_new_qualifications_require_runtime_metadata_and_start_inactive(model_settings_db, monkeypatch):
+    from nexus.registry import workspace_model_qualifications
+    from nexus.routing.catalog import (
+        default_active_model_ids,
+        default_catalog,
+        production_eligible,
+    )
+
+    payload = {"catalog_error": None, "models": [{
+        "id": "provider/new-code", "provider": "provider", "selectable": True,
+        "appserver_compatible": True, "supported_efforts": ["low", "high"],
+    }]}
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda refresh=False: payload)
+    payload["models"][0]["appserver_compatible"] = False
+    with pytest.raises(model_management.DevServiceError) as no_appserver_match:
+        model_management.qualify("provider/new-code", provider="provider", capabilities=["standard-coding"], efforts=["low"], cost_class="standard", max_risk_level="low")
+    assert no_appserver_match.value.code == "EXECUTION_COMPATIBILITY_UNVERIFIED"
+    payload["models"][0]["appserver_compatible"] = True
+    with pytest.raises(model_management.DevServiceError) as mismatch:
+        model_management.qualify("provider/new-code", provider="other", capabilities=["standard-coding"], efforts=["low"], cost_class="standard", max_risk_level="low")
+    assert mismatch.value.code == "PROVIDER_MISMATCH"
+    with pytest.raises(model_management.DevServiceError) as incompatible:
+        model_management.qualify("provider/new-code", provider="provider", capabilities=["standard-coding"], efforts=["xhigh"], cost_class="standard", max_risk_level="low")
+    assert incompatible.value.code == "EFFORT_UNSUPPORTED"
+    model_management.qualify("provider/new-code", provider="provider", capabilities=["standard-coding"], efforts=["low"], cost_class="standard", max_risk_level="low")
+    qualified = workspace_model_qualifications.qualified()
+    assert qualified["provider/new-code"]["compatibility"]["inference_performed"] is False
+    route = next(route for route in default_catalog() if route.model_id == "provider/new-code")
+    assert route.approved is True
+    assert route.capabilities == frozenset({"standard-coding"})
+    assert "provider/new-code" not in default_active_model_ids()
+    assert "provider/new-code" not in workspace_model_settings.effective_active_ids(
+        {"provider/new-code", "cc/claude-sonnet-5-low"}, default_active_model_ids()
+    )
+    model_management.set_active("provider/new-code", True)
+    assert "provider/new-code" in workspace_model_settings.effective_active_ids(
+        {route.model_id for route in production_eligible(default_catalog())}, default_active_model_ids()
+    )
+
+
+@pytest.mark.parametrize("capability", ["review", "planning"])
+def test_review_and_planning_qualification_can_activate_without_cross_capability_execution(
+    model_settings_db, monkeypatch, capability
+):
+    from nexus.registry import (
+        workspace_cost_authorizations,
+        workspace_model_qualifications,
+    )
+    from nexus.routing.catalog import default_catalog
+    from nexus.routing.models import RoutingRequest
+    from nexus.routing.router import NoEligibleRouteError, select_best_route
+
+    model_id = f"provider/{capability}-only"
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda refresh=False: {"models": [{
+        "id": model_id, "provider": "provider", "selectable": True,
+        "appserver_compatible": True, "supported_efforts": ["low"],
+    }]})
+    model_management.qualify(
+        model_id, provider="provider", capabilities=[capability], efforts=["low"],
+        cost_class="premium", max_risk_level="medium",
+    )
+
+    qualified_route = next(route for route in default_catalog() if route.model_id == model_id)
+    assert qualified_route.capabilities == frozenset({capability})
+    assert qualified_route.effort == "low"
+    assert qualified_route.max_risk_level == "medium"
+    assert model_id not in workspace_model_settings.effective_active_ids(
+        {model_id}, set()
+    )
+
+    result = model_management.set_active(model_id, True)
+    row = next(item for item in result["models"] if item["id"] == model_id)
+    assert row["active"] is True
+    assert row["can_execute"] is False
+    assert model_id not in {item["id"] for item in models.list_dev_models()["models"]}
+
+    active_route = next(route for route in default_catalog() if route.model_id == model_id)
+    assert select_best_route(
+        RoutingRequest(capability=capability, risk_level="medium"),
+        catalog=(active_route,),
+    ).route.model_id == model_id
+    for disallowed in {"standard-coding", "review", "planning"} - {capability}:
+        with pytest.raises(NoEligibleRouteError):
+            select_best_route(
+                RoutingRequest(capability=disallowed, risk_level="low"),
+                catalog=(active_route,),
+            )
+    with pytest.raises(NoEligibleRouteError):
+        select_best_route(
+            RoutingRequest(capability=capability, risk_level="high"),
+            catalog=(active_route,),
+        )
+    assert workspace_model_qualifications.qualified()[model_id]["cost_class"] == "premium"
+    assert workspace_cost_authorizations.list_for_project("demo") == []
+
+
+def test_qualification_revocation_clears_activation_and_survives_restart(model_settings_db, monkeypatch):
+    from nexus.registry import workspace_model_qualifications
+
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda refresh=False: {"models": [{
+        "id": "provider/revoke-me", "provider": "provider", "selectable": True,
+        "appserver_compatible": True, "supported_efforts": ["low"],
+    }]})
+    model_management.qualify("provider/revoke-me", provider="provider", capabilities=["mechanical"], efforts=["low"], cost_class="unknown", max_risk_level="low")
+    model_management.set_active("provider/revoke-me", True)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda _n: workspace_model_qualifications.revoke("provider/revoke-me"), range(6)))
+    database.initialize_database()
+    assert workspace_model_qualifications.qualified().get("provider/revoke-me") is None
+    assert workspace_model_settings.read()["models"]["provider/revoke-me"]["active"] is False
+    assert "provider/revoke-me" not in model_management._qualified_ids()
 
 
 def test_router_rechecks_active_selection_for_each_new_route(model_settings_db, monkeypatch):

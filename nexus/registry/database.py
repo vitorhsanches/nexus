@@ -713,5 +713,19 @@ def initialize_database() -> None:
                 selection_configured INTEGER NOT NULL DEFAULT 0 CHECK (selection_configured IN (0, 1)),
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS workspace_model_qualifications (
+                model_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                capabilities_json TEXT NOT NULL,
+                efforts_json TEXT NOT NULL,
+                cost_class TEXT NOT NULL,
+                max_risk_level TEXT NOT NULL,
+                compatibility_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('QUALIFIED', 'REVOKED')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revoked_at TEXT
+            );
             """
         )

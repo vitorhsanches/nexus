@@ -53,17 +53,18 @@ def read() -> dict:
     }
 
 
-def effective_active_ids(qualified_ids: set[str]) -> set[str]:
+def effective_active_ids(qualified_ids: set[str], default_active_ids: set[str] | None = None) -> set[str]:
     state = read()
     if not state["selection_configured"]:
-        return set(qualified_ids)
+        # Newly qualified routes remain inactive until explicitly enabled.
+        return set(qualified_ids if default_active_ids is None else default_active_ids) & qualified_ids
     return {
         model_id for model_id in qualified_ids
         if state["models"].get(model_id, {}).get("active", False)
     }
 
 
-def set_active(model_id: str, active: bool, qualified_ids: set[str]) -> dict:
+def set_active(model_id: str, active: bool, qualified_ids: set[str], default_active_ids: set[str] | None = None) -> dict:
     """Atomically configure the selection and change one qualified model.
 
     On the first operator change, seed today's qualified set so enabling or
@@ -80,7 +81,7 @@ def set_active(model_id: str, active: bool, qualified_ids: set[str]) -> dict:
         if not meta or not meta["selection_configured"]:
             connection.executemany(
                 "INSERT OR IGNORE INTO workspace_model_settings(model_id, active, candidate, updated_at) VALUES (?, 1, 0, ?)",
-                [(known_id, now) for known_id in sorted(qualified_ids)],
+                [(known_id, now) for known_id in sorted(qualified_ids if default_active_ids is None else default_active_ids)],
             )
         connection.execute(
             "INSERT INTO workspace_model_settings_meta(id, selection_configured, updated_at) VALUES (1, 1, ?) "

@@ -526,13 +526,19 @@ class AdaptiveRoutingService:
         approved_catalog = self._approved_catalog
         if self._uses_operator_model_selection:
             from nexus.registry import workspace_model_settings
+            from nexus.routing.catalog import default_active_model_ids
 
+            # Qualification is operator-managed at runtime, so re-read the
+            # persisted policy before every new routing decision.
+            approved_catalog = default_catalog()
             qualified_ids = {
-                route.model_id for route in production_eligible(self._approved_catalog)
+                route.model_id for route in production_eligible(approved_catalog)
             }
-            active_ids = workspace_model_settings.effective_active_ids(qualified_ids)
+            active_ids = workspace_model_settings.effective_active_ids(
+                qualified_ids, default_active_model_ids()
+            )
             approved_catalog = tuple(
-                route for route in self._approved_catalog if route.model_id in active_ids
+                route for route in approved_catalog if route.model_id in active_ids
             )
 
         snapshot = self._collect_telemetry()

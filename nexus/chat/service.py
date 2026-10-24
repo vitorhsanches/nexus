@@ -161,6 +161,7 @@ def _model_catalog(*, refresh: bool = False) -> list[dict]:
                 "cost_status": "unknown",
                 "supported_efforts": efforts,
                 "default_effort": default_effort,
+                "appserver_compatible": bool(entry and efforts),
             })
         rows.sort(key=lambda item: (item["id"] != DEFAULT_CHAT_MODEL, item["id"].casefold()))
         _model_catalog_cache = (time.monotonic() + 30, rows)
