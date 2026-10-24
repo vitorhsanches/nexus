@@ -117,7 +117,7 @@ function buildPane(kind) {
   return pane;
 }
 
-function harness(initialAgents, { gridWidth = 1200 } = {}) {
+function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null } = {}) {
   const rootNode = el('body');
   const ids = [...template.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
   const byId = Object.fromEntries(ids.map(id => [id, el('div')]));
@@ -134,8 +134,16 @@ function harness(initialAgents, { gridWidth = 1200 } = {}) {
     querySelectorAll: selector => rootNode.querySelectorAll(selector), addEventListener() {},
   };
   const calls = [];
-  const box = { agents: initialAgents, models: [{ id: 'free/model', cost_status: 'free' }, { id: 'paid/model', cost_status: 'low_cost' }],
-    projects: [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 }],
+  const approvedModels = [{ id: 'free/model', cost_status: 'free' }, { id: 'paid/model', cost_status: 'low_cost' }];
+  const box = { agents: initialAgents, models: approvedModels,
+    discoveredCatalog: discoveredCatalog || {
+      models: [
+        { id: 'free/model', name: 'Free model', provider: 'test-provider', availability: 'omniroute-listed-unverified', cost_status: 'free', approval_status: 'approved', approval_reason: 'Qualified', can_execute: true },
+        { id: 'unknown/model', name: 'Unknown model', provider: 'other-provider', availability: 'omniroute-listed-unverified', cost_status: 'unknown', approval_status: 'not_qualified', approval_reason: 'Not qualified', can_execute: false },
+      ], approved_models: approvedModels, default_model: 'free/model', catalog_error: null,
+    },
+    catalogError: null,
+    projects: projects || [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 }],
     profiles: [{ id: 'unit', name: 'Unitários', timeout_seconds: 120 }],
     diff: { base_sha: 'base-12345678', head_sha: 'head-abcdefgh',
       files: [{ path: 'nexus/example.py', status: 'M', patch: '--- a/nexus/example.py\n+++ b/nexus/example.py' }] },
@@ -185,6 +193,10 @@ function harness(initialAgents, { gridWidth = 1200 } = {}) {
       return { ok: true, json: async () => data };
     }
     if (url === '/api/projects') data = { projects: box.projects };
+    else if (url.startsWith('/api/dev/model-catalog')) {
+      if (box.catalogError) throw box.catalogError;
+      data = box.discoveredCatalog;
+    }
     else if (url === '/api/dev/models') data = { models: box.models };
     else if (url.startsWith('/api/dev/test-profiles?')) {
       if (box.profileError) throw box.profileError;
@@ -443,6 +455,56 @@ test('cockpit reads existing project, workspace, Maestro and history APIs with G
   assert.ok(app.calls.some(call => call.url.includes('/api/workspace/panes/PANE-1/history')));
   assert.ok(app.calls.every(call => call.method === 'GET'));
   assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+});
+
+test('dynamic catalog shows discovered approval states while selectors remain approved-only', async () => {
+  const app = harness([agent(1)], {
+    discoveredCatalog: {
+      models: [
+        { id: 'approved/model', name: 'Approved Model', provider: 'provider-a', availability: 'omniroute-listed-unverified', cost_status: 'free', approval_status: 'approved', approval_reason: 'Qualified', can_execute: true },
+        { id: 'new/model', name: 'New Model', provider: 'provider-b', availability: 'omniroute-listed-unverified', cost_status: 'unknown', approval_status: 'not_qualified', approval_reason: 'Not qualified', can_execute: false },
+        { id: 'blocked/model', name: 'Blocked Model', provider: 'provider-c', availability: 'omniroute-listed-unverified', cost_status: 'unknown', approval_status: 'blocked', approval_reason: 'Blocked by policy', can_execute: false },
+      ],
+      approved_models: [{ id: 'approved/model', cost_status: 'free' }],
+      default_model: 'approved/model', catalog_error: null,
+    },
+  });
+  await app.settle();
+  const catalog = app.byId['model-catalog-list'];
+  assert.match(catalog.textContent, /Approved Model.*Aprovado para execução/s);
+  assert.match(catalog.textContent, /New Model.*Não qualificado/s);
+  assert.match(catalog.textContent, /Blocked Model.*Bloqueado/s);
+  assert.match(catalog.textContent, /provider-b/);
+  assert.match(catalog.textContent, /inferência não verificada/);
+  const planning = app.grid.querySelector('[data-pane="maestro"]')
+    .querySelector('.cockpit-composer').querySelector('.cockpit-model-select');
+  assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['approved/model']);
+
+  app.box.discoveredCatalog = {
+    models: [{ id: 'approved/new', name: 'Refreshed Model', provider: 'provider-d', availability: 'listed', cost_status: 'standard', approval_status: 'approved', approval_reason: 'Qualified', can_execute: true }],
+    approved_models: [{ id: 'approved/new', cost_status: 'standard' }], default_model: null, catalog_error: null,
+  };
+  app.byId['model-catalog-refresh'].dispatch('click');
+  await app.settle();
+  assert.match(catalog.textContent, /Refreshed Model/);
+  assert.ok(app.calls.some(call => call.url === '/api/dev/model-catalog?refresh=true' && call.method === 'GET'));
+  assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['approved/new']);
+});
+
+test('catalog failure fails closed and missing authorized projects are stated', async () => {
+  const app = harness([], { projects: [] });
+  await app.settle();
+  assert.match(app.byId['model-catalog-project-note'].textContent, /Nenhum projeto autorizado/);
+  assert.match(app.byId['data-status'].textContent, /Nenhum projeto autorizado/);
+  const planning = app.grid.querySelector('[data-pane="maestro"]')
+    .querySelector('.cockpit-composer').querySelector('.cockpit-model-select');
+  app.box.catalogError = new Error('OmniRoute indisponível');
+  app.byId['model-catalog-refresh'].dispatch('click');
+  await app.settle();
+  assert.match(app.byId['model-catalog-status'].textContent, /OmniRoute indisponível/);
+  assert.match(app.byId['model-catalog-list'].textContent, /Atualize o catálogo/);
+  assert.equal(planning.children.filter(option => option.value).length, 0);
+  assert.equal(app.grid.querySelector('[data-pane="maestro"]').querySelector('.cockpit-authorize').disabled, true);
 });
 
 test('refresh preserves pane instance, selection and minimization while updating real status', async () => {

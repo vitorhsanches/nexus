@@ -889,11 +889,19 @@ def list_dev_integrations(session_id: str):
 
 
 @router.get("/dev/models")
-def list_dev_models_route():
+def list_dev_models_route(refresh: bool = False):
     """Return live OmniRoute routes approved for Development coding."""
     from nexus.dev.models import list_dev_models
 
-    return list_dev_models()
+    return list_dev_models(refresh=refresh)
+
+
+@router.get("/dev/model-catalog")
+def list_dev_model_catalog_route(refresh: bool = False):
+    """Return all discovered models and their non-granting approval status."""
+    from nexus.dev.models import list_dev_model_catalog
+
+    return list_dev_model_catalog(refresh=refresh)
 
 
 @router.get("/dev/test-profiles")

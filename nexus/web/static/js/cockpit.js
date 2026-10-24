@@ -2,6 +2,11 @@
   const grid = document.getElementById('pane-grid');
   const paneNav = document.getElementById('pane-nav');
   const toast = document.getElementById('toast');
+  const modelCatalogList = document.getElementById('model-catalog-list');
+  const modelCatalogStatus = document.getElementById('model-catalog-status');
+  const modelCatalogCount = document.getElementById('model-catalog-count');
+  const modelCatalogProjectNote = document.getElementById('model-catalog-project-note');
+  const modelCatalogRefreshButton = document.getElementById('model-catalog-refresh');
   const groupControls = document.getElementById('group-controls');
   const savedLayouts = new Map();
   const gap = 6;
@@ -24,11 +29,16 @@
   let workspaceState = null;
   let maestroState = null;
   let modelCatalog = [];
+  let discoveredModelCatalog = [];
+  let modelCatalogError = '';
+  let modelCatalogRequest = 0;
   let testProfiles = [];
   let testProfilesLoading = false;
   let testProfilesError = '';
   let projectId = null;
   let projects = [];
+  let projectsLoaded = false;
+  let projectsError = '';
   let refreshTimer;
   let refreshGeneration = 0;
   let refreshRequest = 0;
@@ -442,6 +452,79 @@
     return data;
   };
   const costOf = model => modelCatalog.find(row => row.id === model)?.cost_status || 'unknown';
+  const modelCostLabel = value => ({
+    free: 'Grátis', low_cost: 'Baixo custo', standard: 'Padrão', premium: 'Premium', unknown: 'Desconhecido'
+  })[value] || 'Desconhecido';
+  const modelApprovalLabel = value => ({
+    approved: 'Aprovado para execução', not_qualified: 'Não qualificado', blocked: 'Bloqueado'
+  })[value] || 'Não qualificado';
+  const modelAvailabilityLabel = value => value === 'omniroute-listed-unverified'
+    ? 'Anunciado pelo OmniRoute · inferência não verificada'
+    : (value || 'Indisponível');
+  const renderModelCatalog = () => {
+    modelCatalogCount.textContent = String(discoveredModelCatalog.length);
+    modelCatalogProjectNote.textContent = projectsError
+      ? `Não foi possível verificar projetos autorizados: ${projectsError}. Planejamento e execução ficam bloqueados até validar o projeto.`
+      : (projects.length
+        ? 'A seleção e a execução continuam limitadas às rotas aprovadas exibidas nos controles existentes.'
+        : (projectsLoaded
+          ? 'Nenhum projeto autorizado para Development Mode. Os modelos ficam visíveis, mas planejamento e execução permanecem bloqueados.'
+          : 'Verificando projetos autorizados; planejamento e execução permanecem bloqueados até a confirmação.'));
+    modelCatalogStatus.textContent = modelCatalogError
+      ? `Catálogo indisponível: ${modelCatalogError}`
+      : `${discoveredModelCatalog.length} modelo(s) anunciado(s) pelo OmniRoute; descoberta não comprova inferência.`;
+    modelCatalogStatus.classList.toggle('is-error', Boolean(modelCatalogError));
+    if (!discoveredModelCatalog.length) {
+      const empty = modelCatalogError
+        ? 'Não foi possível obter modelos do OmniRoute. Atualize o catálogo quando o serviço estiver disponível.'
+        : 'Nenhum modelo foi anunciado pelo OmniRoute.';
+      modelCatalogList.replaceChildren(element('p', 'model-catalog-empty', empty));
+      return;
+    }
+    modelCatalogList.replaceChildren(...discoveredModelCatalog.map(model => {
+      const status = ['approved', 'not_qualified', 'blocked'].includes(model.approval_status)
+        ? model.approval_status : 'not_qualified';
+      const card = element('article', `model-catalog-card is-${status}`);
+      const heading = element('div', 'model-catalog-card-head');
+      heading.append(element('strong', 'model-catalog-card-name', model.name || model.id || 'Modelo sem nome'),
+        element('span', `model-catalog-badge is-${status}`, modelApprovalLabel(status)));
+      card.append(heading,
+        element('p', 'model-catalog-meta', `${model.id || 'ID desconhecido'} · provedor ${model.provider || 'desconhecido'}`),
+        element('p', 'model-catalog-meta', `${modelAvailabilityLabel(model.availability)} · custo ${modelCostLabel(model.cost_status)}`),
+        element('p', 'model-catalog-reason', model.approval_reason || 'Sem qualificação para execução.'));
+      return card;
+    }));
+  };
+  const refreshModelCatalog = async (force = false) => {
+    const request = ++modelCatalogRequest;
+    modelCatalogRefreshButton.disabled = true;
+    modelCatalogRefreshButton.textContent = 'Atualizando…';
+    modelCatalogStatus.textContent = 'Consultando a lista de modelos do OmniRoute…';
+    try {
+      const data = await api(`/api/dev/model-catalog${force ? '?refresh=true' : ''}`);
+      if (request !== modelCatalogRequest) return;
+      discoveredModelCatalog = Array.isArray(data.models) ? data.models : [];
+      modelCatalog = Array.isArray(data.approved_models) ? data.approved_models : [];
+      modelCatalogError = data.catalog_error || '';
+      renderModelCatalog();
+      renderPlanningControls();
+      knownAgents.forEach((_agent, paneId) => renderAgentControls(paneId));
+    } catch (error) {
+      if (request !== modelCatalogRequest) return;
+      discoveredModelCatalog = [];
+      modelCatalog = [];
+      modelCatalogError = `${error.message}. Nenhuma rota permanece selecionável.`;
+      renderModelCatalog();
+      renderPlanningControls();
+      knownAgents.forEach((_agent, paneId) => renderAgentControls(paneId));
+    } finally {
+      if (request === modelCatalogRequest) {
+        modelCatalogRefreshButton.disabled = false;
+        modelCatalogRefreshButton.textContent = 'Atualizar catálogo';
+      }
+    }
+  };
+  modelCatalogRefreshButton.addEventListener('click', () => { void refreshModelCatalog(true); });
   const formField = (label, input) => {
     const field = element('label', 'cockpit-confirm');
     field.append(input, element('span', '', label));
@@ -881,6 +964,7 @@
     document.getElementById('project-name').textContent = selected?.name || 'Selecione um projeto';
     document.getElementById('project-detail').textContent = selected ? 'Projeto autorizado' : 'Nenhum projeto selecionado';
     document.getElementById('workspace-id').textContent = selected?.id || '—';
+    renderModelCatalog();
   };
   const renderMissions = agents => {
     const missions = agents.filter(agent => agent.latest_mission);
@@ -1164,15 +1248,18 @@
     nav.hidden = !nav.hidden;
   });
   syncUI();
-  api('/api/dev/models').then(data => {
-    modelCatalog = data.models || [];
-    renderPlanningControls();
-    knownAgents.forEach(agent => renderAgentControls(agent.pane_id));
-  }).catch(error => { maestroComposer.error.textContent = `Catálogo de modelos indisponível: ${error.message}`; });
+  void refreshModelCatalog();
   api('/api/projects').then(data => {
     projects = (data.projects || []).filter(project => project.enabled && project.dev_enabled);
+    projectsLoaded = true;
+    projectsError = '';
     renderProjects();
     if (projects.length) selectProject(projects[0].id);
     else document.getElementById('data-status').textContent = 'Nenhum projeto autorizado para Development Mode';
-  }).catch(error => { document.getElementById('data-status').textContent = `Falha ao carregar projetos: ${error.message}`; });
+  }).catch(error => {
+    projectsLoaded = true;
+    projectsError = error.message;
+    renderModelCatalog();
+    document.getElementById('data-status').textContent = `Falha ao carregar projetos: ${error.message}`;
+  });
 })();
