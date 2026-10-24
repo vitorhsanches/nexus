@@ -138,6 +138,7 @@ class AppServerClient:
         request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         on_notification: Callable[[dict], None] | None = None,
         on_server_request: Callable[[str, dict], dict | None] | None = None,
+        on_deferred_server_request: Callable[[str, dict, Any], bool] | None = None,
         process_launcher: Callable[..., subprocess.Popen] | None = None,
     ) -> None:
         """``codex_home``, when given, pins the isolated CODEX_HOME to this
@@ -192,6 +193,10 @@ class AppServerClient:
         self._on_notification = on_notification
         self._sensitive_values: tuple[str, ...] = ()
         self._on_server_request = on_server_request
+        # Returns True when it takes ownership of answering later through
+        # respond_server_request() (a human decision); the read loop is
+        # never blocked waiting for that answer.
+        self._on_deferred_server_request = on_deferred_server_request
         self._launcher = process_launcher or _default_process_launcher
 
         self._process: subprocess.Popen | None = None
@@ -833,8 +838,20 @@ class AppServerClient:
             return value
         return value
 
+    def respond_server_request(self, request_id: Any, result: dict) -> None:
+        """Answer a server request previously deferred to a human decision."""
+        self._write_line({"id": request_id, "result": result})
+
     def _handle_server_request(self, method: str, params: dict, request_id: Any) -> None:
         self._deliver_notification({"method": method, "params": params, "id": request_id})
+
+        if self._on_deferred_server_request is not None:
+            try:
+                deferred = self._on_deferred_server_request(method, self._redact_event(params), request_id)
+            except Exception:
+                deferred = False
+            if deferred:
+                return
 
         response_result: dict | None = None
         if self._on_server_request is not None:

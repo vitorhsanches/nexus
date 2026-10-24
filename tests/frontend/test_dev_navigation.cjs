@@ -45,6 +45,7 @@ function setup(options = {}) {
     "dev-prompt-input", "dev-run-button", "dev-stop-button",
     "dev-mission-description", "dev-mission-test-profile", "dev-mission-start", "dev-mission-stop", "dev-mission-progress",
     "dev-activity-status", "dev-activity-elapsed", "dev-activity-events",
+    "dev-backend-select", "dev-approvals",
     "view-mode-badge",
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element(id)]));
@@ -100,7 +101,7 @@ function setup(options = {}) {
     if (parsed.pathname === "/api/dev/sessions" && method === "POST") {
       if (backend.createError) return response({ detail: { code: "DEV_MODE_DISABLED", message: backend.createError } }, backend.createStatus);
       const body = JSON.parse(opts.body);
-      const session = { session_id: "DEV-" + backend.nextSession++, project_id: body.project_id, status: "ACTIVE", branch: "nexus/dev/x", base_sha: "abc123", worktree_path: "/wt/x" };
+      const session = { session_id: "DEV-" + backend.nextSession++, project_id: body.project_id, backend: body.backend || "omniroute", status: "ACTIVE", branch: "nexus/dev/x", base_sha: "abc123", worktree_path: "/wt/x" };
       backend.sessions.unshift(session); backend.turns.set(session.session_id, []); return response(session);
     }
     const sessionMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)$/);
@@ -169,6 +170,15 @@ function setup(options = {}) {
       backend.missions.unshift(mission); return response(mission);
     }
     if (parsed.pathname.endsWith("/interrupt") && method === "POST") return response({ status: "INTERRUPT_REQUESTED" });
+    const approvalsMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals$/);
+    if (approvalsMatch && method === "GET") return response({ approvals: backend.approvals || [] });
+    const decideMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals\/([^/]+)$/);
+    if (decideMatch && method === "POST") {
+      const decision = JSON.parse(opts.body).decision;
+      const approval = (backend.approvals || []).find((item) => item.approval_id === decodeURIComponent(decideMatch[2]));
+      if (approval) approval.status = decision === "accept" ? "APPROVED" : "DECLINED";
+      return response(approval || {});
+    }
     return response({ detail: { message: "Unexpected test route: " + parsed.pathname } }, 404);
   };
   class EventSource {
@@ -777,3 +787,79 @@ test("changed files refresh again once a turn finishes", async () => {
   assert.match(text, /new_file\.py/);
   assert.match(allText(ui.elements["dev-review-files"]), /new_file\.py/);
 });
+
+test("Codex Native is the default Development backend for models and new sessions", async () => {
+  const ui = setup({ executionEnabled: true });
+  await ui.window.NexusDev.enter();
+  await flush();
+  assert.ok(ui.calls.some((call) => call.path === "/api/dev/models?backend=codex_native"));
+  assert.ok(!ui.calls.some((call) => call.path === "/api/dev/models?backend=omniroute"));
+  ui.elements["dev-project-select"].value = "demo"; ui.elements["dev-project-select"].dispatch("change");
+  await flush();
+  ui.elements["dev-create-session"].dispatch("click");
+  await flush();
+  const body = ui.calls.find((call) => call.method === "POST" && call.path === "/api/dev/sessions").body;
+  assert.equal(body.backend, "codex_native");
+  assert.equal(body.requested_model, "cx/gpt-5.6-sol");
+  assert.match(nexusTemplate(), /<option value="codex_native">Codex Native \(local login, no OmniRoute\)<\/option>/);
+});
+
+test("choosing OmniRoute reloads its catalog and creates a legacy session", async () => {
+  const ui = setup({ executionEnabled: true });
+  await ui.window.NexusDev.enter();
+  await flush();
+  ui.elements["dev-backend-select"].value = "omniroute"; ui.elements["dev-backend-select"].dispatch("change");
+  await flush();
+  assert.ok(ui.calls.some((call) => call.path === "/api/dev/models?backend=omniroute"));
+  ui.elements["dev-project-select"].value = "demo"; ui.elements["dev-project-select"].dispatch("change");
+  await flush();
+  ui.elements["dev-create-session"].dispatch("click");
+  await flush();
+  const body = ui.calls.filter((call) => call.method === "POST" && call.path === "/api/dev/sessions").pop().body;
+  assert.deepEqual(body, { project_id: "demo" });
+});
+
+test("a pending Codex approval is shown with its reason and decided only by an explicit click", async () => {
+  const ui = setup({ executionEnabled: true, sessions: [{ session_id: "DEV-1", project_id: "demo", backend: "codex_native", status: "ACTIVE", branch: "nexus/dev/DEV-1", base_sha: "x", worktree_path: "/wt" }] });
+  ui.backend.approvals = [{ approval_id: "APPROVAL-1", dev_session_id: "DEV-1", turn_id: "DEVTURN-1", kind: "command", status: "PENDING",
+    summary: { command: "python -m pytest -q", reason: "Sandbox blocked the pytest cache" } }];
+  await ui.window.NexusDev.enter();
+  ui.elements["dev-project-select"].value = "demo"; ui.elements["dev-project-select"].dispatch("change");
+  await flush();
+  ui.elements["dev-session-list"].children[0].dispatch("click");
+  await flush();
+  const row = ui.elements["dev-approvals"].children[0];
+  assert.match(row.children[0].textContent, /Command · PENDING · python -m pytest -q · reason: Sandbox blocked the pytest cache/);
+  assert.ok(!ui.calls.some((call) => call.method === "POST" && /\/approvals\//.test(call.path)), "nothing is decided without a click");
+  const approve = row.children.find((child) => child.textContent === "Approve once");
+  assert.ok(row.children.find((child) => child.textContent === "Decline"));
+  approve.dispatch("click");
+  await flush();
+  const decision = ui.calls.find((call) => call.method === "POST" && call.path === "/api/dev/sessions/DEV-1/approvals/APPROVAL-1");
+  assert.deepEqual(decision.body, { decision: "accept" });
+  assert.match(ui.elements["dev-approvals"].children[0].children[0].textContent, /APPROVED/);
+});
+
+test("command executions stream with their exit code and output", async () => {
+  const ui = setup({ executionEnabled: true, sessions: [{ session_id: "DEV-1", project_id: "demo", backend: "codex_native", status: "ACTIVE", branch: "nexus/dev/DEV-1", base_sha: "x", worktree_path: "/wt" }] });
+  await ui.window.NexusDev.enter();
+  ui.elements["dev-project-select"].value = "demo"; ui.elements["dev-project-select"].dispatch("change");
+  await flush();
+  ui.elements["dev-session-list"].children[0].dispatch("click");
+  await flush();
+  ui.elements["dev-prompt-input"].value = "fix and test";
+  ui.elements["dev-run-button"].dispatch("click");
+  await flush();
+  const stream = ui.eventSources[0];
+  stream.emit({ method: "item/completed", params: { item: { type: "commandExecution", command: "python -m pytest -q", exitCode: 0, aggregatedOutput: "1 passed in 0.02s" } } }, "1");
+  stream.emit({ method: "item/commandExecution/requestApproval", id: 3, params: {} }, "2");
+  await flush();
+  const lines = ui.elements["dev-activity-events"].children.map((child) => child.textContent);
+  assert.ok(lines.some((line) => /commandExecution: python -m pytest -q → exit 0\n1 passed in 0.02s/.test(line)));
+  assert.ok(lines.some((line) => /Approval requested/.test(line)));
+  assert.ok(ui.calls.some((call) => call.path === "/api/dev/sessions/DEV-1/approvals"));
+});
+
+function nexusTemplate() {
+  return require("node:fs").readFileSync(require("node:path").join(__dirname, "../../nexus/web/templates/nexus.html"), "utf8");
+}
