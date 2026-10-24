@@ -167,9 +167,9 @@ def _model_catalog(*, refresh: bool = False) -> list[dict]:
         return [dict(item) for item in rows]
 
 
-def list_models() -> dict:
+def list_models(*, refresh: bool = False) -> dict:
     try:
-        models = _model_catalog()
+        models = _model_catalog(refresh=refresh)
         error = None
     except Exception as exc:
         models = []

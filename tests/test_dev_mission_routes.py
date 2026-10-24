@@ -47,3 +47,18 @@ def test_operational_model_and_profile_catalog_routes():
         response = client.get("/api/dev/test-profiles", params={"project_id": "demo"})
         assert response.status_code == 200
         assert response.json()["profiles"][0]["id"] == "unit"
+
+
+def test_discovered_model_catalog_route_supports_explicit_refresh():
+    payload = {
+        "models": [{"id": "provider/model", "approval_status": "not_qualified"}],
+        "approved_models": [],
+        "default_model": None,
+        "catalog_error": None,
+    }
+    with patch("nexus.dev.models.list_dev_model_catalog", return_value=payload) as catalog:
+        response = TestClient(app, base_url="http://127.0.0.1").get(
+            "/api/dev/model-catalog", params={"refresh": "true"}
+        )
+    assert response.status_code == 200 and response.json() == payload
+    catalog.assert_called_once_with(refresh=True)

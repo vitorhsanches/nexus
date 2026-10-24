@@ -287,6 +287,17 @@ def test_model_catalog_is_restricted_and_marks_operational_status_unverified():
     assert all(entry["availability"] == "catalog-compatible-unverified" for entry in result["models"])
 
 
+def test_list_models_forwards_explicit_refresh_to_catalog(monkeypatch):
+    refresh_values = []
+    monkeypatch.setattr(
+        service,
+        "_model_catalog",
+        lambda *, refresh=False: refresh_values.append(refresh) or [],
+    )
+    assert service.list_models(refresh=True)["models"] == []
+    assert refresh_values == [True]
+
+
 def test_model_catalog_keeps_omniroute_ids_when_appserver_ids_do_not_match(monkeypatch):
     from nexus.routing.telemetry import DiscoveredModel
 
