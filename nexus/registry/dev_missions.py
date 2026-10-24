@@ -31,6 +31,7 @@ def create_mission(
     description: str,
     *,
     requested_model: str | None,
+    requested_effort: str | None = None,
     allowed_models: list[str],
     test_profile: str,
 ) -> str:
@@ -50,15 +51,16 @@ def create_mission(
             raise MissionBusyError(active["id"])
         connection.execute(
             """INSERT INTO dev_autonomous_missions
-               (id, dev_session_id, description, requested_model,
+               (id, dev_session_id, description, requested_model, requested_effort,
                 allowed_models_json, test_profile, status, owner_host,
                 owner_pid, owner_acquired_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)""",
             (
                 mission_id,
                 dev_session_id,
                 description,
                 requested_model,
+                requested_effort,
                 json.dumps(allowed_models),
                 test_profile,
                 socket.gethostname(),

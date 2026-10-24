@@ -50,6 +50,7 @@ class FakeAppServerClient:
         self.stopped = False
         self.thread_start_kwargs: dict | None = None
         self.resumed_thread_id = None
+        self.reasoning_effort = None
         self.interrupt_calls: list[tuple[str, str]] = []
         self._interrupt_event = threading.Event()
         FakeAppServerClient.instances.append(self)
@@ -69,7 +70,13 @@ class FakeAppServerClient:
 
     def thread_resume(self, thread_id, **kwargs):
         self.resumed_thread_id = thread_id
-        return {"thread": {"id": thread_id, "modelProvider": "omniroute"}, "modelProvider": "omniroute"}
+        return {"thread": {"id": thread_id, "modelProvider": "omniroute"},
+                "modelProvider": "omniroute", "model": kwargs.get("model"),
+                "reasoningEffort": self.reasoning_effort}
+
+    def thread_settings_update(self, thread_id, *, model=None, effort=None):
+        self.reasoning_effort = effort
+        return {}
 
     def send_message_and_wait(self, thread_id, text, *, timeout_seconds=None, on_turn_started=None):
         if on_turn_started:
@@ -258,10 +265,12 @@ def test_run_dev_turn_is_blocked_for_a_session_with_no_worktree_recorded(isolate
 # -- 5 & 6: correct working directory and explicit sandbox config -----------
 
 
-def test_turn_runs_with_cwd_set_to_the_worktree_and_explicit_workspace_write_sandbox(isolated_registry):
+def test_turn_runs_with_cwd_set_to_the_worktree_and_explicit_workspace_write_sandbox(isolated_registry, monkeypatch):
     session = _active_session(isolated_registry)
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda refresh=False: {"models": [
+        {"id": "cc/claude-sonnet-5-low", "supported_efforts": ["low"], "confirmed_efforts": ["low"]}]})
 
-    result = executor.run_dev_turn(session["session_id"], "do something", model="cc/claude-sonnet-5-low")
+    result = executor.run_dev_turn(session["session_id"], "do something", model="cc/claude-sonnet-5-low", effort="low")
     assert _wait_until(lambda: executor.get_turn_detail(session["session_id"], result["turn_id"])["status"] == "COMPLETED")
 
     assert len(FakeAppServerClient.instances) == 1
@@ -274,6 +283,37 @@ def test_turn_runs_with_cwd_set_to_the_worktree_and_explicit_workspace_write_san
     assert client.thread_start_kwargs["cwd"] == session["worktree_path"]
     assert client.thread_start_kwargs["ephemeral"] is False
     assert client.thread_start_kwargs["model"] == "cc/claude-sonnet-5-low"
+    assert client.reasoning_effort == "low"
+
+
+def test_cc_route_requires_confirmed_effort_before_a_turn_exists(isolated_registry, monkeypatch):
+    session = _active_session(isolated_registry)
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda refresh=False: {"models": [
+        {"id": "cc/claude-sonnet-5-low", "supported_efforts": ["low"], "confirmed_efforts": []}]})
+    with pytest.raises(service.DevServiceError) as missing:
+        executor.run_dev_turn(session["session_id"], "do something", model="cc/claude-sonnet-5-low")
+    assert missing.value.code == "AI_EFFORT_REQUIRED"
+    with pytest.raises(service.DevServiceError) as unconfirmed:
+        executor.run_dev_turn(session["session_id"], "do something", model="cc/claude-sonnet-5-low", effort="low")
+    assert unconfirmed.value.code == "EFFORT_NOT_SUPPORTED"
+    assert dev_sessions.list_turns(session["session_id"]) == []
+
+
+def test_appserver_effort_mismatch_never_starts_inference(isolated_registry, monkeypatch):
+    session = _active_session(isolated_registry)
+    model = "cc/claude-sonnet-5-low"
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda refresh=False: {"models": [
+        {"id": model, "supported_efforts": ["low"], "confirmed_efforts": ["low"]}]})
+    sent = []
+    monkeypatch.setattr(FakeAppServerClient, "thread_resume", lambda self, thread_id, **kwargs: {
+        "thread": {"id": thread_id}, "model": model, "reasoningEffort": "high"})
+    monkeypatch.setattr(FakeAppServerClient, "send_message_and_wait",
+                        lambda self, *args, **kwargs: sent.append(True) or "wrong")
+    turn = executor.run_dev_turn(session["session_id"], "do something", model=model, effort="low")
+    assert _wait_until(lambda: executor.get_turn_detail(session["session_id"], turn["turn_id"])["status"] == "FAILED")
+    detail = executor.get_turn_detail(session["session_id"], turn["turn_id"])
+    assert detail["error_code"] == "EFFORT_ACTIVATION_FAILED"
+    assert sent == []
 
 
 # -- 7: isolated CODEX_HOME, reused across turns in the same session --------

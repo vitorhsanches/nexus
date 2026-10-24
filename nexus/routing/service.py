@@ -541,6 +541,9 @@ class AdaptiveRoutingService:
                 route for route in approved_catalog if route.model_id in active_ids
             )
 
+        from nexus.workspace.omniroute_oauth import filter_connected_routes
+        approved_catalog = filter_connected_routes(approved_catalog)
+
         snapshot = self._collect_telemetry()
 
         models_discovery_failed = (

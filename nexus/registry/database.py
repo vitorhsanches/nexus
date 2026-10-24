@@ -376,6 +376,7 @@ def initialize_database() -> None:
                 dev_session_id TEXT NOT NULL,
                 description TEXT NOT NULL,
                 requested_model TEXT,
+                requested_effort TEXT,
                 allowed_models_json TEXT NOT NULL,
                 test_profile TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'PENDING',
@@ -470,6 +471,9 @@ def initialize_database() -> None:
                 ON workspace_pane_events(pane_id, id);
             """
         )
+        mission_columns = {row[1] for row in connection.execute("PRAGMA table_info(dev_autonomous_missions)")}
+        if "requested_effort" not in mission_columns:
+            connection.execute("ALTER TABLE dev_autonomous_missions ADD COLUMN requested_effort TEXT")
 
         # Intelligent Maestro (P2A). A conversation is backed by exactly one
         # read-only Nexus Chat session (the Codex thread holds the content);
@@ -723,6 +727,12 @@ def initialize_database() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (project_id, role),
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_ai_providers (
+                provider TEXT PRIMARY KEY CHECK (provider IN ('claude_code', 'codex')),
+                enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS workspace_model_qualifications (

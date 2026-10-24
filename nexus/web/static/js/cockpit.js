@@ -741,49 +741,60 @@
     aiExecutors.replaceChildren();
     aiRoles.replaceChildren();
     if (!aiSettings) return;
-    Object.entries(aiSettings.executors || {}).forEach(([key, executor]) => {
-      const card = element('article', `ai-executor ${executor.connected ? 'is-connected' : 'is-disconnected'}`);
-      card.append(element('strong', '', executor.name), element('span', 'ai-state', executor.status), element('p', '', executor.detail));
-      if (key === 'claude_code' && executor.installed) card.append(element('small', '', 'Instalado · execução indisponível no Nexus'));
-      aiExecutors.append(card);
+    Object.entries(aiSettings.executors || {}).forEach(([key, provider]) => {
+      if (!provider.connected) return;
+      const card = element('article', `ai-executor ${provider.enabled ? 'is-connected' : 'is-disconnected'}`);
+      card.append(element('strong', '', provider.name), element('span', 'ai-state', provider.enabled ? 'Ativo no Nexus' : 'Inativo no Nexus'), element('p', '', provider.detail));
+      if (provider.native_cli) card.append(element('small', '', provider.native_cli));
+      const toggle = element('button', '', provider.enabled ? 'Desativar no Nexus' : 'Ativar no Nexus');
+      toggle.type = 'button';
+      toggle.addEventListener('click', async () => {
+        if (!modelAdminToken || !projectId) { notify('Autentique o operador para alterar provedores.'); return; }
+        toggle.disabled = true;
+        try {
+          aiSettings = await api('/api/dev/ai-settings/providers', { method: 'POST', body: {
+            project_id: projectId, provider: key, enabled: !provider.enabled
+          } });
+          renderAiSettings(); renderPlanningControls();
+        } catch (error) { notify(error.message); toggle.disabled = false; }
+      });
+      card.append(toggle); aiExecutors.append(card);
     });
+    if (!aiExecutors.childElementCount) aiExecutors.append(element('p', 'ai-role-note', 'Nenhum provedor OAuth conectado e habilitado no OmniRoute. Confira as conexões pelo OmniRoute.'));
     Object.entries(aiRoleLabels).forEach(([role, label]) => {
       const data = aiSettings.roles?.[role] || { models: [], selection: null, valid: false };
       const card = element('article', 'ai-role');
       card.append(element('h3', '', label));
-      const executor = element('select'); executor.setAttribute('aria-label', `Ferramenta de ${label}`);
-      const codex = element('option', '', 'OpenAI Codex'); codex.value = 'codex';
-      const claude = element('option', '', 'Claude Code · não conectado'); claude.value = 'claude_code'; claude.disabled = true;
-      executor.append(codex, claude); executor.value = 'codex';
+      const executor = element('select'); executor.setAttribute('aria-label', `Provedor de ${label}`);
+      const providers = Object.entries(aiSettings.executors || {}).filter(([, item]) => item.connected && item.enabled);
+      executor.append(...providers.map(([key, item]) => { const option = element('option', '', item.name); option.value = key; return option; }));
+      executor.value = data.valid && providers.some(([key]) => key === data.selection.provider)
+        ? data.selection.provider : (providers[0]?.[0] || '');
       const model = element('select'); model.setAttribute('aria-label', `Modelo de ${label}`);
-      const effort = element('select'); effort.setAttribute('aria-label', `Esforço de ${label}`);
-      const updateEfforts = preferred => {
-        const row = data.models.find(item => item.id === model.value);
-        effort.replaceChildren(...(row?.efforts || []).map(value => {
-          const option = element('option', '', value); option.value = value; return option;
+      const updateModels = () => {
+        const selected = model.value;
+        const empty = element('option', '', 'Selecione um modelo elegível'); empty.value = '';
+        const rows = data.models.filter(row => row.provider === executor.value);
+        model.replaceChildren(empty, ...rows.map(row => {
+          const option = element('option', '', `${row.name} · ${row.cost_status}`);
+          option.value = row.id; return option;
         }));
-        if (preferred && row?.efforts.includes(preferred)) effort.value = preferred;
+        model.value = rows.some(row => row.id === selected) ? selected :
+          (data.valid && rows.some(row => row.id === data.selection.model_id) ? data.selection.model_id : '');
       };
-      const empty = element('option', '', 'Selecione um modelo elegível'); empty.value = '';
-      model.append(empty, ...data.models.map(row => {
-        const option = element('option', '', `${row.name} · ${row.provider} · ${row.cost_status}`);
-        option.value = row.id; return option;
-      }));
-      if (data.valid) model.value = data.selection.model_id;
-      updateEfforts(data.valid ? data.selection.effort : null);
-      model.addEventListener('change', () => updateEfforts());
+      executor.addEventListener('change', updateModels); updateModels();
       const note = element('p', 'ai-role-note', data.selection
         ? (data.valid ? 'Preferência salva · revalidada antes de novas execuções.' : 'Preferência salva indisponível: verifique conexão, qualificação, ativação, capacidade ou custos.')
         : 'Sem preferência salva. O comportamento anterior permanece.');
       const save = element('button', '', 'Salvar'); save.type = 'button';
       const clear = element('button', '', 'Limpar'); clear.type = 'button';
-      save.disabled = !aiSettings.executors?.codex?.connected || !data.models.length;
+      save.disabled = !providers.length || !data.models.length;
       clear.disabled = !data.selection;
       save.addEventListener('click', async () => {
-        if (!projectId || !modelAdminToken || !model.value || !effort.value) { notify('Selecione modelo e esforço e autentique o operador.'); return; }
+        if (!projectId || !modelAdminToken || !model.value) { notify('Selecione um modelo e autentique o operador.'); return; }
         save.disabled = true;
         try {
-          aiSettings = await api('/api/dev/ai-settings', { method: 'POST', body: { project_id: projectId, role, executor: executor.value, model_id: model.value, effort: effort.value } });
+          aiSettings = await api('/api/dev/ai-settings', { method: 'POST', body: { project_id: projectId, role, executor: executor.value, model_id: model.value } });
           renderAiSettings(); renderPlanningControls(); notify('Preferência de IA salva.');
         } catch (error) { note.textContent = error.message; save.disabled = false; }
       });
@@ -795,7 +806,7 @@
           renderAiSettings(); renderPlanningControls(); notify('Preferência removida.');
         } catch (error) { note.textContent = error.message; clear.disabled = false; }
       });
-      const fields = element('div', 'ai-role-fields'); fields.append(executor, model, effort);
+      const fields = element('div', 'ai-role-fields'); fields.append(executor, model);
       const actions = element('div', 'ai-role-actions'); actions.append(save, clear);
       card.append(fields, actions, note); aiRoles.append(card);
     });
@@ -804,7 +815,7 @@
     const request = ++aiSettingsRequest;
     if (!projectId) { aiSettings = null; aiStatus.textContent = 'Selecione um projeto autorizado.'; renderAiSettings(); return; }
     const selectedProject = projectId;
-    aiStatus.textContent = 'Verificando Codex, OmniRoute e modelos elegíveis…';
+    aiStatus.textContent = 'Verificando conexões OAuth do OmniRoute e modelos elegíveis…';
     try {
       const data = await api(`/api/dev/ai-settings?project_id=${encodeURIComponent(selectedProject)}${force ? '&refresh=true' : ''}`);
       if (request !== aiSettingsRequest || selectedProject !== projectId) return;
@@ -814,6 +825,27 @@
     } catch (error) {
       if (request !== aiSettingsRequest || selectedProject !== projectId) return;
       aiSettings = null; aiStatus.textContent = `Configurações indisponíveis: ${error.message}`; renderAiSettings();
+    }
+  };
+  const refreshProviderStatus = async () => {
+    if (!projectId || !aiSettings) return;
+    const selectedProject = projectId;
+    try {
+      const data = await api(`/api/dev/ai-settings/providers?project_id=${encodeURIComponent(selectedProject)}`);
+      if (selectedProject !== projectId || !aiSettings) return;
+      const old = aiSettings.executors;
+      aiSettings.executors = data.executors;
+      if (Object.keys(data.executors).some(key => data.executors[key].executable && !old?.[key]?.executable)) {
+        void refreshAiSettings(true);
+      } else {
+        renderAiSettings(); renderPlanningControls();
+        knownAgents.forEach((_agent, paneId) => renderAgentControls(paneId));
+      }
+    } catch (_error) {
+      if (selectedProject !== projectId || !aiSettings) return;
+      Object.values(aiSettings.executors || {}).forEach(provider => { provider.connected = false; provider.executable = false; });
+      renderAiSettings(); renderPlanningControls();
+      knownAgents.forEach((_agent, paneId) => renderAgentControls(paneId));
     }
   };
   document.getElementById('ai-admin-unlock').addEventListener('click', async () => {
@@ -881,39 +913,52 @@
   const maestroComposer = makeComposer(maestroPane, 'maestro');
   const planningSelect = element('select', 'cockpit-model-select');
   planningSelect.setAttribute('aria-label', 'Modelo de planejamento do Maestro');
+  const planningEffort = element('select', 'cockpit-model-select');
+  planningEffort.setAttribute('aria-label', 'Esforço desta mensagem ou autorização do Maestro');
   const planningCost = checkbox();
   const planningCostLabel = formField('Autorizo o custo deste modelo para planejamento', planningCost);
   const authorize = element('button', 'cockpit-authorize', 'Autorizar planejamento');
   authorize.type = 'button';
-  maestroComposer.controls.append(planningSelect, planningCostLabel, authorize);
-  planningSelect.addEventListener('change', () => { planningCost.checked = false; renderPlanningControls(); });
+  maestroComposer.controls.append(planningSelect, planningEffort, planningCostLabel, authorize);
+  planningSelect.addEventListener('change', () => { planningEffort.value = ''; planningCost.checked = false; renderPlanningControls(); });
+  planningEffort.addEventListener('change', () => renderPlanningControls());
   const renderPlanningControls = () => {
     const planning = maestroState?.planning;
     const selected = planningSelect.value;
     const preferred = aiSettings?.roles?.maestro;
     const preferredModel = preferred?.valid ? preferred.selection.model_id : '';
-    const planningModels = [...modelCatalog];
-    const preferredRow = preferred?.models?.find(row => row.id === preferredModel);
-    if (preferredRow && !planningModels.some(row => row.id === preferredRow.id)) planningModels.unshift(preferredRow);
+    const aiRows = (preferred?.models || []).filter(row => aiSettings?.executors?.[row.provider]?.executable);
+    const planningModels = [...aiRows, ...modelCatalog.filter(row => !row.id.startsWith('cc/') && !row.id.startsWith('cx/'))];
     const emptyOption = element('option', '', 'Modelo de planejamento…');
     emptyOption.value = '';
     planningSelect.replaceChildren(emptyOption, ...planningModels.map(row => {
-      const option = element('option', '', `${row.id} · ${row.cost_status || 'unknown'}`);
+      const option = element('option', '', `${row.name || row.id} · ${row.cost_status || 'unknown'}`);
       option.value = row.id;
       return option;
     }));
+    const currentBase = aiRows.find(row => Object.values(row.routes_by_effort || {}).includes(planning?.model))?.id || planning?.model;
     planningSelect.value = planningModels.some(row => row.id === selected) ? selected :
-      (preferredModel || (planningModels.some(row => row.id === planning?.model) ? planning.model : ''));
-    const planningGrant = activeCostAuthorizationFor(planningSelect.value);
+      (preferredModel || (planningModels.some(row => row.id === currentBase) ? currentBase : ''));
+    const selectedRow = planningModels.find(row => row.id === planningSelect.value);
+    const previousEffort = planningEffort.value;
+    const efforts = selectedRow?.efforts || selectedRow?.supported_efforts || [];
+    const effortPrompt = element('option', '', 'Escolha o esforço desta execução'); effortPrompt.value = '';
+    planningEffort.replaceChildren(effortPrompt, ...efforts.map(value => {
+      const option = element('option', '', value); option.value = value; return option;
+    }));
+    planningEffort.value = efforts.includes(previousEffort) ? previousEffort : '';
+    const exactModel = selectedRow?.routes_by_effort?.[planningEffort.value] || planningSelect.value;
+    const planningGrant = activeCostAuthorizationFor(exactModel);
     planningCostLabel.hidden = true;
     planningCost.checked = false;
     authorize.textContent = planning?.authorized ? 'Trocar modelo' : 'Autorizar planejamento';
     authorize.disabled = pending.has('authorize') || !projectId || !planningSelect.value ||
-      (costOf(planningSelect.value) !== 'free' && !planningGrant) ||
-      (planning?.authorized && planning.model === planningSelect.value);
+      (selectedRow?.routes_by_effort && !planningEffort.value) ||
+      (costOf(exactModel) !== 'free' && !planningGrant) ||
+      (planning?.authorized && planning.model === exactModel);
     maestroComposer.note.textContent = planning?.authorized
       ? `IA autorizada: ${planning.model} · ${planning.cost_status || 'unknown'} · planejamento somente leitura${planningGrant ? ` · ${planningGrant.uses_remaining}/${planningGrant.max_uses} usos restantes` : ''}`
-      : (planningSelect.value && costOf(planningSelect.value) !== 'free' && !planningGrant
+      : (planningSelect.value && costOf(exactModel) !== 'free' && !planningGrant
         ? 'Crie uma autorização persistente com limites no Catálogo de modelos antes de habilitar este modelo no Maestro.'
         : 'Planejamento determinístico. Autorize um modelo para usar IA; execução de agentes exige aprovação separada.');
     maestroComposer.send.disabled = pending.has('maestro') || pending.has('authorize') || !projectId || Boolean(maestroState?.busy);
@@ -927,7 +972,7 @@
     renderPlanningControls();
     try {
       await api('/api/workspace/maestro/authorize', { method: 'POST', body: {
-        project_id: selectedProject, model, confirm_cost: false
+        project_id: selectedProject, model, ...(planningEffort.value ? { effort: planningEffort.value } : {}), confirm_cost: false
       } });
       maestroComposer.error.textContent = '';
     } catch (error) {
@@ -947,7 +992,7 @@
     if (kind === 'maestro') {
       if (maestroState?.busy || pending.has('authorize')) return;
       path = '/api/workspace/maestro/messages';
-      body = { project_id: selectedProject, text };
+      body = { project_id: selectedProject, text, ...(planningEffort.value ? { effort: planningEffort.value } : {}) };
     } else {
       const agent = knownAgents.get(paneId);
       if (!agent || !workspaceState?.execution_enabled || agent.busy ||
@@ -962,7 +1007,7 @@
         composer.error.textContent = `Confirme o custo de ${agent.model}.`; return;
       }
       path = `/api/workspace/panes/${encodeURIComponent(paneId)}/messages`;
-      body = { text, ...(!authorized ? { confirm_model: agent.model } : {}),
+      body = { text, ...(composer.effort?.value ? { effort: composer.effort.value } : {}), ...(!authorized ? { confirm_model: agent.model } : {}),
         ...(!authorized && costOf(agent.model) !== 'free' ? { confirm_cost: true } : {}) };
     }
     pending.add(key);
@@ -1016,6 +1061,7 @@
     try {
       await api(`/api/workspace/panes/${encodeURIComponent(paneId)}/missions`, { method: 'POST', body: {
         ...(description ? { description } : {}), test_profile: profile,
+        ...(controls.effort.value ? { effort: controls.effort.value } : {}),
         ...(!authorized ? { confirm_model: agent.model } : {}),
         ...(!authorized && costOf(agent.model) !== 'free' ? { confirm_cost: true } : {})
       } });
@@ -1082,6 +1128,22 @@
     const agent = knownAgents.get(paneId);
     if (!pane || !agent) return;
     const composer = pane.composer;
+    const route = modelCatalog.find(item => item.id === agent.model);
+    const oauthProvider = agent.model?.startsWith('cc/') ? 'claude_code' : agent.model?.startsWith('cx/') ? 'codex' : null;
+    const providerUnavailable = oauthProvider && aiSettings?.executors?.[oauthProvider]?.executable !== true;
+    const supportedEfforts = oauthProvider
+      ? (route?.supported_efforts || []).filter(value => route?.confirmed_efforts?.includes(value))
+      : (route?.supported_efforts || []);
+    const updateEffort = select => {
+      const oldValue = select.dataset.modelId === agent.model ? select.value : '';
+      const prompt = element('option', '', 'Esforço desta execução'); prompt.value = '';
+      select.replaceChildren(prompt, ...supportedEfforts.map(value => {
+        const option = element('option', '', value); option.value = value; return option;
+      }));
+      select.value = supportedEfforts.includes(oldValue) ? oldValue : '';
+      select.dataset.modelId = agent.model || '';
+    };
+    updateEffort(composer.effort);
     const planAuthorized = Boolean(agent.brief?.authorization?.applies);
     const costGrant = activeCostAuthorizationFor(agent.model);
     const authorized = planAuthorized || Boolean(agent.model && costOf(agent.model) !== 'free' && costGrant);
@@ -1097,6 +1159,7 @@
     modelConfirm.querySelector('span').textContent = `Confirmo o uso de ${agent.model || 'um modelo'}`;
     costConfirm.querySelector('span').textContent = `Autorizo o custo de ${agent.model || 'um modelo'} (${costOf(agent.model)})`;
     const mission = pane.missionControls;
+    updateEffort(mission.effort);
     const previousProfile = mission.profile.value;
     const profilePrompt = testProfilesLoading ? 'Carregando perfis confiáveis…' :
       (testProfilesError ? 'Perfis indisponíveis — execução bloqueada' :
@@ -1136,9 +1199,11 @@
     }
     composer.send.disabled = pending.has(paneId) || !workspaceState?.execution_enabled || agent.busy || activeMission ||
       (agent.messages || []).some(message => ['PENDING', 'RUNNING'].includes(message.status)) ||
-      agent.session?.status !== 'ACTIVE' || !agent.model;
+      agent.session?.status !== 'ACTIVE' || !agent.model || providerUnavailable ||
+      (agent.model.startsWith('cc/') || agent.model.startsWith('cx/')) && !composer.effort.value;
     mission.start.disabled = pending.has(paneId) || !workspaceState?.execution_enabled || agent.busy || activeMission ||
-      agent.session?.status !== 'ACTIVE' || !agent.model || !mission.profile.value ||
+      agent.session?.status !== 'ACTIVE' || !agent.model || !mission.profile.value || providerUnavailable ||
+      (agent.model.startsWith('cc/') || agent.model.startsWith('cx/')) && !mission.effort.value ||
       (!mission.description.value.trim() && !agent.brief) || (agent.dependencies || []).some(dependency => !dependency.ready);
     mission.interrupt.hidden = !activeMission;
     const interruptRequested = Boolean(latestMission?.interrupt_requested) || interruptRequests.has(latestMission?.mission_id);
@@ -1224,6 +1289,10 @@
     addCloseControl(pane);
     const composer = makeComposer(pane, 'agent');
     pane.composer = composer;
+    const agentEffort = element('select', 'cockpit-model-select');
+    agentEffort.setAttribute('aria-label', 'Esforço desta mensagem do agente');
+    composer.effort = agentEffort;
+    composer.controls.append(agentEffort);
     const missionDetails = element('details', 'cockpit-mission-details');
     const missionSummary = element('summary', '', 'Criar missão com testes');
     const missionDescription = element('textarea', 'cockpit-input cockpit-mission-input');
@@ -1236,6 +1305,8 @@
     const profilePrompt = element('option', '', 'Carregando perfis confiáveis…');
     profilePrompt.value = '';
     missionProfile.append(profilePrompt);
+    const missionEffort = element('select', 'cockpit-model-select');
+    missionEffort.setAttribute('aria-label', 'Esforço desta missão');
     const profileNote = element('div', 'cockpit-mission-note');
     profileNote.setAttribute('role', 'status');
     const missionStatus = element('div', 'cockpit-mission-status');
@@ -1255,15 +1326,17 @@
     const missionError = element('div', 'cockpit-compose-error cockpit-mission-error');
     missionError.setAttribute('role', 'status');
     missionActions.append(startMission, interrupt, inspect);
-    missionDetails.append(missionSummary, missionStatus, missionDescription, missionProfile, profileNote, missionActions, diff, missionError);
+    missionDetails.append(missionSummary, missionStatus, missionDescription, missionProfile, missionEffort, profileNote, missionActions, diff, missionError);
     composer.form.append(missionDetails);
     const missionControls = { composer, summary: missionSummary, status: missionStatus, description: missionDescription,
-      profile: missionProfile, profileNote, start: startMission, interrupt, inspect, diff, error: missionError };
+      profile: missionProfile, effort: missionEffort, profileNote, start: startMission, interrupt, inspect, diff, error: missionError };
     pane.missionControls = missionControls;
     startMission.addEventListener('click', () => { void submitMission(agent.pane_id, missionControls); });
     interrupt.addEventListener('click', () => { void interruptMission(agent.pane_id, missionControls); });
     inspect.addEventListener('click', () => { void inspectMission(missionControls); });
     missionProfile.addEventListener('change', () => renderAgentControls(agent.pane_id));
+    missionEffort.addEventListener('change', () => renderAgentControls(agent.pane_id));
+    agentEffort.addEventListener('change', () => renderAgentControls(agent.pane_id));
     missionDescription.addEventListener('input', () => renderAgentControls(agent.pane_id));
     const modelInput = checkbox();
     const costInput = checkbox();
@@ -1531,6 +1604,7 @@
       document.getElementById('execution-count').textContent = twoDigits(agents.reduce((total, agent) => total + (agent.mission_count || 0), 0));
       document.getElementById('data-status').textContent = 'Dados do Nexus · atualização automática';
       syncUI();
+      void refreshProviderStatus();
     } catch (error) {
       if (generation === refreshGeneration && request === refreshRequest) document.getElementById('data-status').textContent = `Falha ao carregar: ${error.message}`;
     } finally {
@@ -1579,7 +1653,7 @@
           document.getElementById('data-status').textContent = `Perfis de teste indisponíveis: ${error.message}`;
         });
       refresh();
-      if (aiSettingsOpen) void refreshAiSettings();
+      void refreshAiSettings();
     }
   };
   document.getElementById('project-toggle').addEventListener('click', () => {

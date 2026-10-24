@@ -31,7 +31,7 @@ def _approved_model(model: str) -> dict:
                 and item.get("active") and item.get("discovered") is True
                 and item.get("approval_status") == "approved"), None)
     if row is None:
-        raise DevServiceError("MODEL_NOT_ALLOWED", catalog.get("catalog_error") or development.get("catalog_error") or
+        raise DevServiceError("MODEL_NOT_ALLOWED", development.get("catalog_error") or
                               "The selected model is not an approved live route.", http_status=403)
     return row
 

@@ -59,6 +59,7 @@ def _mission_dict(row) -> dict:
         "dev_session_id": row["dev_session_id"],
         "description": row["description"],
         "requested_model": row["requested_model"],
+        "requested_effort": row["requested_effort"] if "requested_effort" in set(row.keys()) else None,
         "allowed_models": json.loads(row["allowed_models_json"]),
         "test_profile": row["test_profile"],
         "status": row["status"],
@@ -97,6 +98,7 @@ def start_mission(
     description: str,
     *,
     model: str | None,
+    effort: str | None = None,
     allowed_models: list[str],
     test_profile: str,
     timeout_seconds: int = DEFAULT_MISSION_TIMEOUT_SECONDS,
@@ -129,6 +131,14 @@ def start_mission(
         raise DevServiceError("MODEL_NOT_ALLOWED", message, http_status=403)
     if selected_model not in allowed_models:
         raise DevServiceError("MODEL_NOT_CONFIRMED", "The selected model was not explicitly confirmed by the caller.", http_status=400)
+    from nexus.workspace.omniroute_oauth import require_connected_route
+    require_connected_route(selected_model)
+    selected_row = next(item for item in model_catalog["models"] if item["id"] == selected_model)
+    if selected_model.startswith(("cc/", "cx/")) and not effort:
+        raise DevServiceError("AI_EFFORT_REQUIRED", "Escolha o esforço da missão antes de executar.", http_status=422)
+    if effort is not None and (effort not in selected_row.get("supported_efforts", []) or (
+        selected_model.startswith(("cc/", "cx/")) and effort not in selected_row.get("confirmed_efforts", []))):
+        raise DevServiceError("EFFORT_NOT_SUPPORTED", "Esforço não confirmado para a rota exata da missão.", http_status=422)
     if not MIN_MISSION_TIMEOUT_SECONDS <= timeout_seconds <= MAX_MISSION_TIMEOUT_SECONDS:
         raise DevServiceError("INVALID_TIMEOUT", "timeout_seconds is outside the allowed range.", http_status=400)
     try:
@@ -136,6 +146,7 @@ def start_mission(
             dev_session_id,
             description.strip(),
             requested_model=selected_model,
+            requested_effort=effort,
             allowed_models=normalized_allowed,
             test_profile=test_profile,
         )
@@ -301,7 +312,8 @@ def _run_mission_body(mission_id: str, timeout_seconds: int, stop_event: threadi
     try:
         session, worktree = _require_session_worktree(session_id)
         dev_missions.update_status(mission_id, "RUNNING", attempt_count=1)
-        turn = executor.run_dev_turn(session_id, _prompt(row["description"]), model=row["requested_model"])
+        turn = executor.run_dev_turn(session_id, _prompt(row["description"]), model=row["requested_model"],
+                                     **({"effort": row["requested_effort"]} if row["requested_effort"] else {}))
         dev_missions.update_status(mission_id, "RUNNING", current_turn_id=turn["turn_id"], attempt_count=1)
         turn = _wait_for_turn(mission_id, session_id, turn["turn_id"], deadline, stop_event)
         if turn["status"] != "COMPLETED":
@@ -316,7 +328,8 @@ def _run_mission_body(mission_id: str, timeout_seconds: int, stop_event: threadi
             return
 
         dev_missions.update_status(mission_id, "REPAIRING", attempt_count=2)
-        repair = executor.run_dev_turn(session_id, _repair_prompt(row["description"], tested), model=row["requested_model"])
+        repair = executor.run_dev_turn(session_id, _repair_prompt(row["description"], tested), model=row["requested_model"],
+                                       **({"effort": row["requested_effort"]} if row["requested_effort"] else {}))
         dev_missions.update_status(mission_id, "REPAIRING", current_turn_id=repair["turn_id"], attempt_count=2)
         repair = _wait_for_turn(mission_id, session_id, repair["turn_id"], deadline, stop_event)
         if repair["status"] != "COMPLETED":

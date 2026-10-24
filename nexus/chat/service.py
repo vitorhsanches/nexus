@@ -303,6 +303,7 @@ def _validate_project(project_id: str) -> str:
 
 
 def create_session(project_id: str, model: str = DEFAULT_CHAT_MODEL, effort: str | None = None, allow_unknown_cost: bool = False) -> dict:
+    _require_chat_provider(model)
     catalog = {item["id"]: item for item in _model_catalog()}
     selected = catalog.get(model)
     if selected is None:
@@ -314,6 +315,15 @@ def create_session(project_id: str, model: str = DEFAULT_CHAT_MODEL, effort: str
     workspace_path = _validate_project(project_id)
     session_id = chat_sessions.create_session(project_id, workspace_path, model, effort)
     return _session_dict(chat_sessions.get_session(session_id))
+
+
+def _require_chat_provider(model: str) -> None:
+    from nexus.dev.service import DevServiceError
+    from nexus.workspace.omniroute_oauth import require_connected_route
+    try:
+        require_connected_route(model)
+    except DevServiceError as error:
+        raise ChatError(error.code, str(error), http_status=error.http_status) from error
 
 
 def _get_session_row(session_id: str):
@@ -604,6 +614,7 @@ def list_sessions(project_id: str | None = None) -> list[dict]:
 def send_turn(session_id: str, text: str, *, idempotency_key: str | None = None) -> dict:
     session_row = _get_session_row(session_id)
     _validated_session_workspace(session_row)
+    _require_chat_provider(session_row["requested_model"] or "")
 
     if idempotency_key is None:
         idempotency_key = uuid.uuid4().hex
@@ -701,6 +712,7 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
         turn_timeout_seconds = _chat_turn_timeout_seconds()
         session_row = _get_session_row(session_id)
         workspace_path = _validated_session_workspace(session_row)
+        _require_chat_provider(session_row["requested_model"] or "")
         client = AppServerClient(
             workspace_path,
             codex_home=session_row["codex_home"],
