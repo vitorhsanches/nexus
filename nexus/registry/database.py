@@ -661,5 +661,41 @@ def initialize_database() -> None:
                 ON workspace_handoffs(target_pane_id, created_at);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_handoffs_target_transferring
                 ON workspace_handoffs(target_session_id) WHERE status = 'TRANSFERRING';
+
+            -- Persistent cost consent is separate from Development Mode and
+            -- Maestro plan approvals. No rows are seeded or activated by a
+            -- migration. Uses are reserved under BEGIN IMMEDIATE and leases
+            -- remain durable across process restarts.
+            CREATE TABLE IF NOT EXISTS workspace_cost_authorizations (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                cost_status TEXT NOT NULL,
+                max_uses INTEGER NOT NULL,
+                uses_reserved INTEGER NOT NULL DEFAULT 0,
+                expires_at TEXT NOT NULL,
+                max_concurrent INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                created_at TEXT NOT NULL,
+                revoked_at TEXT,
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_cost_authorizations_project
+                ON workspace_cost_authorizations(project_id, status, expires_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_cost_authorizations_active_model
+                ON workspace_cost_authorizations(project_id, model_id) WHERE status = 'ACTIVE';
+
+            CREATE TABLE IF NOT EXISTS workspace_cost_authorization_leases (
+                id TEXT PRIMARY KEY,
+                authorization_id TEXT NOT NULL,
+                execution_kind TEXT,
+                execution_id TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                released_at TEXT,
+                FOREIGN KEY (authorization_id) REFERENCES workspace_cost_authorizations(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_cost_authorization_leases_active
+                ON workspace_cost_authorization_leases(authorization_id, released_at, expires_at);
             """
         )

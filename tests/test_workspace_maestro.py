@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from nexus.dev.service import DevServiceError
 from nexus.registry import chat_sessions, database, dev_missions, dev_sessions
 from nexus.registry import workspace as store
-from nexus.workspace import maestro, maestro_plan, service
+from nexus.workspace import cost_authorizations, maestro, maestro_plan, service
 
 FREE = {"id": "free/model", "cost_status": "free"}
 STANDARD = {"id": "std/model", "cost_status": "standard"}
@@ -35,6 +35,11 @@ MODELS = [FREE, STANDARD]
 
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _grant_cost(model: str) -> dict:
+    return cost_authorizations.authorize("demo", model, confirm_cost=True, max_uses=20,
+                                        validity_seconds=3600, max_concurrent=2)
 
 
 @pytest.fixture
@@ -182,14 +187,15 @@ def test_without_planning_authorization_the_answer_is_a_labelled_deterministic_p
 def test_planning_authorization_requires_cost_confirmation_and_approved_route(env):
     with pytest.raises(DevServiceError) as paid:
         maestro.authorize_planning("demo", "std/model", confirm_cost=False)
-    assert paid.value.code == "COST_CONFIRMATION_REQUIRED"
+    assert paid.value.code == "COST_AUTHORIZATION_REQUIRED"
     with pytest.raises(DevServiceError) as unknown:
         maestro.authorize_planning("demo", "paid/unapproved", confirm_cost=True)
     assert unknown.value.code == "MODEL_NOT_ALLOWED"
     with pytest.raises(DevServiceError) as locked:
         maestro.authorize_planning("locked", "free/model", confirm_cost=False)
     assert locked.value.code == "DEV_MODE_DISABLED"
-    state = maestro.authorize_planning("demo", "std/model", confirm_cost=True)
+    _grant_cost("std/model")
+    state = maestro.authorize_planning("demo", "std/model", confirm_cost=False)
     assert state["planning"] == {**state["planning"], "authorized": True, "model": "std/model", "cost_status": "standard", "mode": "read-only"}
 
 
@@ -198,24 +204,26 @@ def test_only_explicitly_free_route_can_plan_without_cost_consent(env, route):
     env["catalog"]["models"].append(route)
     with pytest.raises(DevServiceError) as blocked:
         maestro.authorize_planning("demo", route["id"], confirm_cost=False)
-    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED" and env["sent"] == []
-    state = maestro.authorize_planning("demo", route["id"], confirm_cost=True)
+    assert blocked.value.code == "COST_AUTHORIZATION_REQUIRED" and env["sent"] == []
+    _grant_cost(route["id"])
+    state = maestro.authorize_planning("demo", route["id"], confirm_cost=False)
     assert state["planning"]["authorized"] is True
-    assert store.get_conversation(state["conversation_id"])["cost_confirmed_model"] == route["id"]
+    assert store.get_conversation(state["conversation_id"])["cost_confirmed_model"] is None
 
 
 def test_legacy_maestro_paid_session_needs_reconfirmation_without_losing_thread(env):
     env["catalog"]["models"].append(LOW)
-    original = maestro.authorize_planning("demo", "low/model", confirm_cost=True)
+    grant = _grant_cost("low/model")
+    original = maestro.authorize_planning("demo", "low/model", confirm_cost=False)
     conversation_id = original["conversation_id"]
     session_id = store.get_conversation(conversation_id)["chat_session_id"]
-    with database.get_connection() as connection:
-        connection.execute("UPDATE workspace_maestro_conversations SET cost_confirmed_model=NULL WHERE id=?", (conversation_id,))
+    cost_authorizations.revoke("demo", grant["authorization_id"])
     assert maestro.conversation_state("demo")["planning"]["authorized"] is False
     with pytest.raises(DevServiceError) as blocked:
         maestro.send_message("demo", "continue")
-    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED" and env["sent"] == []
-    restored = maestro.authorize_planning("demo", "low/model", confirm_cost=True)
+    assert blocked.value.code == "COST_AUTHORIZATION_REQUIRED" and env["sent"] == []
+    _grant_cost("low/model")
+    restored = maestro.authorize_planning("demo", "low/model", confirm_cost=False)
     assert store.get_conversation(conversation_id)["chat_session_id"] == session_id
     assert restored["planning"]["authorized"] is True
     maestro.send_message("demo", "continue")
@@ -224,7 +232,9 @@ def test_legacy_maestro_paid_session_needs_reconfirmation_without_losing_thread(
 
 def test_legacy_maestro_table_migrates_without_inventing_cost_consent(env):
     env["catalog"]["models"].append(LOW)
-    original = maestro.authorize_planning("demo", "low/model", confirm_cost=True)
+    grant = _grant_cost("low/model")
+    original = maestro.authorize_planning("demo", "low/model", confirm_cost=False)
+    cost_authorizations.revoke("demo", grant["authorization_id"])
     conversation_id = original["conversation_id"]
     with database.get_connection() as connection:
         connection.execute("ALTER TABLE workspace_maestro_conversations DROP COLUMN cost_confirmed_model")
@@ -234,7 +244,7 @@ def test_legacy_maestro_table_migrates_without_inventing_cost_consent(env):
     assert maestro.conversation_state("demo")["planning"]["authorized"] is False
     with pytest.raises(DevServiceError) as blocked:
         maestro.send_message("demo", "continue")
-    assert blocked.value.code == "COST_CONFIRMATION_REQUIRED" and env["sent"] == []
+    assert blocked.value.code == "COST_AUTHORIZATION_REQUIRED" and env["sent"] == []
 
 
 def test_llm_conversation_persists_plans_corrections_and_survives_restart(env):
@@ -599,7 +609,7 @@ def _client():
 
 def test_maestro_and_approval_routes_round_trip_without_apply(env):
     client = _client()
-    assert client.post("/api/workspace/maestro/authorize", json={"project_id": "demo", "model": "std/model"}).json()["detail"]["code"] == "COST_CONFIRMATION_REQUIRED"
+    assert client.post("/api/workspace/maestro/authorize", json={"project_id": "demo", "model": "std/model"}).json()["detail"]["code"] == "COST_AUTHORIZATION_REQUIRED"
     assert client.post("/api/workspace/maestro/authorize", json={"project_id": "demo", "model": "free/model"}).status_code == 200
     assert client.post("/api/workspace/maestro/messages", json={"project_id": "demo", "text": "multiply"}).json()["busy"] is True
     _complete_last(env, _answer(SIMPLE))

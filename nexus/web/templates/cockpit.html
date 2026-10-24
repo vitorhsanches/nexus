@@ -46,6 +46,19 @@
         <p class="model-catalog-status" id="model-catalog-status" role="status" aria-live="polite">Carregando modelos anunciados pelo OmniRoute…</p>
         <p class="model-catalog-project-note" id="model-catalog-project-note"></p>
         <div class="model-catalog-list" id="model-catalog-list" aria-live="polite"></div>
+        <div class="cost-authorization-panel">
+          <h3>Autorizações persistentes por projeto</h3>
+          <p class="model-catalog-project-note">Limites por utilizações, validade e concorrência. Não representam um teto monetário.</p>
+          <div class="cost-authorization-form">
+            <select id="cost-auth-model" aria-label="Modelo para autorizar"></select>
+            <label>Usos <input id="cost-auth-uses" type="number" min="1" max="10000" value="10"></label>
+            <label>Validade (dias) <input id="cost-auth-days" type="number" min="1" max="365" value="7"></label>
+            <label>Concorrência <input id="cost-auth-concurrency" type="number" min="1" max="100" value="1"></label>
+            <label class="cost-auth-confirm"><input id="cost-auth-confirm" type="checkbox"> Autorizo este modelo e estes limites</label>
+            <button id="cost-auth-create" type="button">Salvar autorização</button>
+          </div>
+          <div id="cost-auth-list" class="cost-authorization-list" aria-live="polite">Selecione um projeto para consultar autorizações.</div>
+        </div>
       </section>
 
       <div class="section-heading"><div><span class="section-kicker">ÁREA DE TRABALHO</span><h2>Panes do projeto <span id="pane-count">02</span></h2></div><div class="view-controls"><div class="group-controls" id="group-controls" hidden><button id="previous-group" type="button" aria-label="Grupo anterior">‹</button><span id="group-label" aria-live="polite">Grupo 1/1</span><button id="next-group" type="button" aria-label="Próximo grupo">›</button></div><button class="restore-layout-button" id="restore-layout" type="button" title="Restaurar layout automático" aria-label="Restaurar layout automático">↺ <span>Restaurar layout</span></button><span class="view-selected" id="grid-layout-label">▦ &nbsp; Grade 2 × 2</span><button class="add-pane-button" id="add-pane" type="button" aria-label="Mostrar próximo agente registrado">+ Pane</button></div></div>

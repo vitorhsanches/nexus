@@ -102,9 +102,13 @@ def _latest_mission(missions: list[dict]) -> dict | None:
 
 def pane_view(row) -> dict:
     from nexus.registry import dev_sessions, workspace_handoff
+    from nexus.workspace import cost_authorizations
 
     session = dev_sessions.get_session(row["dev_session_id"])
     missions = _missions(row["dev_session_id"])
+    for mission in missions:
+        if mission.get("status") not in ACTIVE_MISSION_STATUSES:
+            cost_authorizations.release_execution("mission", mission["mission_id"])
     latest = _latest_mission(missions)
     return {
         "pane_id": row["id"],
@@ -522,6 +526,12 @@ def _authorize_use(row, confirm_model: str | None, confirm_cost: bool = False) -
     brief = _brief_view(row)
     if brief and brief["authorization"]["applies"] and confirm_model in (None, row["model"]):
         return True
+    from nexus.workspace import cost_authorizations
+    if confirm_model in (None, row["model"]):
+        configured = next((item for item in cost_authorizations.list_authorizations(row["project_id"])["authorizations"]
+                           if item["model"] == row["model"] and item["status"] == "ACTIVE"), None)
+        if configured is not None:
+            return False
     if confirm_model != row["model"]:
         raise DevServiceError(
             "MODEL_NOT_CONFIRMED",
@@ -616,7 +626,22 @@ def _run_gated(
 ) -> tuple[bool, dict]:
     with _execution_lock(row):
         by_plan = _check_execution_gates(row, confirm_model, confirm_cost)
-        return by_plan, start(by_plan)
+        from nexus.workspace import cost_authorizations
+        reserved = None if by_plan else cost_authorizations.reserve_if_active(row["project_id"], row["model"])
+        lease_id = reserved[0] if reserved else None
+        try:
+            result = start(by_plan)
+        except Exception:
+            cost_authorizations.release(lease_id)
+            raise
+        execution_id = result.get("mission_id") or result.get("turn_id")
+        status = result.get("status")
+        if lease_id and execution_id and status not in {"COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED", "OUTCOME_UNKNOWN"}:
+            kind = "mission" if result.get("mission_id") else "turn"
+            cost_authorizations.bind(lease_id, kind, execution_id)
+        else:
+            cost_authorizations.release(lease_id)
+        return by_plan, result
 
 
 def _agent_context(row) -> str:
@@ -742,6 +767,7 @@ TERMINAL_TURN_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "INTERRU
 
 def pane_messages(row, limit: int = 20) -> list[dict]:
     from nexus.dev import executor
+    from nexus.workspace import cost_authorizations
 
     out = []
     for message in store.list_pane_messages(row["id"], limit=limit):
@@ -751,6 +777,8 @@ def pane_messages(row, limit: int = 20) -> list[dict]:
                 turn = executor.get_turn_detail(row["dev_session_id"], message["dev_turn_id"])
             except DevServiceError:
                 turn = None
+        if turn is not None and turn["status"] in TERMINAL_TURN_STATUSES:
+            cost_authorizations.release_execution("turn", message["dev_turn_id"])
         outcome = message["outcome"]
         if outcome is None and turn is not None and turn["status"] in TERMINAL_TURN_STATUSES:
             if turn["status"] == "COMPLETED":

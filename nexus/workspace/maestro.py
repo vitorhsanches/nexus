@@ -74,11 +74,12 @@ def authorize_planning(project_id: str, model: str, *, confirm_cost: bool) -> di
             catalog.get("catalog_error") or "The selected model is not an approved live route.",
             http_status=403,
         )
-    if row.get("cost_status") not in FREE_COSTS and not confirm_cost:
+    from nexus.workspace import cost_authorizations
+    if row.get("cost_status") not in FREE_COSTS and not cost_authorizations.has_active(project_id, model):
         raise DevServiceError(
-            "COST_CONFIRMATION_REQUIRED",
-            f"{model} is classified as {row.get('cost_status') or 'unknown'} cost; confirm it explicitly to plan with it.",
-            http_status=400,
+            "COST_AUTHORIZATION_REQUIRED",
+            f"{model} is classified as {row.get('cost_status') or 'unknown'} cost; create a persistent authorization with explicit usage limits first.",
+            http_status=403,
         )
     conversation = _conversation(project_id)
     if conversation["chat_session_id"] and conversation["model"] == model:
@@ -94,7 +95,7 @@ def authorize_planning(project_id: str, model: str, *, confirm_cost: bool) -> di
         session_id = session["session_id"]
     store.authorize_conversation(
         conversation["id"], chat_session_id=session_id, model=model,
-        cost_confirmed_model=model if row.get("cost_status") != "free" and confirm_cost else None,
+        cost_confirmed_model=None,
     )
     return conversation_state(project_id)
 
@@ -114,17 +115,28 @@ def send_message(project_id: str, text: str) -> dict:
 
     catalog = _catalog()
     selected = next((item for item in catalog["models"] if item["id"] == conversation["model"]), None)
+    from nexus.workspace import cost_authorizations
     if conversation["chat_session_id"] and (
         selected is None or (
             selected.get("cost_status") != "free"
-            and conversation["cost_confirmed_model"] != conversation["model"]
+            and not cost_authorizations.has_active(project_id, conversation["model"])
         )
     ):
         raise DevServiceError(
-            "COST_CONFIRMATION_REQUIRED",
-            "Reauthorize this exact planning model with explicit cost confirmation before another turn.",
+            "COST_AUTHORIZATION_REQUIRED",
+            "Create or restore an active project/model authorization with usage limits before another paid turn.",
             http_status=403,
         )
+    lease = None
+    if selected is not None and selected.get("cost_status") != "free":
+        reserved = cost_authorizations.reserve_if_active(project_id, selected["id"])
+        if reserved is None:
+            raise DevServiceError(
+                "COST_AUTHORIZATION_REQUIRED",
+                "Create an active project/model authorization with usage limits before sending a paid planning turn.",
+                http_status=403,
+            )
+        lease = reserved[0]
     limit = policy.max_auto_panes()
     # The user message is stored first (PENDING); every path below finishes
     # it through one atomic _answer(). An interruption anywhere in between
@@ -147,11 +159,17 @@ def send_message(project_id: str, text: str) -> dict:
     try:
         turn = chat_service.send_turn(conversation["chat_session_id"], prompt, idempotency_key=message_id)
     except chat_service.ChatError as error:
+        if lease:
+            from nexus.workspace import cost_authorizations
+            cost_authorizations.release(lease)
         plan = maestro_plan.deterministic(text, models=catalog["models"], limit=limit, reason=f"Maestro indisponível ({error.code})")
         _answer(project_id, message_id, text, plan, reply=UNREACHABLE_REPLY, user_status="FAILED",
                 error_code=error.code, error_message=str(error)[:1000])
         return conversation_state(project_id)
     store.set_message_turn(message_id, turn["turn_id"])
+    if lease:
+        from nexus.workspace import cost_authorizations
+        cost_authorizations.bind(lease, "chat_turn", turn["turn_id"])
     return conversation_state(project_id)
 
 
@@ -239,6 +257,8 @@ def reconcile(conversation_id: str) -> None:
         turn = chat_sessions.get_turn(turn_id)
         if turn is None or turn["status"] in PENDING_TURN_STATUSES:
             continue
+        from nexus.workspace import cost_authorizations
+        cost_authorizations.release_execution("chat_turn", turn_id)
         if turn["status"] == "COMPLETED" and not catalog["models"] and catalog.get("catalog_error"):
             # Transient discovery failure: retry on a later read instead of
             # rejecting a possibly valid plan.
@@ -291,6 +311,9 @@ def conversation_state(project_id: str) -> dict:
                            and row["chat_turn_id"]), None)
     if conversation["model"]:
         model_row = next((item for item in _catalog()["models"] if item["id"] == conversation["model"]), None)
+    from nexus.workspace import cost_authorizations
+    grant = next((item for item in cost_authorizations.list_authorizations(project_id)["authorizations"]
+                  if item["model"] == conversation["model"] and item["status"] == "ACTIVE"), None) if conversation["model"] else None
     return {
         "conversation_id": conversation["id"],
         "chat_session_id": conversation["chat_session_id"],
@@ -299,12 +322,13 @@ def conversation_state(project_id: str) -> dict:
         "planning": {
             "authorized": bool(conversation["chat_session_id"]) and model_row is not None and (
                 model_row.get("cost_status") == "free"
-                or conversation["cost_confirmed_model"] == conversation["model"]
+                or bool(grant and grant["uses_remaining"] > 0)
             ),
             "model": conversation["model"],
             "cost_status": (model_row or {}).get("cost_status") if conversation["model"] else None,
             "model_available": model_row is not None if conversation["model"] else None,
             "authorized_at": conversation["planning_authorized_at"],
+            "cost_authorization": grant,
             "mode": "read-only",
         },
         "busy": any(item["author"] == "user" and item["status"] in {"PENDING", "PROCESSING"} for item in messages),
