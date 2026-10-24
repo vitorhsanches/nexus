@@ -16,11 +16,22 @@ def _project(project_id: str) -> None:
 
 
 def _approved_model(model: str) -> dict:
+    # Keep the established Development route contract. A planning/review-only
+    # qualification may also receive a project grant, but must be active and
+    # present in fresh discovery before it can be used.
     from nexus.dev.models import list_dev_models
-    catalog = list_dev_models()
-    row = next((item for item in catalog["models"] if item["id"] == model), None)
+
+    development = list_dev_models()
+    row = next((item for item in development["models"] if item["id"] == model), None)
+    if row is not None:
+        return row
+    from nexus.dev.models import list_dev_model_catalog
+    catalog = list_dev_model_catalog()
+    row = next((item for item in catalog["models"] if item["id"] == model
+                and item.get("active") and item.get("discovered") is True
+                and item.get("approval_status") == "approved"), None)
     if row is None:
-        raise DevServiceError("MODEL_NOT_ALLOWED", catalog.get("catalog_error") or
+        raise DevServiceError("MODEL_NOT_ALLOWED", development.get("catalog_error") or
                               "The selected model is not an approved live route.", http_status=403)
     return row
 

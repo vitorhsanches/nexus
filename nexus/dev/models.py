@@ -27,6 +27,8 @@ def _approved_dev_models(discovered_payload: dict) -> dict:
                 **discovered[route.model_id],
                 "cost_status": route.cost_class or "unknown",
                 "supported_efforts": [],
+                "confirmed_efforts": list(discovered[route.model_id].get("supported_efforts") or [])
+                if discovered[route.model_id].get("appserver_compatible") is True else [],
             },
         )
         if route.effort and route.effort not in row["supported_efforts"]:

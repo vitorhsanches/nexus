@@ -189,6 +189,15 @@ def run_omniroute_worker(
     # launch still shows where the Worker was meant to run.
     update_agent_execution(agent_id, worktree=repo)
 
+    from nexus.dev.service import DevServiceError
+    from nexus.workspace.omniroute_oauth import require_connected_route
+    try:
+        require_connected_route(model)
+    except DevServiceError as error:
+        return _record_launch_failure(
+            agent_id=agent_id, phase="PROVIDER_CHECK", error=error, repo=repo, model=model,
+        )
+
     phase = "WRAPPER_PREP"
     if not ADAPTER_PATH.exists():
         return _record_launch_failure(

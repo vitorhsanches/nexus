@@ -720,12 +720,14 @@ class DevSessionCreateRequest(BaseModel):
 class DevTurnCreateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=100_000)
     model: str | None = Field(default=None, min_length=1, max_length=128)
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class DevMissionCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     description: str = Field(min_length=1, max_length=100_000)
     model: str | None = Field(default=None, min_length=1, max_length=128)
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
     allowed_models: list[str] = Field(min_length=1, max_length=50)
     test_profile: str = Field(min_length=1, max_length=128)
     timeout_seconds: int = Field(default=900, ge=5, le=3600)
@@ -756,6 +758,28 @@ class ModelQualificationRequest(BaseModel):
 class ModelQualificationRevokeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model_id: str = Field(min_length=1, max_length=128)
+
+
+class AiPreferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    role: str = Field(min_length=1, max_length=32)
+    executor: str = Field(min_length=1, max_length=32)
+    model_id: str = Field(min_length=1, max_length=128)
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
+
+
+class AiProviderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    provider: str = Field(min_length=1, max_length=32)
+    enabled: bool
+
+
+class AiPreferenceClearRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    role: str = Field(min_length=1, max_length=32)
 
 
 class DevIntegrationReviewRequest(BaseModel):
@@ -944,6 +968,79 @@ def model_management_admin_status():
     return {"admin_auth_configured": admin_auth_configured()}
 
 
+@router.get("/dev/ai-settings")
+def ai_settings_state(project_id: str = Query(min_length=1, max_length=128), refresh: bool = False):
+    from nexus.workspace import ai_settings
+    from nexus.dev.service import DevServiceError
+
+    try:
+        return ai_settings.state(project_id, refresh=refresh)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/ai-settings/admin-check")
+def ai_settings_admin_check(http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return {"authenticated": True}
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/ai-settings")
+def save_ai_preference(request: AiPreferenceRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+    from nexus.workspace import ai_settings
+
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return ai_settings.save(request.project_id, request.role, request.executor, request.model_id, request.effort)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/ai-settings/clear")
+def clear_ai_preference(request: AiPreferenceClearRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+    from nexus.workspace import ai_settings
+
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return ai_settings.clear(request.project_id, request.role)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/ai-settings/providers")
+def set_ai_provider(request: AiProviderRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+    from nexus.workspace import ai_settings
+
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return ai_settings.set_provider_enabled(request.project_id, request.provider, request.enabled)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/ai-settings/providers")
+def ai_provider_state(project_id: str = Query(min_length=1, max_length=128)):
+    from nexus.dev.service import DevServiceError
+    from nexus.workspace import ai_settings
+
+    try:
+        return ai_settings.provider_state(project_id)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
 @router.post("/dev/model-management/activation")
 def change_model_activation(request: ModelActivationRequest, http_request: Request):
     from nexus.dev import model_management
@@ -1048,7 +1145,7 @@ def create_dev_turn(session_id: str, request: DevTurnCreateRequest):
         raise HTTPException(status_code=422, detail="prompt must not be empty")
 
     try:
-        return run_dev_turn(session_id, request.prompt, model=request.model)
+        return run_dev_turn(session_id, request.prompt, model=request.model, effort=request.effort)
     except DevServiceError as error:
         raise _dev_error_response(error) from error
 
@@ -1076,6 +1173,7 @@ def start_dev_mission(session_id: str, request: DevMissionCreateRequest):
             session_id,
             request.description,
             model=request.model,
+            effort=request.effort,
             allowed_models=request.allowed_models,
             test_profile=request.test_profile,
             timeout_seconds=request.timeout_seconds,

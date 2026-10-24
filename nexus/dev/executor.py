@@ -212,7 +212,8 @@ def _require_active_session(dev_session_id: str):
     return session, workspace_path, str(verified_worktree)
 
 
-def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None) -> dict:
+def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None,
+                 effort: str | None = None) -> dict:
     """Start one Codex turn inside dev_session_id's isolated worktree.
 
     Returns immediately with the new turn's PENDING record (the App-Server
@@ -236,7 +237,22 @@ def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None) 
     if not isinstance(prompt, str) or not prompt.strip():
         raise DevServiceError("EMPTY_PROMPT", "prompt must not be empty.", http_status=400)
 
-    _require_active_session(dev_session_id)
+    session, _workspace_path, _worktree = _require_active_session(dev_session_id)
+    selected_model = model or session["requested_model"]
+    if selected_model:
+        from nexus.workspace.omniroute_oauth import require_connected_route
+        require_connected_route(selected_model)
+    if selected_model and selected_model.startswith(("cc/", "cx/")) and not effort:
+        raise DevServiceError("AI_EFFORT_REQUIRED", "Escolha o esforço da rota antes de executar.", http_status=422)
+    if effort is not None:
+        from nexus.dev.models import list_dev_models
+        row = next((item for item in list_dev_models(refresh=True)["models"]
+                    if item["id"] == selected_model), None)
+        if row is None or effort not in row.get("supported_efforts", []) or (
+            selected_model and selected_model.startswith(("cc/", "cx/"))
+            and effort not in row.get("confirmed_efforts", [])
+        ):
+            raise DevServiceError("EFFORT_NOT_SUPPORTED", "Esforço não confirmado para a rota exata de Development.", http_status=422)
 
     try:
         turn_id = dev_sessions.create_turn(dev_session_id, prompt, requested_model=model)
@@ -268,7 +284,7 @@ def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None) 
 
     thread = threading.Thread(
         target=_run_dev_turn_body,
-        args=(dev_session_id, turn_id, prompt, model, active),
+        args=(dev_session_id, turn_id, prompt, model, effort, active),
         daemon=True,
         name=f"nexus-dev-{turn_id}",
     )
@@ -291,7 +307,7 @@ def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None) 
 
 
 def _run_dev_turn_body(
-    dev_session_id: str, turn_id: str, prompt: str, model: str | None, active: _ActiveDevTurn
+    dev_session_id: str, turn_id: str, prompt: str, model: str | None, effort: str | None, active: _ActiveDevTurn
 ) -> None:
     dev_sessions.update_turn_status(turn_id, "RUNNING")
     client = None
@@ -300,6 +316,8 @@ def _run_dev_turn_body(
         # changed in the moment between run_dev_turn()'s own check and
         # this background thread actually starting.
         session, _workspace_path, worktree_path = _require_active_session(dev_session_id)
+        from nexus.workspace.omniroute_oauth import require_connected_route
+        require_connected_route(model or session["requested_model"] or "")
 
         client = AppServerClient(
             worktree_path,
@@ -328,6 +346,12 @@ def _run_dev_turn_body(
         thread_id = thread_info.get("id") or session["codex_thread_id"]
         active.thread_id = thread_id
         dev_sessions.update_thread(dev_session_id, codex_thread_id=thread_id, codex_home=client.codex_home)
+
+        if effort is not None:
+            client.thread_settings_update(thread_id, model=model or session["requested_model"], effort=effort)
+            confirmed = client.thread_resume(thread_id, model=model or session["requested_model"])
+            if confirmed.get("reasoningEffort") != effort or confirmed.get("model") != (model or session["requested_model"]):
+                raise DevServiceError("EFFORT_ACTIVATION_FAILED", "App Server não confirmou modelo e esforço antes da execução.", http_status=503)
 
         response_text = client.send_message_and_wait(
             thread_id,

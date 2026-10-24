@@ -193,7 +193,7 @@ class DevTurnEndpointTest(unittest.TestCase):
             response = client.post("/api/dev/sessions/DEV-1/turns", json={"prompt": "do x"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "PENDING")
-        mock_run.assert_called_once_with("DEV-1", "do x", model=None)
+        mock_run.assert_called_once_with("DEV-1", "do x", model=None, effort=None)
 
     def test_execution_disabled_maps_to_403(self):
         client = _make_client()

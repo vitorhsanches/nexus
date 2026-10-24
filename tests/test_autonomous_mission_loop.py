@@ -22,7 +22,8 @@ def mission_env(tmp_path, monkeypatch):
     monkeypatch.setenv("NEXUS_DEV_EXECUTION_ENABLED", "1")
     monkeypatch.setattr(
         "nexus.dev.models.list_dev_models",
-        lambda: {"models": [{"id": "model-a"}], "default_model": None, "catalog_error": None},
+        lambda: {"models": [{"id": "model-a", "supported_efforts": ["low", "high"]}],
+                 "default_model": None, "catalog_error": None},
     )
     monkeypatch.setattr(
         mission_runner,
@@ -231,3 +232,13 @@ def test_active_mission_blocks_creation_of_integration_review(mission_env, monke
         integration.create_review("DEV-1")
     assert error.value.code == "MISSION_ACTIVE"
     snapshot.assert_not_called()
+
+
+def test_mission_effort_is_exact_and_survives_restart(mission_env):
+    with pytest.raises(DevServiceError) as error:
+        _start(effort="ultra", test_profile="missing-profile")
+    assert error.value.code == "EFFORT_NOT_SUPPORTED"
+    created = _start(effort="high", test_profile="missing-profile")
+    assert created["requested_effort"] == "high"
+    database.initialize_database()
+    assert mission_runner.get_mission("DEV-1", created["mission_id"])["requested_effort"] == "high"

@@ -19,3 +19,14 @@ def _stub_review_git_prerequisites():
         return_value=None,
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _stub_oauth_for_existing_mock_executors(monkeypatch):
+    """Legacy tests use fake routes/App Servers; no test contacts OmniRoute."""
+    from nexus.workspace import omniroute_oauth
+
+    monkeypatch.setattr(omniroute_oauth, "connection_status", lambda: {
+        "claude_code": {"connected": True, "detail": "mock OAuth"},
+        "codex": {"connected": True, "detail": "mock OAuth"},
+    })

@@ -149,6 +149,14 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
       files: [{ path: 'nexus/example.py', status: 'M', patch: '--- a/nexus/example.py\n+++ b/nexus/example.py' }] },
     maestro: { conversation_id: 'MAESTRO-1', busy: false, planning: { authorized: false, model: null }, messages: [] },
     authorizations: [],
+    aiSettings: { project_id: 'demo', catalog_error: null, executors: {
+      codex: { name: 'OpenAI Codex via OmniRoute', connected: true, enabled: true, executable: true, status: 'Conectado', detail: 'OAuth ativo.' },
+      claude_code: { name: 'Claude Code via OmniRoute', connected: false, enabled: true, executable: false, status: 'Não conectado', detail: 'OAuth indisponível.' },
+    }, roles: {
+      maestro: { selection: null, valid: false, models: [{ id: 'free/planning', name: 'Planning', provider: 'codex', cost_status: 'free', efforts: ['medium'], routes_by_effort: { medium: 'free/planning' } }] },
+      development: { selection: null, valid: false, models: [{ id: 'free/model', name: 'Coding', provider: 'codex', cost_status: 'free', efforts: ['low'], routes_by_effort: { low: 'free/model' } }] },
+      review: { selection: null, valid: false, models: [{ id: 'free/review', name: 'Review', provider: 'codex', cost_status: 'free', efforts: ['high'], routes_by_effort: { high: 'free/review' } }] },
+    } },
     postError: null, postWait: null, profileError: null };
   const timers = [];
   const frames = new Map();
@@ -180,6 +188,21 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
         box.discoveredCatalog.approved_models = box.discoveredCatalog.models.filter(model => model.can_execute)
           .map(model => ({ id: model.id, cost_status: model.cost_status }));
         data = box.discoveredCatalog;
+      } else if (url === '/api/dev/ai-settings') {
+        const body = JSON.parse(options.body);
+        box.aiSettings.roles[body.role].selection = { executor: 'codex', provider: body.executor, model_id: body.model_id, effort: '' };
+        box.aiSettings.roles[body.role].valid = true;
+        data = box.aiSettings;
+      } else if (url === '/api/dev/ai-settings/providers') {
+        const body = JSON.parse(options.body);
+        box.aiSettings.executors[body.provider].enabled = body.enabled;
+        box.aiSettings.executors[body.provider].executable = body.enabled;
+        data = box.aiSettings;
+      } else if (url === '/api/dev/ai-settings/clear') {
+        const body = JSON.parse(options.body);
+        box.aiSettings.roles[body.role].selection = null;
+        box.aiSettings.roles[body.role].valid = false;
+        data = box.aiSettings;
       } else if (url === '/api/dev/model-management/candidate') {
         const body = JSON.parse(options.body);
         box.discoveredCatalog.models = box.discoveredCatalog.models.map(model => model.id === body.model_id
@@ -224,6 +247,9 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
       return { ok: true, json: async () => data };
     }
     if (url === '/api/projects') data = { projects: box.projects };
+    else if (url === '/api/dev/ai-settings/admin-check') data = { authenticated: Boolean(options.headers?.Authorization) };
+    else if (url.startsWith('/api/dev/ai-settings/providers?')) data = { project_id: 'demo', executors: box.aiSettings.executors };
+    else if (url.startsWith('/api/dev/ai-settings?')) data = box.aiSettings;
     else if (url === '/api/dev/model-management/admin-status') data = { admin_auth_configured: true };
     else if (url.startsWith('/api/dev/model-catalog')) {
       if (box.catalogError) throw box.catalogError;
@@ -299,6 +325,70 @@ test('persistent cost authorization captures bounded consent and can be revoked'
   revoke.dispatch('click');
   await app.settle();
   assert.ok(app.calls.some(call => call.url.includes('/api/workspace/cost-authorizations/AUTH-1?project_id=demo') && call.method === 'DELETE'));
+});
+
+test('AI settings show real executor status and save only with operator token', async () => {
+  const app = harness([]);
+  await app.settle();
+  app.byId['settings-ai-button'].dispatch('click');
+  await app.settle();
+  assert.doesNotMatch(app.byId['ai-executors'].textContent, /Claude Code/);
+  const role = app.byId['ai-roles'].children[1];
+  const fields = role.children[1];
+  fields.children[1].value = 'free/model';
+  fields.children[1].dispatch('change');
+  role.children[2].children[0].dispatch('click');
+  await app.settle();
+  assert.equal(app.calls.some(call => call.url === '/api/dev/ai-settings' && call.method === 'POST'), false);
+  app.byId['ai-admin-token'].value = 'x'.repeat(32);
+  app.byId['ai-admin-unlock'].dispatch('click');
+  await app.settle();
+  role.children[2].children[0].dispatch('click');
+  await app.settle();
+  const save = app.calls.find(call => call.url === '/api/dev/ai-settings' && call.method === 'POST');
+  assert.deepEqual(save.body, { project_id: 'demo', role: 'development', executor: 'codex', model_id: 'free/model' });
+  assert.equal(save.authorization, `Bearer ${'x'.repeat(32)}`);
+  assert.match(app.byId['ai-roles'].textContent, /Preferência salva/);
+  app.byId['ai-roles'].children[1].children[2].children[1].dispatch('click');
+  await app.settle();
+  assert.equal(app.box.aiSettings.roles.development.selection, null);
+  assert.equal(app.calls.some(call => call.url.includes('/api/workspace/panes/') && call.method === 'POST'), false);
+});
+
+test('connected provider can be disabled without deleting saved model choice', async () => {
+  const app = harness([]);
+  await app.settle();
+  app.byId['settings-ai-button'].dispatch('click');
+  await app.settle();
+  app.byId['ai-admin-token'].value = 'x'.repeat(32);
+  app.byId['ai-admin-unlock'].dispatch('click');
+  await app.settle();
+  app.byId['ai-executors'].querySelector('button').dispatch('click');
+  await app.settle();
+  assert.equal(app.box.aiSettings.executors.codex.enabled, false);
+  assert.equal(app.calls.find(call => call.url === '/api/dev/ai-settings/providers').body.provider, 'codex');
+});
+
+test('agent and mission offer only confirmed efforts for the exact cc route', async () => {
+  const selected = { ...agent(1), model: 'cc/claude-sonnet-5-low', latest_mission: null,
+    brief: { task: 'Tarefa aprovada', authorization: { applies: true } } };
+  const route = { id: selected.model, name: 'Sonnet', cost_status: 'free',
+    supported_efforts: ['low', 'high'], confirmed_efforts: ['low'] };
+  const app = harness([selected], { discoveredCatalog: {
+    models: [{ ...route, provider: 'claude', approval_status: 'approved', active: true, can_execute: true }],
+    approved_models: [route], default_model: selected.model, catalog_error: null,
+  } });
+  await app.settle();
+  const form = app.grid.querySelector('[data-pane="PANE-1"]').querySelector('.cockpit-composer');
+  const effort = form.querySelector('.cockpit-compose-controls').children[0];
+  assert.deepEqual(effort.children.map(item => item.value).filter(Boolean), ['low']);
+  assert.equal(form.querySelector('.cockpit-send').disabled, true);
+  effort.value = 'low'; effort.dispatch('change');
+  form.querySelector('.cockpit-input').value = 'Executar';
+  form.requestSubmit();
+  await app.settle();
+  const sent = app.calls.find(call => call.url === '/api/workspace/panes/PANE-1/messages' && call.method === 'POST');
+  assert.equal(sent.body.effort, 'low');
 });
 
 const agent = index => ({
@@ -536,7 +626,7 @@ test('dynamic catalog shows discovered approval states while selectors remain ap
   assert.match(catalog.textContent, /inferência não verificada/);
   const planning = app.grid.querySelector('[data-pane="maestro"]')
     .querySelector('.cockpit-composer').querySelector('.cockpit-model-select');
-  assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['approved/model']);
+  assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['free/planning', 'approved/model']);
 
   app.box.discoveredCatalog = {
     models: [{ id: 'approved/new', name: 'Refreshed Model', provider: 'provider-d', availability: 'listed', cost_status: 'standard', approval_status: 'approved', approval_reason: 'Qualified', can_execute: true }],
@@ -546,7 +636,7 @@ test('dynamic catalog shows discovered approval states while selectors remain ap
   await app.settle();
   assert.match(catalog.textContent, /Refreshed Model/);
   assert.ok(app.calls.some(call => call.url === '/api/dev/model-catalog?refresh=true' && call.method === 'GET'));
-  assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['approved/new']);
+  assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['free/planning', 'approved/new']);
 });
 
 test('model settings filter discovered models and keep candidates non-executable', async () => {

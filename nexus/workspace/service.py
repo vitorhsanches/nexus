@@ -344,6 +344,14 @@ def create_pane(
             f"At most {limit} open panes per project; hide one before adding another.",
             http_status=409,
         )
+    if model is None and plan_id is None:
+        from nexus.registry import workspace_ai_preferences
+        from nexus.workspace import ai_settings
+
+        if workspace_ai_preferences.read(project_id).get("development"):
+            # A saved preference only supplies the initial model. It does not
+            # authorize a turn, a mission, or a paid use.
+            model = ai_settings.require_saved(project_id, "development")["model_id"]
     if model is not None:
         _require_approved_model(model)
     # Authorization, worktree isolation and persistence of the session all
@@ -655,6 +663,20 @@ def _agent_context(row) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _execution_effort(row, effort: str | None) -> str | None:
+    """Recheck the selected effort without changing a pane's authorized route."""
+    model = row["model"] or ""
+    if not model.startswith(("cc/", "cx/")):
+        return effort
+    from nexus.workspace import ai_settings
+
+    role = "review" if row["role"] == "reviewer" else "development"
+    resolved = ai_settings.resolve_choice(row["project_id"], role, model, effort)
+    if resolved["model_id"] != model:
+        raise DevServiceError("AI_ROUTE_CHANGED", "O esforço selecionado exige outra rota; altere o modelo do agente e confirme novamente.", http_status=409)
+    return resolved["effort"]
+
+
 def start_pane_mission(
     pane_id: str,
     description: str | None,
@@ -663,6 +685,7 @@ def start_pane_mission(
     test_profile: str,
     timeout_seconds: int | None = None,
     confirm_cost: bool = False,
+    effort: str | None = None,
 ) -> dict:
     """Start one mission in the pane's own session with the pane's model.
 
@@ -680,6 +703,7 @@ def start_pane_mission(
         text = "Execute the planned task above and satisfy every acceptance criterion."
     if not text:
         raise DevServiceError("EMPTY_MISSION", "description must not be empty.", http_status=400)
+    selected_effort = _execution_effort(row, effort)
 
     def start(by_plan: bool) -> dict:
         approved = int(((brief or {}).get("authorization") or {}).get("mission_timeout_seconds") or 0)
@@ -702,6 +726,7 @@ def start_pane_mission(
             row["dev_session_id"],
             _agent_context(row) + text,
             model=row["model"],
+            **({"effort": selected_effort} if selected_effort else {}),
             allowed_models=[row["model"]],
             test_profile=test_profile,
             timeout_seconds=effective,
@@ -729,6 +754,7 @@ def _snapshot(dev_session_id: str) -> list:
 
 def send_pane_message(
     pane_id: str, text: str, *, confirm_model: str | None = None, confirm_cost: bool = False,
+    effort: str | None = None,
 ) -> dict:
     """Send one direct message to an agent as a real Development turn.
 
@@ -744,13 +770,15 @@ def send_pane_message(
         raise DevServiceError("EMPTY_MESSAGE", "message must not be empty.", http_status=400)
     if not feature_gate.execution_enabled():
         raise DevServiceError("DEV_EXECUTION_DISABLED", "Development Mode execution is disabled on this server.", http_status=403)
+    selected_effort = _execution_effort(row, effort)
     holder: dict = {}
 
     def start(_by_plan: bool) -> dict:
         before = _snapshot(row["dev_session_id"])
         holder["message_id"] = store.add_pane_message(pane_id, text=text.strip(), model=row["model"], changes_before=before)
         try:
-            return executor.run_dev_turn(row["dev_session_id"], _agent_context(row) + text.strip(), model=row["model"])
+            return executor.run_dev_turn(row["dev_session_id"], _agent_context(row) + text.strip(), model=row["model"],
+                                         **({"effort": selected_effort} if selected_effort else {}))
         except DevServiceError:
             store.finish_pane_message(holder["message_id"], outcome="failed", changes_after=None)
             raise

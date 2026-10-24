@@ -21,6 +21,7 @@
       <div class="nav-label pane-nav-heading">PANES <span id="sidebar-pane-count">04</span></div>
       <nav class="pane-nav" id="pane-nav" aria-label="Panes da missão"></nav>
       <div class="nav-label settings-nav-heading">CONFIGURAÇÕES</div>
+      <button class="pane-nav-link" id="settings-ai-link" type="button">✳ &nbsp; IA</button>
       <button class="pane-nav-link" id="settings-models-link" type="button">⚙ &nbsp; Modelos</button>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-note"><span class="note-dot"></span><div><strong>Mensagens Nexus</strong><p>Conversa com Maestro e agentes. Nenhum shell ou CLI conectado.</p></div></div>
@@ -30,7 +31,7 @@
     <main class="workspace" id="workspace">
       <header class="topbar">
         <div class="topbar-left"><button class="icon-button mobile-menu" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button><div class="breadcrumb"><span>WORKSPACE</span><span class="crumb-separator">/</span><strong id="breadcrumb-title">Cockpit</strong></div></div>
-        <div class="topbar-right"><span class="local-chip"><span></span>LOCAL · NEXUS</span><button class="top-icon" type="button" aria-label="Ajuda sobre o cockpit" title="Mensagens usam o motor Nexus; nenhum terminal shell conectado">?</button><span class="top-avatar">N</span></div>
+        <div class="topbar-right"><span class="local-chip"><span></span>LOCAL · NEXUS</span><button class="top-icon" id="settings-ai-button" type="button" aria-label="Abrir configurações de IA" title="Configurações de IA">⚙</button><button class="top-icon" type="button" aria-label="Ajuda sobre o cockpit" title="Mensagens usam o motor Nexus; nenhum terminal shell conectado">?</button><span class="top-avatar">N</span></div>
       </header>
 
       <section class="mission-bar" aria-labelledby="mission-title">
@@ -40,6 +41,16 @@
 
       <section class="overview" aria-label="Resumo do projeto"><div class="overview-intro"><span class="overview-icon">▦</span><span>VISÃO DO PROJETO</span></div><div class="overview-stat"><strong>02</strong><span>panes na grade</span></div><div class="overview-stat"><strong>00</strong><span>agentes registrados</span></div><div class="overview-stat"><strong id="execution-count">00</strong><span>missões registradas</span></div><div class="overview-divider"></div><span class="overview-disclaimer" id="data-status">Conectando ao Nexus…</span></section>
 
+      <section class="ai-settings" id="settings-ai" aria-labelledby="ai-settings-title" hidden>
+        <div class="model-catalog-heading"><div><span class="section-kicker">CONFIGURAÇÕES → IA</span><h2 id="ai-settings-title">Ferramentas e funções</h2></div><button class="model-catalog-refresh" id="ai-settings-refresh" type="button">Atualizar status</button></div>
+        <p class="model-catalog-status" id="ai-settings-status" role="status" aria-live="polite">Selecione um projeto autorizado.</p>
+        <div class="ai-executors" id="ai-executors"></div>
+        <div class="model-admin-access"><label for="ai-admin-token">Token administrativo local</label><input id="ai-admin-token" type="password" autocomplete="off" placeholder="NEXUS_ADMIN_TOKEN (não é salvo)"><button id="ai-admin-unlock" type="button">Desbloquear alterações</button><span id="ai-admin-status" role="status">Alterações administrativas bloqueadas</span></div>
+        <div class="ai-roles" id="ai-roles"></div>
+        <p class="model-catalog-project-note">Conexões Claude Code e Codex aqui usam o Codex App Server via OmniRoute. A execução nativa pela CLI Claude Code ainda não existe. Ativação no Nexus não qualifica modelos nem autoriza custos. O esforço é escolhido ao executar.</p>
+      </section>
+
+      <details class="settings-advanced" id="settings-advanced"><summary>Configurações avançadas · catálogo OmniRoute</summary>
       <section class="model-catalog" id="settings-models" aria-labelledby="model-catalog-title">
         <div class="model-catalog-heading">
           <div><span class="section-kicker">CONFIGURAÇÕES → MODELOS</span><h2 id="model-catalog-title">Modelos OmniRoute <span id="model-catalog-count">0</span></h2></div>
@@ -75,6 +86,7 @@
           <div id="cost-auth-list" class="cost-authorization-list" aria-live="polite">Selecione um projeto para consultar autorizações.</div>
         </div>
       </section>
+      </details>
 
       <div class="section-heading"><div><span class="section-kicker">ÁREA DE TRABALHO</span><h2>Panes do projeto <span id="pane-count">02</span></h2></div><div class="view-controls"><div class="group-controls" id="group-controls" hidden><button id="previous-group" type="button" aria-label="Grupo anterior">‹</button><span id="group-label" aria-live="polite">Grupo 1/1</span><button id="next-group" type="button" aria-label="Próximo grupo">›</button></div><button class="restore-layout-button" id="restore-layout" type="button" title="Restaurar layout automático" aria-label="Restaurar layout automático">↺ <span>Restaurar layout</span></button><span class="view-selected" id="grid-layout-label">▦ &nbsp; Grade 2 × 2</span><button class="add-pane-button" id="add-pane" type="button" aria-label="Mostrar próximo agente registrado">+ Pane</button></div></div>
 

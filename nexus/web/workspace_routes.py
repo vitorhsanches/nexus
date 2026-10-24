@@ -49,6 +49,7 @@ class PaneMissionRequest(BaseModel):
     description: str | None = Field(default=None, max_length=100_000)
     confirm_model: str | None = Field(default=None, min_length=1, max_length=128)
     confirm_cost: bool = False
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
     test_profile: str = Field(min_length=1, max_length=128)
     timeout_seconds: int | None = Field(default=None, ge=5, le=3600)
 
@@ -58,6 +59,7 @@ class PaneMessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=100_000)
     confirm_model: str | None = Field(default=None, min_length=1, max_length=128)
     confirm_cost: bool = False
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class MaestroAuthorizeRequest(BaseModel):
@@ -65,6 +67,7 @@ class MaestroAuthorizeRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
     model: str = Field(min_length=1, max_length=128)
     confirm_cost: bool = False
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class CostAuthorizationRequest(BaseModel):
@@ -81,6 +84,7 @@ class MaestroMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=20_000)
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class PlanApproveRequest(BaseModel):
@@ -224,6 +228,7 @@ def start_pane_mission(pane_id: str, request: PaneMissionRequest):
         request.description,
         confirm_model=request.confirm_model,
         confirm_cost=request.confirm_cost,
+        effort=request.effort,
         test_profile=request.test_profile,
         timeout_seconds=request.timeout_seconds,
     )
@@ -235,7 +240,7 @@ def send_pane_message(pane_id: str, request: PaneMessageRequest):
 
     return _call(
         service.send_pane_message, pane_id, request.text,
-        confirm_model=request.confirm_model, confirm_cost=request.confirm_cost,
+        confirm_model=request.confirm_model, confirm_cost=request.confirm_cost, effort=request.effort,
     )
 
 
@@ -250,14 +255,15 @@ def maestro_state(project_id: str):
 def maestro_authorize(request: MaestroAuthorizeRequest):
     from nexus.workspace import maestro
 
-    return _call(maestro.authorize_planning, request.project_id, request.model, confirm_cost=request.confirm_cost)
+    return _call(maestro.authorize_planning, request.project_id, request.model,
+                 confirm_cost=request.confirm_cost, effort=request.effort)
 
 
 @router.post("/maestro/messages")
 def maestro_message(request: MaestroMessageRequest):
     from nexus.workspace import maestro
 
-    return _call(maestro.send_message, request.project_id, request.text)
+    return _call(maestro.send_message, request.project_id, request.text, effort=request.effort)
 
 
 @router.post("/plans/{plan_id}/approve")

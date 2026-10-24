@@ -51,6 +51,16 @@ def test_dev_models_do_not_substitute_a_paid_default_when_no_free_route_is_live(
     assert payload["default_model"] is None
 
 
+def test_route_efforts_do_not_claim_appserver_confirmation_without_metadata(monkeypatch):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda: {"models": [{
+        "id": "cc/claude-sonnet-5-low", "selectable": True,
+        "appserver_compatible": False, "supported_efforts": ["low"],
+    }]})
+    row = models.list_dev_models()["models"][0]
+    assert "low" in row["supported_efforts"]
+    assert row["confirmed_efforts"] == []
+
+
 def test_discovered_catalog_labels_approval_without_granting_unqualified_models(monkeypatch):
     refresh_calls = []
 
