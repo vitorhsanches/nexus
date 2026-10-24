@@ -69,7 +69,7 @@ def test_model_catalog_exposes_qualification_activation_and_candidate_separately
             {"id": "gpt-5.6-terra", "name": "Blocked", "provider": "one", "availability": "listed", "selectable": False},
         ], "catalog_error": None,
     })
-    monkeypatch.setattr(models, "_qualified_dev_route_ids", lambda: {"qualified/a"})
+    monkeypatch.setattr(models, "_qualified_model_ids", lambda: {"qualified/a"})
     workspace_model_settings.set_active("qualified/a", False, {"qualified/a"})
     workspace_model_settings.set_candidate("discovered/new", True)
 
@@ -120,7 +120,11 @@ def test_policy_writes_require_loopback_operator(model_settings_db, monkeypatch)
 
 def test_new_qualifications_require_runtime_metadata_and_start_inactive(model_settings_db, monkeypatch):
     from nexus.registry import workspace_model_qualifications
-    from nexus.routing.catalog import default_active_model_ids, default_catalog, production_eligible
+    from nexus.routing.catalog import (
+        default_active_model_ids,
+        default_catalog,
+        production_eligible,
+    )
 
     payload = {"catalog_error": None, "models": [{
         "id": "provider/new-code", "provider": "provider", "selectable": True,
@@ -154,6 +158,62 @@ def test_new_qualifications_require_runtime_metadata_and_start_inactive(model_se
     )
 
 
+@pytest.mark.parametrize("capability", ["review", "planning"])
+def test_review_and_planning_qualification_can_activate_without_cross_capability_execution(
+    model_settings_db, monkeypatch, capability
+):
+    from nexus.registry import (
+        workspace_cost_authorizations,
+        workspace_model_qualifications,
+    )
+    from nexus.routing.catalog import default_catalog
+    from nexus.routing.models import RoutingRequest
+    from nexus.routing.router import NoEligibleRouteError, select_best_route
+
+    model_id = f"provider/{capability}-only"
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda refresh=False: {"models": [{
+        "id": model_id, "provider": "provider", "selectable": True,
+        "appserver_compatible": True, "supported_efforts": ["low"],
+    }]})
+    model_management.qualify(
+        model_id, provider="provider", capabilities=[capability], efforts=["low"],
+        cost_class="premium", max_risk_level="medium",
+    )
+
+    qualified_route = next(route for route in default_catalog() if route.model_id == model_id)
+    assert qualified_route.capabilities == frozenset({capability})
+    assert qualified_route.effort == "low"
+    assert qualified_route.max_risk_level == "medium"
+    assert model_id not in workspace_model_settings.effective_active_ids(
+        {model_id}, set()
+    )
+
+    result = model_management.set_active(model_id, True)
+    row = next(item for item in result["models"] if item["id"] == model_id)
+    assert row["active"] is True
+    assert row["can_execute"] is False
+    assert model_id not in {item["id"] for item in models.list_dev_models()["models"]}
+
+    active_route = next(route for route in default_catalog() if route.model_id == model_id)
+    assert select_best_route(
+        RoutingRequest(capability=capability, risk_level="medium"),
+        catalog=(active_route,),
+    ).route.model_id == model_id
+    for disallowed in {"standard-coding", "review", "planning"} - {capability}:
+        with pytest.raises(NoEligibleRouteError):
+            select_best_route(
+                RoutingRequest(capability=disallowed, risk_level="low"),
+                catalog=(active_route,),
+            )
+    with pytest.raises(NoEligibleRouteError):
+        select_best_route(
+            RoutingRequest(capability=capability, risk_level="high"),
+            catalog=(active_route,),
+        )
+    assert workspace_model_qualifications.qualified()[model_id]["cost_class"] == "premium"
+    assert workspace_cost_authorizations.list_for_project("demo") == []
+
+
 def test_qualification_revocation_clears_activation_and_survives_restart(model_settings_db, monkeypatch):
     from nexus.registry import workspace_model_qualifications
 
@@ -168,6 +228,7 @@ def test_qualification_revocation_clears_activation_and_survives_restart(model_s
     database.initialize_database()
     assert workspace_model_qualifications.qualified().get("provider/revoke-me") is None
     assert workspace_model_settings.read()["models"]["provider/revoke-me"]["active"] is False
+    assert "provider/revoke-me" not in model_management._qualified_ids()
 
 
 def test_router_rechecks_active_selection_for_each_new_route(model_settings_db, monkeypatch):

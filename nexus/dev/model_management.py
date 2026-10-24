@@ -47,9 +47,10 @@ def require_local_operator(request, authorization: str | None = None) -> None:
 
 
 def _qualified_ids() -> set[str]:
-    from nexus.dev.models import _qualified_dev_route_ids
+    """Return all qualified models; callers still enforce route capability."""
+    from nexus.dev.models import _qualified_model_ids
 
-    return _qualified_dev_route_ids()
+    return _qualified_model_ids()
 
 
 def set_active(model_id: str, active: bool) -> dict:
