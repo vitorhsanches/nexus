@@ -5,6 +5,8 @@ param(
     [int]$OmniRoutePort = 20128,
     [int]$NexusPort = 8000,
     [int]$TimeoutSeconds = 90,
+    [ValidateSet("omniroute", "codex-native")]
+    [string]$ChatRuntime = "omniroute",
     [switch]$EnableDevelopment,
     [switch]$NoBrowser
 )
@@ -103,19 +105,34 @@ if ($codexExit -ne 0 -or -not $codexPath) {
 Write-Ok "Codex CLI available"
 Write-Info "$codexPath"
 
-$omniProfileRoot = if ($env:NEXUS_OMNIROUTE_CODEX_HOME) {
-    $env:NEXUS_OMNIROUTE_CODEX_HOME
+$env:NEXUS_CHAT_RUNTIME = $ChatRuntime
+Write-Ok "Chat runtime selected explicitly: $ChatRuntime"
+
+if ($ChatRuntime -eq "omniroute") {
+    $omniProfileRoot = if ($env:NEXUS_OMNIROUTE_CODEX_HOME) {
+        $env:NEXUS_OMNIROUTE_CODEX_HOME
+    } else {
+        Join-Path $env:USERPROFILE ".codex-omniroute-worker"
+    }
+    $omniProfileConfig = Join-Path $omniProfileRoot "config.toml"
+    if (-not (Test-Path -LiteralPath $omniProfileConfig)) {
+        Stop-Launch "The dedicated Codex OmniRoute profile is missing." @(
+            $omniProfileConfig,
+            "Create this local profile before starting Nexus; credentials are never stored in the repository."
+        )
+    }
+    Write-Ok "Codex OmniRoute profile available"
 } else {
-    Join-Path $env:USERPROFILE ".codex-omniroute-worker"
+    # Read-only authentication probe: no thread, turn, or model invocation.
+    & $codexPath login status *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Stop-Launch "Codex CLI is installed but no usable local login was found." @(
+            "Run 'codex login' in your own terminal, then retry with -ChatRuntime codex-native.",
+            "Nexus never asks for or sends authentication tokens to the browser."
+        )
+    }
+    Write-Ok "Codex local login available"
 }
-$omniProfileConfig = Join-Path $omniProfileRoot "config.toml"
-if (-not (Test-Path -LiteralPath $omniProfileConfig)) {
-    Stop-Launch "The dedicated Codex OmniRoute profile is missing." @(
-        $omniProfileConfig,
-        "Create this local profile before starting Nexus; credentials are never stored in the repository."
-    )
-}
-Write-Ok "Codex OmniRoute profile available"
 
 if ($EnableDevelopment) {
     $env:NEXUS_DEV_EXECUTION_ENABLED = "1"
@@ -126,10 +143,10 @@ if ($EnableDevelopment) {
     Write-Info "Development execution remains disabled. Use -EnableDevelopment to opt in for this process."
 }
 
-# ---- Step 2: OmniRoute -------------------------------------------------------
-if (Test-OmniRouteOnline) {
+# ---- Step 2: selected runtime -----------------------------------------------
+if ($ChatRuntime -eq "omniroute" -and (Test-OmniRouteOnline)) {
     Write-Ok "OmniRoute online"
-} else {
+} elseif ($ChatRuntime -eq "omniroute") {
     $omniCommand = Get-Command $OmniRouteCommand -ErrorAction SilentlyContinue
     if (-not $omniCommand) {
         Stop-Launch "OmniRoute is not running and the '$OmniRouteCommand' command is not available." @(
@@ -144,6 +161,8 @@ if (Test-OmniRouteOnline) {
         )
     }
     Write-Ok "OmniRoute online"
+} else {
+    Write-Info "OmniRoute is not required, probed, or started in Codex Native mode."
 }
 
 # ---- Step 3: Control Center --------------------------------------------------
@@ -177,7 +196,8 @@ Write-Host ""
 Write-Host "========================================"
 Write-Host " NEXUS"
 Write-Host "========================================"
-Write-Host " OmniRoute      ONLINE"
+Write-Host " Chat runtime   $ChatRuntime"
+if ($ChatRuntime -eq "omniroute") { Write-Host " OmniRoute      ONLINE" }
 Write-Host " Control Center ONLINE"
 Write-Host ""
 Write-Host " $url"

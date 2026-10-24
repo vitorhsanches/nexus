@@ -48,6 +48,28 @@ def test_codex_profile_override_is_honored(tmp_path, monkeypatch):
     assert Path(env["CODEX_HOME"]).is_dir()
 
 
+def test_native_profile_uses_separate_template_and_local_cli_auth(tmp_path, monkeypatch):
+    user_home = tmp_path / "user"
+    codex_home = user_home / ".codex"
+    codex_home.mkdir(parents=True)
+    (codex_home / "config.toml").write_text('model_provider = "custom-user-value"\n', encoding="utf-8")
+    (codex_home / "auth.json").write_text('{"token":"backend-only"}', encoding="utf-8")
+    isolated = tmp_path / "isolated"
+    monkeypatch.setenv("USERPROFILE", str(user_home))
+    monkeypatch.setenv("NEXUS_CODEX_HOME", str(isolated))
+
+    env = codex_subprocess_env(profile="native", include_auth=True)
+    worker = Path(env["CODEX_HOME"])
+
+    assert worker.parent == isolated / "workers"
+    assert (worker / "auth.json").read_text(encoding="utf-8") == '{"token":"backend-only"}'
+    assert (isolated / "_template_native" / "auth.json").is_file()
+    assert not (isolated / "_template_omniroute_noauth").exists()
+
+    with pytest.raises(ValueError, match="requires local CLI authentication"):
+        codex_subprocess_env(profile="native", include_auth=False)
+
+
 def test_codex_profile_refreshes_config_and_auth_for_new_workers(tmp_path, monkeypatch):
     user_home = tmp_path / "user"
     codex_home = user_home / ".codex"

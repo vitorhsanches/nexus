@@ -176,6 +176,7 @@ def initialize_database() -> None:
                 codex_home TEXT,
                 model TEXT,
                 provider TEXT,
+                runtime TEXT NOT NULL DEFAULT 'omniroute',
                 status TEXT NOT NULL DEFAULT 'CREATED',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -230,6 +231,8 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_model TEXT")
         if "requested_effort" not in chat_session_columns:
             connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_effort TEXT")
+        if "runtime" not in chat_session_columns:
+            connection.execute("ALTER TABLE chat_sessions ADD COLUMN runtime TEXT NOT NULL DEFAULT 'omniroute'")
 
         # Development Mode (F1.2): per-project authorization flag. Disabled
         # by default for every project -- new AND pre-existing rows alike,

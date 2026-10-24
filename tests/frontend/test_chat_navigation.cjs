@@ -58,7 +58,7 @@ function setup(options = {}) {
     "chat-composer-help", "chat-send-button", "chat-stop-button", "chat-new-conversation", "chat-session-groups",
     "chat-route-detail", "chat-session-state-disconnected", "chat-session-state-loading", "chat-session-state-empty",
     "chat-session-state-error", "view-mode-badge", "ws-chat", "top-project", "chat-load-older",
-    "chat-model-select", "chat-model-error",
+    "chat-runtime-select", "chat-model-select", "chat-model-error",
     "chat-model-search", "chat-model-filter", "chat-model-result-count", "chat-effort-select", "chat-unknown-cost-confirm", "chat-model-favorite",
     "chat-activity-status", "chat-activity-model", "chat-activity-elapsed", "chat-activity-events",
     "chat-session-model-note",
@@ -205,9 +205,23 @@ test("new-session model choice is retained across composer updates and is separa
   await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
   const creation = ui.calls.find((call) => call.method === "POST" && call.path === "/api/chat/sessions").body;
   assert.equal(creation.project_id, "demo");
+  assert.equal(creation.runtime, "omniroute");
   assert.equal(creation.model, "oc/mimo-v2.5-free");
   assert.equal(creation.effort, null);
   assert.match(ui.elements["chat-session-value"].textContent, /CHAT-1/);
+});
+
+test("runtime selection reloads its own catalog and is persisted on session creation", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  const runtime = ui.elements["chat-runtime-select"];
+  runtime.value = "codex-native"; runtime.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(ui.calls.some((call) => call.path === "/api/chat/models?runtime=codex-native"));
+  ui.elements["chat-project-select"].value = "demo"; ui.elements["chat-project-select"].dispatch("change");
+  ui.elements["chat-new-conversation"].dispatch("click");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  const creation = ui.calls.find((call) => call.method === "POST" && call.path === "/api/chat/sessions").body;
+  assert.equal(creation.runtime, "codex-native");
 });
 
 test("supported effort is sent with the exact selected model and activated in the new session", async () => {

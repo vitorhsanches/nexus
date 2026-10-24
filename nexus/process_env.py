@@ -130,6 +130,8 @@ def codex_subprocess_env(
     skill are copied once into a shared *template* directory and then copied
     (not shared) into each per-call directory. OmniRoute-only callers such as
     Chat can set ``include_auth=False`` to prevent direct OAuth fallback.
+    ``profile="native"`` uses a distinct template, requires auth inclusion,
+    and is selected only by the Codex Native Chat adapter.
 
     HOME is set from USERPROFILE on Windows when it is missing, preserving
     the behaviour that was already in place.  On non-Windows this function
@@ -173,13 +175,17 @@ def codex_subprocess_env(
         else:
             nexus_base = os.path.join(tempfile.gettempdir(), "Nexus", "CodexHome")
 
-    if profile not in {"default", "omniroute"}:
+    if profile not in {"default", "native", "omniroute"}:
         raise ValueError(f"Unsupported Codex subprocess profile: {profile!r}")
+    if profile == "native" and not include_auth:
+        raise ValueError("Codex Native profile requires local CLI authentication.")
 
     template_name = (
         "_template_omniroute_noauth"
         if profile == "omniroute" and not include_auth
-        else "_template_omniroute" if profile == "omniroute" else "_template"
+        else "_template_omniroute" if profile == "omniroute"
+        else "_template_native" if profile == "native"
+        else "_template"
     )
     template_dir = os.path.join(nexus_base, template_name)
     workers_root = os.path.join(nexus_base, "workers")

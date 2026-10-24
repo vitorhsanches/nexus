@@ -54,6 +54,19 @@ class CreateSessionEndpointTest(unittest.TestCase):
         self.assertEqual(response.json(), fake_session)
         mock_create.assert_called_once_with("demo", "cx/gpt-5.6-sol", "low", True)
 
+    def test_create_session_forwards_explicit_runtime_without_fallback(self):
+        client = _make_client()
+        fake_session = {"session_id": "CHAT-NATIVE", "project_id": "demo", "runtime": "codex-native"}
+        with patch("nexus.chat.service.create_session", return_value=fake_session) as mock_create:
+            response = client.post("/api/chat/sessions", json={
+                "project_id": "demo", "runtime": "codex-native", "model": "gpt-test",
+                "allow_unknown_cost": True,
+            })
+        self.assertEqual(response.status_code, 200)
+        mock_create.assert_called_once_with(
+            "demo", "gpt-test", None, True, runtime="codex-native"
+        )
+
     def test_unknown_project_maps_to_404(self):
         client = _make_client()
         with patch(
@@ -93,6 +106,23 @@ class ListAndGetSessionEndpointTest(unittest.TestCase):
         expected = {"models": [{"id": "cx/gpt-5.6-sol", "availability": "unverified"}], "default_model": "cx/gpt-5.6-sol"}
         with patch("nexus.chat.service.list_models", return_value=expected):
             response = client.get("/api/chat/models")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), expected)
+
+    def test_chat_model_endpoint_forwards_runtime(self):
+        client = _make_client()
+        expected = {"models": [], "default_model": None, "runtime": "codex-native"}
+        with patch("nexus.chat.service.list_models", return_value=expected) as models:
+            response = client.get("/api/chat/models?runtime=codex-native")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), expected)
+        models.assert_called_once_with(runtime="codex-native")
+
+    def test_chat_runtime_endpoint_exposes_capabilities_only(self):
+        client = _make_client()
+        expected = {"default_runtime": "codex-native", "runtimes": [{"id": "codex-native"}]}
+        with patch("nexus.chat.service.list_runtimes", return_value=expected):
+            response = client.get("/api/chat/runtimes")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), expected)
 
