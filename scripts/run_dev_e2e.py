@@ -7,11 +7,14 @@ development executor. The runner never applies integration or removes data.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import shutil
+import socket
 import subprocess
 import sys
 import time
+from typing import Protocol
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,7 +45,7 @@ class NexusApi:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def request(self, method: str, path: str, payload: dict | None = None):
+    def request(self, method: str, path: str, payload: dict | None = None, *, timeout: float | None = None):
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(
             self.base_url + path,
@@ -51,7 +54,7 @@ class NexusApi:
             headers={"Content-Type": "application/json"} if body is not None else {},
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                 raw = response.read()
                 if "text/event-stream" in response.headers.get("Content-Type", ""):
                     return raw.decode("utf-8", "replace")
@@ -59,6 +62,108 @@ class NexusApi:
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", "replace")
             raise RuntimeError(f"Nexus returned HTTP {error.code} for {path}: {detail}") from error
+
+    def iter_sse_events(self, path: str, *, cursor: str | None, deadline: float):
+        """Yield SSE frames as they arrive; timeout is bounded by the turn deadline."""
+        request = urllib.request.Request(self.base_url + path, headers={"Last-Event-ID": cursor} if cursor else {})
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        try:
+            with urllib.request.urlopen(request, timeout=min(self.timeout, remaining)) as response:
+                event_id = None
+                data_lines: list[str] = []
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("SSE read reached the overall turn deadline.")
+                    # urllib applies the initial timeout to every read. Tighten it
+                    # to the remaining end-to-end budget before each blocking line.
+                    socket_obj = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+                    if socket_obj is not None:
+                        socket_obj.settimeout(min(self.timeout, remaining))
+                    line = response.readline()
+                    if not line:
+                        break
+                    decoded = line.decode("utf-8", "replace").rstrip("\r\n")
+                    if not decoded:
+                        if data_lines:
+                            try:
+                                payload = json.loads("\n".join(data_lines))
+                            except json.JSONDecodeError:
+                                payload = None
+                            if isinstance(payload, dict):
+                                yield event_id, payload
+                        event_id, data_lines = None, []
+                    elif decoded.startswith(":"):
+                        continue
+                    elif decoded.startswith("id:"):
+                        event_id = decoded[3:].strip()
+                    elif decoded.startswith("data:"):
+                        data_lines.append(decoded[5:].lstrip())
+                if data_lines:
+                    try:
+                        payload = json.loads("\n".join(data_lines))
+                    except json.JSONDecodeError:
+                        payload = None
+                    if isinstance(payload, dict):
+                        yield event_id, payload
+        except urllib.error.URLError as error:
+            reason = error.reason
+            if isinstance(reason, (TimeoutError, socket.timeout, http.client.IncompleteRead)):
+                raise TimeoutError("SSE connection timed out before the turn completed.") from error
+            raise RuntimeError(f"Could not read Nexus SSE stream: {reason}") from error
+        except (socket.timeout, http.client.IncompleteRead) as error:
+            raise TimeoutError("SSE connection timed out before the turn completed.") from error
+
+
+class DevelopmentSmokeBackend(Protocol):
+    """Semantic harness seam; P4.0B adapter waits for its published contract.
+
+    These are harness operations, not a claim that Nexus has a native-backend
+    HTTP API. Only CurrentOmniRouteDevBackend is implemented today.
+    """
+
+    def select_project(self, project_id: str) -> dict: ...
+    def create_session(self, project_id: str, model: str | None) -> dict: ...
+    def start_turn(self, session_id: str, prompt: str, model: str | None) -> dict: ...
+    def iter_events(self, session_id: str, turn_id: str, cursor: str | None, deadline: float): ...
+    def get_turn(self, session_id: str, turn_id: str, timeout: float) -> dict: ...
+    def changed_files(self, session_id: str, timeout: float) -> list[dict]: ...
+    def diff(self, session_id: str, timeout: float) -> dict: ...
+
+
+class CurrentOmniRouteDevBackend:
+    """Adapter for current routes; POST turns uses an OmniRoute-only AppServerClient."""
+
+    def __init__(self, api: NexusApi):
+        self.api = api
+
+    def select_project(self, project_id: str) -> dict:
+        projects = self.api.request("GET", "/api/projects").get("projects", [])
+        return next((row for row in projects if row.get("id") == project_id), None)
+
+    def create_session(self, project_id: str, model: str | None) -> dict:
+        return self.api.request("POST", "/api/dev/sessions", {"project_id": project_id, "requested_model": model})
+
+    def start_turn(self, session_id: str, prompt: str, model: str | None) -> dict:
+        return self.api.request("POST", f"/api/dev/sessions/{session_id}/turns", {"prompt": prompt, "model": model})
+
+    def iter_events(self, session_id: str, turn_id: str, cursor: str | None, deadline: float):
+        return self.api.iter_sse_events(
+            f"/api/dev/sessions/{session_id}/events?turn_id={urllib.parse.quote(turn_id)}",
+            cursor=cursor,
+            deadline=deadline,
+        )
+
+    def get_turn(self, session_id: str, turn_id: str, timeout: float) -> dict:
+        return self.api.request("GET", f"/api/dev/sessions/{session_id}/turns/{turn_id}", timeout=timeout)
+
+    def changed_files(self, session_id: str, timeout: float) -> list[dict]:
+        return self.api.request("GET", f"/api/dev/sessions/{session_id}/changed-files", timeout=timeout).get("files", [])
+
+    def diff(self, session_id: str, timeout: float) -> dict:
+        return self.api.request("GET", f"/api/dev/sessions/{session_id}/diff", timeout=timeout)
 
 
 def parse_sse_events(body: str) -> list[dict]:
@@ -73,12 +178,11 @@ def parse_sse_events(body: str) -> list[dict]:
     return events
 
 
-def run_smoke(args) -> dict:
+def run_smoke(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
     if not args.confirm_agent_call:
         raise RuntimeError("Live smoke can invoke a real agent. Re-run with --confirm-agent-call after confirming cost and execution.")
-    api = NexusApi(args.base_url, timeout=args.http_timeout)
-    projects = api.request("GET", "/api/projects").get("projects", [])
-    project = next((row for row in projects if row.get("id") == args.project_id), None)
+    backend = backend or CurrentOmniRouteDevBackend(NexusApi(args.base_url, timeout=args.http_timeout))
+    project = backend.select_project(args.project_id)
     if project is None:
         raise RuntimeError(f"Fixture project {args.project_id!r} is not registered in Nexus.")
     if not project.get("enabled") or not project.get("dev_enabled"):
@@ -96,28 +200,41 @@ def run_smoke(args) -> dict:
     if source_status_before:
         raise RuntimeError("Fixture source repository must be clean before the smoke; preserve its local changes first.")
 
-    session = api.request("POST", "/api/dev/sessions", {"project_id": args.project_id, "requested_model": args.model})
+    session = backend.create_session(args.project_id, args.model)
     session_id = session["session_id"]
     worktree = Path(session["worktree_path"]).resolve()
     if worktree == fixture_path or fixture_path in worktree.parents or worktree in fixture_path.parents:
         raise RuntimeError(f"Nexus returned a worktree inside the source fixture: {worktree}")
 
-    turn = api.request("POST", f"/api/dev/sessions/{session_id}/turns", {
-        "prompt": args.prompt,
-        "model": args.model,
-    })
+    turn = backend.start_turn(session_id, args.prompt, args.model)
     turn_id = turn["turn_id"]
     deadline = time.monotonic() + args.turn_timeout
     observed_events: list[dict] = []
+    # Sequence 0 asks the current event route to replay from the first buffered
+    # event, so a quiet initial stream can reconnect without losing early events.
+    cursor = f"{session_id}:{turn_id}:0"
     last_status = turn.get("status")
     while time.monotonic() < deadline:
-        stream = api.request("GET", f"/api/dev/sessions/{session_id}/events?turn_id={urllib.parse.quote(turn_id)}")
-        observed_events.extend(parse_sse_events(stream))
-        detail = api.request("GET", f"/api/dev/sessions/{session_id}/turns/{turn_id}")
+        remaining = deadline - time.monotonic()
+        try:
+            for event_id, event in backend.iter_events(session_id, turn_id, cursor, deadline):
+                observed_events.append(event)
+                if event_id:
+                    cursor = event_id
+                if event.get("type") == "nexus/turnEnded":
+                    break
+        except TimeoutError:
+            # A quiet but still-running turn may outlast one socket read. Reconnect
+            # from the last event ID; the POST is never repeated.
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        detail = backend.get_turn(session_id, turn_id, min(args.http_timeout, remaining))
         last_status = detail.get("status")
         if last_status in TERMINAL:
             break
-        time.sleep(args.poll_interval)
+        time.sleep(min(max(args.poll_interval, 0), max(deadline - time.monotonic(), 0)))
     else:
         raise TimeoutError(f"Turn {turn_id} did not finish before {args.turn_timeout}s; inspect it in Nexus before retrying.")
     if last_status != "COMPLETED":
@@ -125,8 +242,8 @@ def run_smoke(args) -> dict:
     if not observed_events:
         raise RuntimeError("Turn completed, but no SSE events were observed; streaming was not verified.")
 
-    changes = api.request("GET", f"/api/dev/sessions/{session_id}/changed-files").get("files", [])
-    diff = api.request("GET", f"/api/dev/sessions/{session_id}/diff")
+    changes = backend.changed_files(session_id, args.http_timeout)
+    diff = backend.diff(session_id, args.http_timeout)
     if not changes or not diff.get("files"):
         raise RuntimeError("Completed turn produced no inspectable worktree changes.")
     if not (worktree / "calc.py").is_file() or not (worktree / "test_calc.py").is_file():
