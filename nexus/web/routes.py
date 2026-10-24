@@ -731,6 +731,18 @@ class DevMissionCreateRequest(BaseModel):
     timeout_seconds: int = Field(default=900, ge=5, le=3600)
 
 
+class ModelActivationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_id: str = Field(min_length=1, max_length=128)
+    active: bool
+
+
+class ModelCandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_id: str = Field(min_length=1, max_length=128)
+    candidate: bool
+
+
 class DevIntegrationReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     review_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
@@ -902,6 +914,37 @@ def list_dev_model_catalog_route(refresh: bool = False):
     from nexus.dev.models import list_dev_model_catalog
 
     return list_dev_model_catalog(refresh=refresh)
+
+
+@router.get("/dev/model-management")
+def model_management_state(refresh: bool = False):
+    from nexus.dev.models import list_dev_model_catalog
+
+    return list_dev_model_catalog(refresh=refresh)
+
+
+@router.post("/dev/model-management/activation")
+def change_model_activation(request: ModelActivationRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+
+    try:
+        model_management.require_local_operator(http_request)
+        return model_management.set_active(request.model_id, request.active)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/model-management/candidate")
+def change_model_candidate(request: ModelCandidateRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+
+    try:
+        model_management.require_local_operator(http_request)
+        return model_management.set_candidate(request.model_id, request.candidate)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
 
 
 @router.get("/dev/test-profiles")

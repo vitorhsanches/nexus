@@ -173,7 +173,19 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
     if (options.method === 'POST') {
       if (box.postWait) await box.postWait;
       if (box.postError) throw box.postError;
-      if (url === '/api/workspace/maestro/authorize') {
+      if (url === '/api/dev/model-management/activation') {
+        const body = JSON.parse(options.body);
+        box.discoveredCatalog.models = box.discoveredCatalog.models.map(model => model.id === body.model_id
+          ? { ...model, active: body.active, can_execute: body.active, management_status: body.active ? 'active' : 'inactive' } : model);
+        box.discoveredCatalog.approved_models = box.discoveredCatalog.models.filter(model => model.can_execute)
+          .map(model => ({ id: model.id, cost_status: model.cost_status }));
+        data = box.discoveredCatalog;
+      } else if (url === '/api/dev/model-management/candidate') {
+        const body = JSON.parse(options.body);
+        box.discoveredCatalog.models = box.discoveredCatalog.models.map(model => model.id === body.model_id
+          ? { ...model, candidate: body.candidate, management_status: body.candidate ? 'candidate' : 'not_qualified' } : model);
+        data = box.discoveredCatalog;
+      } else if (url === '/api/workspace/maestro/authorize') {
         box.maestro.planning = { authorized: true, model: JSON.parse(options.body).model, cost_status: 'free' };
         data = box.maestro;
       } else if (url === '/api/workspace/maestro/messages') {
@@ -529,6 +541,38 @@ test('dynamic catalog shows discovered approval states while selectors remain ap
   assert.match(catalog.textContent, /Refreshed Model/);
   assert.ok(app.calls.some(call => call.url === '/api/dev/model-catalog?refresh=true' && call.method === 'GET'));
   assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['approved/new']);
+});
+
+test('model settings filter discovered models and keep candidates non-executable', async () => {
+  const app = harness([], {
+    discoveredCatalog: {
+      models: [
+        { id: 'qualified/model', name: 'Qualified', provider: 'provider-a', availability: 'listed', cost_status: 'free', approval_status: 'approved', approval_reason: 'Qualified', qualification_status: 'qualified', active: true, management_status: 'active', can_execute: true },
+        { id: 'new/model', name: 'New', provider: 'provider-b', availability: 'listed', cost_status: 'unknown', approval_status: 'not_qualified', approval_reason: 'Not qualified', qualification_status: 'not_qualified', active: false, candidate: false, management_status: 'not_qualified', can_execute: false },
+      ], approved_models: [{ id: 'qualified/model', cost_status: 'free' }], default_model: 'qualified/model', catalog_error: null,
+    },
+  });
+  await app.settle();
+  const cards = app.byId['model-catalog-list'];
+  assert.match(cards.textContent, /Ativo/);
+  const markCandidate = cards.children.find(card => card.textContent.includes('New')).querySelector('button');
+  markCandidate.dispatch('click');
+  await app.settle();
+  assert.ok(app.calls.some(call => call.url === '/api/dev/model-management/candidate' && call.body.model_id === 'new/model'));
+  assert.match(cards.textContent, /Candidato · não libera execução/);
+  assert.deepEqual(app.box.discoveredCatalog.approved_models.map(model => model.id), ['qualified/model']);
+
+  app.byId['model-filter-provider'].value = 'provider-a';
+  app.byId['model-filter-provider'].dispatch('change');
+  assert.match(cards.textContent, /Qualified/);
+  assert.doesNotMatch(cards.textContent, /New/);
+  app.byId['model-filter-provider'].value = '';
+  app.byId['model-filter-provider'].dispatch('change');
+  const deactivate = cards.children.find(card => card.textContent.includes('Qualified')).querySelector('button');
+  deactivate.dispatch('click');
+  await app.settle();
+  assert.ok(app.calls.some(call => call.url === '/api/dev/model-management/activation' && call.body.model_id === 'qualified/model' && call.body.active === false));
+  assert.deepEqual(app.box.discoveredCatalog.approved_models, []);
 });
 
 test('catalog failure fails closed and missing authorized projects are stated', async () => {
