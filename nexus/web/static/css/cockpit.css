@@ -63,6 +63,14 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .model-catalog-badge.is-candidate{border-color:var(--border-strong);color:var(--text-muted)}
 .model-catalog-badge.is-blocked{border-color:var(--error,var(--warning));color:var(--error,var(--warning))}
 .model-catalog-card-actions{display:flex;align-items:center;gap:6px;margin-top:7px}
+.model-admin-access{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0;padding:8px;border:1px solid var(--border-soft);color:var(--text-muted);font:8px 'Cascadia Code',monospace}
+.model-admin-access input,.model-qualification-form input,.model-qualification-form select{min-width:120px;padding:5px;background:var(--surface);border:1px solid var(--border-strong);color:var(--text);font:8px 'Cascadia Code',monospace}
+.model-admin-access button{padding:5px 8px;background:var(--surface);border:1px solid var(--border-strong);color:var(--accent-strong);font:8px 'Cascadia Code',monospace;cursor:pointer}
+.model-qualification-form{display:grid;gap:7px;margin-top:8px;padding:8px;border:1px solid var(--border-soft);font:8px 'Cascadia Code',monospace}
+.model-qualification-form strong{color:var(--text)}
+.model-qualification-options{display:flex;gap:8px;flex-wrap:wrap;color:var(--text-muted)}
+.model-qualification-options label{display:flex;align-items:center;gap:3px}
+.model-qualification-form small{color:var(--text-muted);line-height:1.5}
 .model-catalog-action{padding:4px 7px;background:var(--surface);border:1px solid var(--border-strong);border-radius:2px;color:var(--accent-strong);font:8px 'Cascadia Code',monospace;cursor:pointer}
 .model-catalog-action:disabled{opacity:.45;cursor:default}
 .model-catalog-card.is-inactive .model-catalog-action:first-child{color:var(--warning)}

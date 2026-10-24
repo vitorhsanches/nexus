@@ -164,7 +164,7 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
     failClosed() { this.readyState = FakeEventSource.CLOSED; this.onerror?.(); }
   }
   const fetch = async (url, options = {}) => {
-    calls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
+    calls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null, authorization: options.headers?.Authorization });
     let data;
     if (options.method === 'DELETE' && url.startsWith('/api/workspace/cost-authorizations/')) {
       box.authorizations = box.authorizations.map(auth => ({ ...auth, status: 'REVOKED' }));
@@ -184,6 +184,11 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
         const body = JSON.parse(options.body);
         box.discoveredCatalog.models = box.discoveredCatalog.models.map(model => model.id === body.model_id
           ? { ...model, candidate: body.candidate, management_status: body.candidate ? 'candidate' : 'not_qualified' } : model);
+        data = box.discoveredCatalog;
+      } else if (url === '/api/dev/model-management/qualifications') {
+        const body = JSON.parse(options.body);
+        box.discoveredCatalog.models = box.discoveredCatalog.models.map(model => model.id === body.model_id
+          ? { ...model, qualification_status: 'qualified', approval_status: 'approved', qualification: { status: 'QUALIFIED' }, active: false, management_status: 'inactive' } : model);
         data = box.discoveredCatalog;
       } else if (url === '/api/workspace/maestro/authorize') {
         box.maestro.planning = { authorized: true, model: JSON.parse(options.body).model, cost_status: 'free' };
@@ -219,6 +224,7 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
       return { ok: true, json: async () => data };
     }
     if (url === '/api/projects') data = { projects: box.projects };
+    else if (url === '/api/dev/model-management/admin-status') data = { admin_auth_configured: true };
     else if (url.startsWith('/api/dev/model-catalog')) {
       if (box.catalogError) throw box.catalogError;
       data = box.discoveredCatalog;
@@ -573,6 +579,31 @@ test('model settings filter discovered models and keep candidates non-executable
   await app.settle();
   assert.ok(app.calls.some(call => call.url === '/api/dev/model-management/activation' && call.body.model_id === 'qualified/model' && call.body.active === false));
   assert.deepEqual(app.box.discoveredCatalog.approved_models, []);
+});
+
+test('model qualification requires an explicit admin token and starts inactive', async () => {
+  const app = harness([], { discoveredCatalog: {
+    models: [{ id: 'provider/new-code', name: 'New Code', provider: 'provider', availability: 'listed', cost_status: 'unknown', approval_status: 'not_qualified', qualification_status: 'not_qualified', appserver_compatible: true, supported_efforts: ['low'], discovered: true, active: false, can_execute: false }],
+    approved_models: [], default_model: null, catalog_error: null,
+  } });
+  await app.settle();
+  const cards = app.byId['model-catalog-list'];
+  const card = cards.children[0];
+  const unlock = app.byId['model-admin-token']; unlock.value = 'a'.repeat(32);
+  app.byId['model-admin-unlock'].dispatch('click'); await app.settle();
+  assert.match(app.byId['model-admin-status'].textContent, /desbloqueadas/);
+  const inputs = card.querySelectorAll('input');
+  inputs.find(input => input.value === 'standard-coding').checked = true;
+  inputs.find(input => input.value === 'standard-coding').dispatch('change');
+  inputs.find(input => input.value === 'low').checked = true;
+  inputs.find(input => input.value === 'low').dispatch('change');
+  const qualify = card.querySelectorAll('button').find(button => button.textContent.includes('qualificar'));
+  qualify.dispatch('click'); await app.settle();
+  const request = app.calls.find(call => call.url === '/api/dev/model-management/qualifications');
+  assert.equal(request.authorization, `Bearer ${'a'.repeat(32)}`);
+  assert.deepEqual(request.body.capabilities, ['standard-coding']);
+  assert.deepEqual(request.body.efforts, ['low']);
+  assert.equal(app.box.discoveredCatalog.models[0].active, false);
 });
 
 test('catalog failure fails closed and missing authorized projects are stated', async () => {

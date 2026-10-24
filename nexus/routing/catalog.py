@@ -232,7 +232,35 @@ APPROVED_CATALOG: tuple[ModelRoute, ...] = (
 
 
 def default_catalog() -> tuple[ModelRoute, ...]:
-    return APPROVED_CATALOG
+    """Return built-in policy plus explicitly persisted operator qualifications."""
+    from nexus.registry import workspace_model_qualifications
+
+    dynamic = []
+    for model_id, record in workspace_model_qualifications.qualified().items():
+        if is_blocked_model(model_id):
+            continue
+        for effort in record["efforts"]:
+            dynamic.append(ModelRoute(
+                model_id=model_id,
+                provider=record["provider"],
+                execution_path="OMNIROUTE",
+                effort=effort,
+                capabilities=frozenset(record["capabilities"]),
+                max_risk_level=record["max_risk_level"],
+                approved=True,
+                enabled=True,
+                experimental=False,
+                cost_class=record["cost_class"],
+                quality_tier="operator-qualified",
+            ))
+    return APPROVED_CATALOG + tuple(dynamic)
+
+
+def default_active_model_ids() -> set[str]:
+    """Models that retain pre-P3.3E behavior before operator selection."""
+    return {
+        route.model_id for route in production_eligible(APPROVED_CATALOG)
+    }
 
 
 def production_eligible(

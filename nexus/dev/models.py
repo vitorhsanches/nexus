@@ -56,7 +56,8 @@ def list_dev_models(*, refresh: bool = False) -> dict:
     discovered_payload = list_models(refresh=True) if refresh else list_models()
     catalog = _approved_dev_models(discovered_payload)
     qualified_ids = _qualified_dev_route_ids()
-    active_ids = workspace_model_settings.effective_active_ids(qualified_ids)
+    from nexus.routing.catalog import default_active_model_ids
+    active_ids = workspace_model_settings.effective_active_ids(qualified_ids, default_active_model_ids())
     catalog["models"] = [row for row in catalog["models"] if row["id"] in active_ids]
     if catalog["default_model"] not in active_ids:
         catalog["default_model"] = next(
@@ -92,8 +93,11 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
     approved_models = _approved_dev_models(discovered_payload)
     qualified_ids = _qualified_dev_route_ids()
     settings = workspace_model_settings.read()
-    active_ids = workspace_model_settings.effective_active_ids(qualified_ids)
+    from nexus.routing.catalog import default_active_model_ids
+    active_ids = workspace_model_settings.effective_active_ids(qualified_ids, default_active_model_ids())
     approved_ids = {item["id"] for item in approved_models["models"]}
+    from nexus.registry import workspace_model_qualifications
+    qualifications = workspace_model_qualifications.qualified()
     rows = []
     for discovered in discovered_payload.get("models", []):
         model_id = discovered.get("id")
@@ -112,7 +116,8 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
                 approval_reason = "Known to Nexus, but not enabled and qualified for Development coding."
             else:
                 approval_reason = "Discovered by OmniRoute; Nexus has not approved it for execution."
-        cost_status = next(
+        dynamic_qualification = qualifications.get(model_id)
+        cost_status = dynamic_qualification["cost_class"] if dynamic_qualification else next(
             (route.cost_class for route in routes if route.cost_class), "unknown"
         )
         saved = settings["models"].get(model_id, {})
@@ -129,6 +134,8 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
                 "id": model_id,
                 "name": str(discovered.get("name") or model_id),
                 "provider": str(discovered.get("provider") or "unknown"),
+                "supported_efforts": list(discovered.get("supported_efforts") or []),
+                "appserver_compatible": bool(discovered.get("appserver_compatible")),
                 "availability": str(
                     discovered.get("availability") or "omniroute-listed-unverified"
                 ),
@@ -136,6 +143,7 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
                 "approval_status": approval_status,
                 "approval_reason": approval_reason,
                 "qualification_status": "qualified" if model_id in qualified_ids else approval_status,
+                "qualification": dynamic_qualification,
                 "active": active,
                 "candidate": bool(saved.get("candidate")),
                 "management_status": management_status,
@@ -147,6 +155,7 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
     for model_id, saved in settings["models"].items():
         if model_id in discovered_ids:
             continue
+        dynamic_qualification = qualifications.get(model_id)
         blocked = is_blocked_model(model_id)
         qualified = model_id in qualified_ids
         rows.append({
@@ -158,6 +167,7 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
             "approval_status": "blocked" if blocked else "approved" if qualified else "not_qualified",
             "approval_reason": "Model is no longer advertised by OmniRoute; saved policy is retained.",
             "qualification_status": "qualified" if qualified else "not_qualified",
+            "qualification": dynamic_qualification,
             "active": model_id in active_ids and qualified and not blocked,
             "candidate": bool(saved.get("candidate")),
             "management_status": "blocked" if blocked else "inactive" if qualified else "candidate" if saved.get("candidate") else "not_qualified",

@@ -12,6 +12,9 @@
   const modelCatalogCost = document.getElementById('model-filter-cost');
   const modelCatalogAvailability = document.getElementById('model-filter-availability');
   const modelCatalogQualification = document.getElementById('model-filter-qualification');
+  const modelAdminTokenInput = document.getElementById('model-admin-token');
+  const modelAdminUnlock = document.getElementById('model-admin-unlock');
+  const modelAdminStatus = document.getElementById('model-admin-status');
   const costAuthModel = document.getElementById('cost-auth-model');
   const costAuthList = document.getElementById('cost-auth-list');
   const costAuthCreate = document.getElementById('cost-auth-create');
@@ -39,6 +42,7 @@
   let modelCatalog = [];
   let discoveredModelCatalog = [];
   let modelCatalogError = '';
+  let modelAdminToken = '';
   let modelCatalogRequest = 0;
   let costAuthorizations = [];
   let testProfiles = [];
@@ -453,7 +457,7 @@
   const api = async (path, options = {}) => {
     const response = await fetch(path, {
       method: options.method || 'GET',
-      headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
+      headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(modelAdminToken && options.method === 'POST' ? { Authorization: `Bearer ${modelAdminToken}` } : {}) },
       ...(options.body ? { body: JSON.stringify(options.body) } : {})
     });
     const data = await response.json();
@@ -577,6 +581,53 @@
         });
         actions.append(candidate);
       }
+      if (!blocked && model.discovered === true && !model.qualification?.status?.includes('QUALIFIED')) {
+        const qualificationForm = element('div', 'model-qualification-form');
+        qualificationForm.append(element('strong', '', 'Qualificação explícita · novo modelo ficará inativo'));
+        const provider = element('input'); provider.value = model.provider || ''; provider.setAttribute('aria-label', 'Provedor confirmado');
+        const capabilities = element('div', 'model-qualification-options');
+        const selectedCapabilities = [];
+        ['mechanical', 'standard-coding', 'advanced-coding', 'review', 'planning'].forEach(value => {
+          const label = element('label'); const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.value = value;
+          checkbox.addEventListener('change', () => checkbox.checked ? selectedCapabilities.push(value) : selectedCapabilities.splice(selectedCapabilities.indexOf(value), 1));
+          label.append(checkbox, document.createTextNode(value)); capabilities.append(label);
+        });
+        const efforts = element('div', 'model-qualification-options');
+        const selectedEfforts = [];
+        (model.supported_efforts || []).forEach(value => {
+          const label = element('label'); const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.value = value;
+          checkbox.addEventListener('change', () => checkbox.checked ? selectedEfforts.push(value) : selectedEfforts.splice(selectedEfforts.indexOf(value), 1));
+          label.append(checkbox, document.createTextNode(`Esforço ${value}`)); efforts.append(label);
+        });
+        const cost = element('select'); cost.setAttribute('aria-label', 'Classificação de custo explícita');
+        [['unknown','Desconhecido'],['free','Grátis'],['low_cost','Baixo custo'],['standard','Padrão'],['premium','Premium']].forEach(([value,label]) => { const option=element('option','',label); option.value=value; cost.append(option); });
+        const risk = element('select'); risk.setAttribute('aria-label', 'Risco máximo explícito');
+        ['low','medium','high'].forEach(value => { const option=element('option','',`Risco máximo ${value}`); option.value=value; risk.append(option); });
+        const qualifyButton = element('button', 'model-catalog-action', 'Validar metadados e qualificar');
+        qualifyButton.type = 'button'; qualifyButton.disabled = !model.appserver_compatible || !model.supported_efforts?.length;
+        qualifyButton.addEventListener('click', async () => {
+          if (!modelAdminToken) { notify('Desbloqueie as alterações administrativas primeiro'); return; }
+          const key = `qualification:${model.id}`; pending.add(key); renderModelCatalog();
+          try {
+            const data = await api('/api/dev/model-management/qualifications', { method: 'POST', body: { model_id: model.id, provider: provider.value.trim(), capabilities: selectedCapabilities, efforts: selectedEfforts, cost_class: cost.value, max_risk_level: risk.value } });
+            discoveredModelCatalog = data.models || discoveredModelCatalog; modelCatalog = data.approved_models || modelCatalog;
+            renderModelCatalog(); notify('Qualificação salva. O modelo permanece inativo até ativação explícita.');
+          } catch (error) { notify(`Qualificação recusada: ${error.message}`); }
+          finally { pending.delete(key); renderModelCatalog(); }
+        });
+        qualificationForm.append(provider, capabilities, efforts, cost, risk, qualifyButton,
+          element('small', '', model.appserver_compatible ? 'Compatibilidade de protocolo e esforços será revalidada no backend; inferência real não foi testada.' : 'Bloqueado: Codex App-Server não confirmou este modelo e esforços.'));
+        card.append(qualificationForm);
+      }
+      if (model.qualification?.status === 'QUALIFIED' && !blocked) {
+        const revoke = element('button', 'model-catalog-action', 'Desqualificar'); revoke.type = 'button';
+        revoke.addEventListener('click', async () => {
+          if (!modelAdminToken) { notify('Desbloqueie as alterações administrativas primeiro'); return; }
+          try { const data = await api('/api/dev/model-management/qualifications/revoke', { method: 'POST', body: { model_id: model.id } }); discoveredModelCatalog = data.models || discoveredModelCatalog; modelCatalog = data.approved_models || modelCatalog; renderModelCatalog(); notify('Qualificação revogada; ativações limpas.'); }
+          catch (error) { notify(`Falha ao desqualificar: ${error.message}`); }
+        });
+        actions.append(revoke);
+      }
       if (actions.children.length) card.append(actions);
       return card;
     }));
@@ -585,6 +636,14 @@
     .forEach(control => control.addEventListener('input', renderModelCatalog));
   [modelCatalogProvider, modelCatalogCost, modelCatalogAvailability, modelCatalogQualification]
     .forEach(control => control.addEventListener('change', renderModelCatalog));
+  modelAdminUnlock.addEventListener('click', async () => {
+    const token = modelAdminTokenInput.value.trim();
+    try {
+      const status = await api('/api/dev/model-management/admin-status');
+      if (!status.admin_auth_configured || token.length < 32) throw new Error('Configure NEXUS_ADMIN_TOKEN com pelo menos 32 caracteres no processo do servidor.');
+      modelAdminToken = token; modelAdminTokenInput.value = ''; modelAdminStatus.textContent = 'Alterações administrativas desbloqueadas nesta sessão do navegador'; renderModelCatalog();
+    } catch (error) { modelAdminToken = ''; modelAdminStatus.textContent = 'Alterações administrativas bloqueadas'; notify(error.message); }
+  });
   const renderCostAuthorizations = () => {
     const selected = costAuthModel.value;
     costAuthModel.replaceChildren(element('option', '', 'Selecione um modelo aprovado'));

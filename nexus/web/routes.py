@@ -743,6 +743,21 @@ class ModelCandidateRequest(BaseModel):
     candidate: bool
 
 
+class ModelQualificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_id: str = Field(min_length=1, max_length=128)
+    provider: str = Field(min_length=1, max_length=128)
+    capabilities: list[str] = Field(min_length=1, max_length=5)
+    efforts: list[str] = Field(min_length=1, max_length=8)
+    cost_class: str = Field(min_length=1, max_length=32)
+    max_risk_level: str = Field(min_length=1, max_length=16)
+
+
+class ModelQualificationRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_id: str = Field(min_length=1, max_length=128)
+
+
 class DevIntegrationReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     review_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
@@ -923,13 +938,19 @@ def model_management_state(refresh: bool = False):
     return list_dev_model_catalog(refresh=refresh)
 
 
+@router.get("/dev/model-management/admin-status")
+def model_management_admin_status():
+    from nexus.dev.model_management import admin_auth_configured
+    return {"admin_auth_configured": admin_auth_configured()}
+
+
 @router.post("/dev/model-management/activation")
 def change_model_activation(request: ModelActivationRequest, http_request: Request):
     from nexus.dev import model_management
     from nexus.dev.service import DevServiceError
 
     try:
-        model_management.require_local_operator(http_request)
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
         return model_management.set_active(request.model_id, request.active)
     except DevServiceError as error:
         raise _dev_error_response(error) from error
@@ -941,8 +962,34 @@ def change_model_candidate(request: ModelCandidateRequest, http_request: Request
     from nexus.dev.service import DevServiceError
 
     try:
-        model_management.require_local_operator(http_request)
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
         return model_management.set_candidate(request.model_id, request.candidate)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/model-management/qualifications")
+def qualify_model(request: ModelQualificationRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return model_management.qualify(
+            request.model_id, provider=request.provider, capabilities=request.capabilities,
+            efforts=request.efforts, cost_class=request.cost_class,
+            max_risk_level=request.max_risk_level,
+        )
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/model-management/qualifications/revoke")
+def revoke_model_qualification(request: ModelQualificationRevokeRequest, http_request: Request):
+    from nexus.dev import model_management
+    from nexus.dev.service import DevServiceError
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return model_management.revoke_qualification(request.model_id)
     except DevServiceError as error:
         raise _dev_error_response(error) from error
 
