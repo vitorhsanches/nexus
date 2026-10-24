@@ -228,6 +228,16 @@ def _patch_client(monkeypatch):
         {"id": "cc/claude-sonnet-5-low", "name": "Claude", "selectable": True, "availability": "catalog-compatible-unverified", "reason": "test catalog", "cost_status": "free", "supported_efforts": ["low"], "default_effort": "low"},
     ]
     monkeypatch.setattr(service, "_model_catalog_cache", (time.monotonic() + 60, test_catalog))
+    # Defensive fallback only: the pre-seeded cache above is what every test in
+    # this file relies on, but a background turn-processing thread left running
+    # past a prior test's teardown can race in and overwrite/expire it. Without
+    # this, that race falls through to a real network call to OmniRoute
+    # (nexus.routing.telemetry.OmniRouteTelemetryClient.fetch_models), which is
+    # unreachable in CI and makes an unrelated test fail nondeterministically.
+    monkeypatch.setattr(
+        "nexus.routing.telemetry.OmniRouteTelemetryClient.fetch_models",
+        lambda self: (),
+    )
     yield
 
 
