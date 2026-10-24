@@ -645,21 +645,21 @@
     const sessionId = controls.inspect.dataset.sessionId;
     const missionId = controls.inspect.dataset.missionId;
     if (!sessionId || !missionId) return;
-    if (controls.diff.dataset.loaded === missionId) {
-      controls.diff.hidden = !controls.diff.hidden;
-      controls.inspect.textContent = controls.diff.hidden ? 'Revisar diff' : 'Ocultar diff';
-      return;
-    }
     controls.inspect.disabled = true;
     controls.diff.hidden = false;
-    controls.diff.textContent = 'Carregando diff…';
+    controls.diff.textContent = 'Consultando o estado atual do worktree da sessão…';
     try {
       const diff = await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}/diff`);
-      controls.diff.textContent = (diff.files || []).map(file => file.patch || `${file.path}: ${file.reason || 'sem patch'}`).join('\n\n') || 'Sem alterações no worktree.';
-      controls.diff.dataset.loaded = missionId;
-      controls.inspect.textContent = 'Ocultar diff';
+      if (controls.inspect.dataset.sessionId !== sessionId || controls.inspect.dataset.missionId !== missionId) return;
+      const baseSha = diff.base_sha || 'base desconhecida';
+      const headSha = diff.head_sha || 'HEAD desconhecido';
+      const patches = (diff.files || []).map(file => file.patch || `${file.path}: ${file.reason || 'sem patch'}`).join('\n\n') || 'Sem alterações no worktree.';
+      controls.diff.textContent = `Estado atual do worktree desta sessão contra a base persistida (${baseSha} → ${headSha}) · consultado às ${new Date().toLocaleTimeString()}\n\n${patches}`;
+      controls.inspect.textContent = 'Atualizar diff';
     } catch (error) {
+      if (controls.inspect.dataset.sessionId !== sessionId || controls.inspect.dataset.missionId !== missionId) return;
       controls.diff.textContent = `Falha ao carregar diff: ${error.message}`;
+      controls.inspect.textContent = 'Tentar novamente';
     } finally {
       controls.inspect.disabled = false;
     }
@@ -733,11 +733,14 @@
     mission.inspect.hidden = !agent.latest_mission || activeMission;
     mission.inspect.dataset.sessionId = agent.session?.session_id || '';
     mission.inspect.dataset.missionId = agent.latest_mission?.mission_id || '';
-    if (mission.diff.dataset.missionId !== (agent.latest_mission?.mission_id || '')) {
-      mission.diff.dataset.missionId = agent.latest_mission?.mission_id || '';
+    const currentSessionId = agent.session?.session_id || '';
+    const currentMissionId = agent.latest_mission?.mission_id || '';
+    if (mission.diff.dataset.sessionId !== currentSessionId || mission.diff.dataset.missionId !== currentMissionId) {
+      mission.diff.dataset.sessionId = currentSessionId;
+      mission.diff.dataset.missionId = currentMissionId;
       mission.diff.hidden = true;
-      mission.diff.dataset.loaded = '';
       mission.diff.textContent = '';
+      mission.inspect.textContent = 'Revisar diff atual';
     }
   };
   const statusOf = agent => {

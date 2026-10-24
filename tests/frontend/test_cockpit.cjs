@@ -137,7 +137,8 @@ function harness(initialAgents, { gridWidth = 1200 } = {}) {
   const box = { agents: initialAgents, models: [{ id: 'free/model', cost_status: 'free' }, { id: 'paid/model', cost_status: 'low_cost' }],
     projects: [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 }],
     profiles: [{ id: 'unit', name: 'Unitários', timeout_seconds: 120 }],
-    diff: { files: [{ path: 'nexus/example.py', status: 'M', patch: '--- a/nexus/example.py\n+++ b/nexus/example.py' }] },
+    diff: { base_sha: 'base-12345678', head_sha: 'head-abcdefgh',
+      files: [{ path: 'nexus/example.py', status: 'M', patch: '--- a/nexus/example.py\n+++ b/nexus/example.py' }] },
     maestro: { conversation_id: 'MAESTRO-1', busy: false, planning: { authorized: false, model: null }, messages: [] },
     postError: null, postWait: null, profileError: null };
   const timers = [];
@@ -680,7 +681,7 @@ test('planned mission can use its persisted authorization without extra instruct
   assert.equal(form.querySelector('.cockpit-cost-confirm').hidden, true);
 });
 
-test('active mission exposes one safe interrupt and terminal missions expose read-only diff review', async () => {
+test('active mission exposes one safe interrupt and terminal missions refresh current worktree diff', async () => {
   const running = { ...agent(1), latest_mission: { mission_id: 'MISSION-1', status: 'TESTING', attempt_count: 1,
     tests: [{ status: 'RUNNING', exit_code: null }], changed_files: [] } };
   const app = harness([running]);
@@ -710,10 +711,35 @@ test('active mission exposes one safe interrupt and terminal missions expose rea
   await app.settle();
   const diff = form.querySelector('.cockpit-mission-diff');
   assert.match(diff.textContent, /--- a\/nexus\/example.py/);
+  assert.match(diff.textContent, /worktree desta sessão contra a base persistida \(base-12345678 → head-abcdefgh\)/);
   assert.equal(app.calls.filter(call => call.url === '/api/dev/sessions/DEV-1/diff' && call.method === 'GET').length, 1);
+  app.box.diff = { base_sha: 'base-new', head_sha: 'head-new', files: [{ path: 'nexus/updated.py', status: 'M', patch: '+++ b/nexus/updated.py' }] };
   inspect.dispatch('click');
-  assert.equal(diff.hidden, true);
+  await app.settle();
+  assert.equal(diff.hidden, false);
+  assert.match(diff.textContent, /base-new → head-new/);
+  assert.match(diff.textContent, /nexus\/updated.py/);
+  assert.equal(app.calls.filter(call => call.url === '/api/dev/sessions/DEV-1/diff' && call.method === 'GET').length, 2);
   assert.equal(app.calls.some(call => /apply|merge|integrat/i.test(call.url)), false);
+});
+
+test('persisted interrupt request remains visible after refresh and cockpit reopen', async () => {
+  const persisted = { ...agent(1), latest_mission: { mission_id: 'MISSION-PERSISTED', status: 'RUNNING',
+    interrupt_requested: true, attempt_count: 1, tests: [], changed_files: [] } };
+  const app = harness([persisted]);
+  await app.settle();
+  const getInterrupt = current => current.grid.querySelector('[data-pane="PANE-1"]')
+    .querySelector('.cockpit-mission-interrupt');
+  assert.equal(getInterrupt(app).disabled, true);
+  assert.equal(getInterrupt(app).textContent, 'Interrupção solicitada');
+  await app.refresh();
+  assert.equal(getInterrupt(app).disabled, true);
+  assert.equal(getInterrupt(app).textContent, 'Interrupção solicitada');
+
+  const reopened = harness([persisted]);
+  await reopened.settle();
+  assert.equal(getInterrupt(reopened).disabled, true);
+  assert.equal(getInterrupt(reopened).textContent, 'Interrupção solicitada');
 });
 
 test('ambiguous mission failure preserves the draft and never retries automatically', async () => {
