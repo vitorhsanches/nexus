@@ -20,6 +20,8 @@
       <nav class="mission-nav" id="mission-nav" aria-label="Missões registradas"></nav>
       <div class="nav-label pane-nav-heading">PANES <span id="sidebar-pane-count">04</span></div>
       <nav class="pane-nav" id="pane-nav" aria-label="Panes da missão"></nav>
+      <div class="nav-label settings-nav-heading">CONFIGURAÇÕES</div>
+      <button class="pane-nav-link" id="settings-models-link" type="button">⚙ &nbsp; Modelos</button>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-note"><span class="note-dot"></span><div><strong>Mensagens Nexus</strong><p>Conversa com Maestro e agentes. Nenhum shell ou CLI conectado.</p></div></div>
       <div class="sidebar-footer"><span class="avatar">N</span><span><strong>Nexus</strong><small>Workspace atual: <a href="/nexus/workspace">abrir</a></small></span><span class="footer-more">···</span></div>
@@ -38,13 +40,20 @@
 
       <section class="overview" aria-label="Resumo do projeto"><div class="overview-intro"><span class="overview-icon">▦</span><span>VISÃO DO PROJETO</span></div><div class="overview-stat"><strong>02</strong><span>panes na grade</span></div><div class="overview-stat"><strong>00</strong><span>agentes registrados</span></div><div class="overview-stat"><strong id="execution-count">00</strong><span>missões registradas</span></div><div class="overview-divider"></div><span class="overview-disclaimer" id="data-status">Conectando ao Nexus…</span></section>
 
-      <section class="model-catalog" aria-labelledby="model-catalog-title">
+      <section class="model-catalog" id="settings-models" aria-labelledby="model-catalog-title">
         <div class="model-catalog-heading">
-          <div><span class="section-kicker">OMNIROUTE / DESCOBERTA</span><h2 id="model-catalog-title">Catálogo de modelos <span id="model-catalog-count">0</span></h2></div>
+          <div><span class="section-kicker">CONFIGURAÇÕES → MODELOS</span><h2 id="model-catalog-title">Modelos OmniRoute <span id="model-catalog-count">0</span></h2></div>
           <button class="model-catalog-refresh" id="model-catalog-refresh" type="button">Atualizar catálogo</button>
         </div>
         <p class="model-catalog-status" id="model-catalog-status" role="status" aria-live="polite">Carregando modelos anunciados pelo OmniRoute…</p>
         <p class="model-catalog-project-note" id="model-catalog-project-note"></p>
+        <div class="model-catalog-filters" aria-label="Filtros de modelos">
+          <input id="model-filter-search" type="search" placeholder="Pesquisar modelo" aria-label="Pesquisar modelos">
+          <select id="model-filter-provider" aria-label="Filtrar por provedor"><option value="">Todos os provedores</option></select>
+          <select id="model-filter-cost" aria-label="Filtrar por custo"><option value="">Todos os custos</option><option value="free">Grátis</option><option value="low_cost">Baixo custo</option><option value="standard">Padrão</option><option value="premium">Premium</option><option value="unknown">Desconhecido</option></select>
+          <select id="model-filter-availability" aria-label="Filtrar por disponibilidade"><option value="">Todas as disponibilidades</option><option value="available">Anunciado</option><option value="missing">Removido do OmniRoute</option><option value="unavailable">Descoberta indisponível</option></select>
+          <select id="model-filter-qualification" aria-label="Filtrar por qualificação"><option value="">Todos os estados</option><option value="qualified">Qualificado</option><option value="not_qualified">Não qualificado</option><option value="blocked">Bloqueado</option></select>
+        </div>
         <div class="model-catalog-list" id="model-catalog-list" aria-live="polite"></div>
         <div class="cost-authorization-panel">
           <h3>Autorizações persistentes por projeto</h3>

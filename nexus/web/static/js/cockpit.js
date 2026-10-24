@@ -7,6 +7,11 @@
   const modelCatalogCount = document.getElementById('model-catalog-count');
   const modelCatalogProjectNote = document.getElementById('model-catalog-project-note');
   const modelCatalogRefreshButton = document.getElementById('model-catalog-refresh');
+  const modelCatalogSearch = document.getElementById('model-filter-search');
+  const modelCatalogProvider = document.getElementById('model-filter-provider');
+  const modelCatalogCost = document.getElementById('model-filter-cost');
+  const modelCatalogAvailability = document.getElementById('model-filter-availability');
+  const modelCatalogQualification = document.getElementById('model-filter-qualification');
   const costAuthModel = document.getElementById('cost-auth-model');
   const costAuthList = document.getElementById('cost-auth-list');
   const costAuthCreate = document.getElementById('cost-auth-create');
@@ -468,7 +473,33 @@
   })[value] || 'Não qualificado';
   const modelAvailabilityLabel = value => value === 'omniroute-listed-unverified'
     ? 'Anunciado pelo OmniRoute · inferência não verificada'
+    : value === 'not-discovered' ? 'Não anunciado atualmente pelo OmniRoute'
+    : value === 'omniroute-unavailable' ? 'OmniRoute indisponível · seleção preservada'
     : (value || 'Indisponível');
+  const modelManagementLabel = value => ({
+    active: 'Ativo', inactive: 'Inativo', candidate: 'Candidato · não libera execução',
+    not_qualified: 'Não qualificado', blocked: 'Bloqueado'
+  })[value] || 'Não qualificado';
+  const modelIsQualified = model => model.qualification_status === 'qualified' || model.approval_status === 'approved';
+  const modelIsActive = model => model.active === undefined ? Boolean(model.can_execute) : Boolean(model.active);
+  const filterModelCatalog = () => {
+    const query = (modelCatalogSearch.value || '').trim().toLocaleLowerCase();
+    const provider = modelCatalogProvider.value;
+    const cost = modelCatalogCost.value;
+    const availability = modelCatalogAvailability.value;
+    const qualification = modelCatalogQualification.value;
+    return discoveredModelCatalog.filter(model => {
+      if (query && !`${model.id} ${model.name || ''}`.toLocaleLowerCase().includes(query)) return false;
+      if (provider && model.provider !== provider) return false;
+      if (cost && (model.cost_status || 'unknown') !== cost) return false;
+      if (availability === 'available' && model.discovered === false) return false;
+      if (availability === 'missing' && model.discovered !== false) return false;
+      if (availability === 'unavailable' && model.discovered !== null) return false;
+      const currentQualification = model.qualification_status || (model.approval_status === 'approved' ? 'qualified' : model.approval_status || 'not_qualified');
+      if (qualification && currentQualification !== qualification) return false;
+      return true;
+    });
+  };
   const renderModelCatalog = () => {
     modelCatalogCount.textContent = String(discoveredModelCatalog.length);
     modelCatalogProjectNote.textContent = projectsError
@@ -482,27 +513,78 @@
       ? `Catálogo indisponível: ${modelCatalogError}`
       : `${discoveredModelCatalog.length} modelo(s) anunciado(s) pelo OmniRoute; descoberta não comprova inferência.`;
     modelCatalogStatus.classList.toggle('is-error', Boolean(modelCatalogError));
-    if (!discoveredModelCatalog.length) {
+    const providers = [...new Set(discoveredModelCatalog.map(model => model.provider || 'unknown'))].sort();
+    const selectedProvider = modelCatalogProvider.value;
+    modelCatalogProvider.replaceChildren(element('option', '', 'Todos os provedores'));
+    modelCatalogProvider.children[0].value = '';
+    providers.forEach(provider => {
+      const option = element('option', '', provider); option.value = provider; modelCatalogProvider.append(option);
+    });
+    if (providers.includes(selectedProvider)) modelCatalogProvider.value = selectedProvider;
+    const filteredModels = filterModelCatalog();
+    if (!filteredModels.length) {
       const empty = modelCatalogError
         ? 'Não foi possível obter modelos do OmniRoute. Atualize o catálogo quando o serviço estiver disponível.'
-        : 'Nenhum modelo foi anunciado pelo OmniRoute.';
+        : discoveredModelCatalog.length ? 'Nenhum modelo corresponde aos filtros.' : 'Nenhum modelo foi anunciado pelo OmniRoute.';
       modelCatalogList.replaceChildren(element('p', 'model-catalog-empty', empty));
       return;
     }
-    modelCatalogList.replaceChildren(...discoveredModelCatalog.map(model => {
+    modelCatalogList.replaceChildren(...filteredModels.map(model => {
       const status = ['approved', 'not_qualified', 'blocked'].includes(model.approval_status)
         ? model.approval_status : 'not_qualified';
-      const card = element('article', `model-catalog-card is-${status}`);
+      const managementStatus = model.management_status || (modelIsActive(model) ? 'active' : modelIsQualified(model) ? 'inactive' : status === 'blocked' ? 'blocked' : model.candidate ? 'candidate' : 'not_qualified');
+      const card = element('article', `model-catalog-card is-${status} is-${managementStatus}`);
       const heading = element('div', 'model-catalog-card-head');
       heading.append(element('strong', 'model-catalog-card-name', model.name || model.id || 'Modelo sem nome'),
         element('span', `model-catalog-badge is-${status}`, modelApprovalLabel(status)));
+      const stateBadge = element('span', `model-catalog-badge is-${managementStatus}`, modelManagementLabel(managementStatus));
+      heading.append(stateBadge);
       card.append(heading,
         element('p', 'model-catalog-meta', `${model.id || 'ID desconhecido'} · provedor ${model.provider || 'desconhecido'}`),
         element('p', 'model-catalog-meta', `${modelAvailabilityLabel(model.availability)} · custo ${modelCostLabel(model.cost_status)}`),
         element('p', 'model-catalog-reason', model.approval_reason || 'Sem qualificação para execução.'));
+      const actions = element('div', 'model-catalog-card-actions');
+      const blocked = status === 'blocked' || managementStatus === 'blocked';
+      if (modelIsQualified(model) && !blocked) {
+        const toggle = element('button', 'model-catalog-action', modelIsActive(model) ? 'Desativar' : 'Ativar');
+        toggle.type = 'button';
+        toggle.disabled = pending.has(`model:${model.id}`);
+        toggle.addEventListener('click', async () => {
+          const key = `model:${model.id}`; pending.add(key); renderModelCatalog();
+          try {
+            const data = await api('/api/dev/model-management/activation', { method: 'POST', body: { model_id: model.id, active: !modelIsActive(model) } });
+            discoveredModelCatalog = Array.isArray(data.models) ? data.models : discoveredModelCatalog;
+            modelCatalog = Array.isArray(data.approved_models) ? data.approved_models : modelCatalog;
+            renderModelCatalog(); renderPlanningControls();
+            knownAgents.forEach((_agent, paneId) => renderAgentControls(paneId));
+            notify(modelIsActive(model) ? 'Modelo desativado para novas execuções' : 'Modelo ativo; autorização de custos permanece independente');
+          } catch (error) { notify(`Falha ao alterar modelo: ${error.message}`); }
+          finally { pending.delete(key); renderModelCatalog(); }
+        });
+        actions.append(toggle);
+      } else if (!blocked && model.approval_status !== 'approved' && (model.discovered !== false || model.candidate)) {
+        const candidate = element('button', 'model-catalog-action', model.candidate ? 'Remover candidato' : 'Marcar candidato');
+        candidate.type = 'button'; candidate.disabled = pending.has(`candidate:${model.id}`);
+        candidate.addEventListener('click', async () => {
+          const key = `candidate:${model.id}`; pending.add(key); renderModelCatalog();
+          try {
+            const data = await api('/api/dev/model-management/candidate', { method: 'POST', body: { model_id: model.id, candidate: !model.candidate } });
+            discoveredModelCatalog = Array.isArray(data.models) ? data.models : discoveredModelCatalog;
+            renderModelCatalog();
+            notify(model.candidate ? 'Candidato removido' : 'Candidato registrado; execução continua bloqueada');
+          } catch (error) { notify(`Falha ao atualizar candidato: ${error.message}`); }
+          finally { pending.delete(key); renderModelCatalog(); }
+        });
+        actions.append(candidate);
+      }
+      if (actions.children.length) card.append(actions);
       return card;
     }));
   };
+  [modelCatalogSearch, modelCatalogProvider, modelCatalogCost, modelCatalogAvailability, modelCatalogQualification]
+    .forEach(control => control.addEventListener('input', renderModelCatalog));
+  [modelCatalogProvider, modelCatalogCost, modelCatalogAvailability, modelCatalogQualification]
+    .forEach(control => control.addEventListener('change', renderModelCatalog));
   const renderCostAuthorizations = () => {
     const selected = costAuthModel.value;
     costAuthModel.replaceChildren(element('option', '', 'Selecione um modelo aprovado'));
@@ -587,6 +669,11 @@
     }
   };
   modelCatalogRefreshButton.addEventListener('click', () => { void refreshModelCatalog(true); });
+  document.getElementById('settings-models-link').addEventListener('click', () => {
+    document.getElementById('settings-models').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('menu-toggle').setAttribute('aria-expanded', 'false');
+  });
   const formField = (label, input) => {
     const field = element('label', 'cockpit-confirm');
     field.append(input, element('span', '', label));

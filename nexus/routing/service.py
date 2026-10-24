@@ -25,7 +25,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from nexus.routing.catalog import default_catalog
+from nexus.routing.catalog import default_catalog, production_eligible
 from nexus.routing.models import (
     CapabilityClass,
     ModelRoute,
@@ -246,6 +246,7 @@ class AdaptiveRoutingService:
             if approved_catalog is not None
             else default_catalog()
         )
+        self._uses_operator_model_selection = approved_catalog is None
 
         # Legacy static routes, used only for total-telemetry-outage
         # fallback. Each capability maps to an ORDERED tuple of candidate
@@ -349,6 +350,7 @@ class AdaptiveRoutingService:
         risk_level: str,
         blocked_models: frozenset[str] = frozenset(),
         blocked_providers: frozenset[str] = frozenset(),
+        approved_catalog: tuple[ModelRoute, ...] | None = None,
     ) -> RoutingDecision:
         """Return the legacy route only after normal router hard gates.
 
@@ -377,7 +379,7 @@ class AdaptiveRoutingService:
 
         fallback_catalog = tuple(
             route
-            for route in self._approved_catalog
+            for route in (approved_catalog if approved_catalog is not None else self._approved_catalog)
             if (
                 route.model_id,
                 route.provider,
@@ -521,6 +523,18 @@ class AdaptiveRoutingService:
         parameter.
         """
 
+        approved_catalog = self._approved_catalog
+        if self._uses_operator_model_selection:
+            from nexus.registry import workspace_model_settings
+
+            qualified_ids = {
+                route.model_id for route in production_eligible(self._approved_catalog)
+            }
+            active_ids = workspace_model_settings.effective_active_ids(qualified_ids)
+            approved_catalog = tuple(
+                route for route in self._approved_catalog if route.model_id in active_ids
+            )
+
         snapshot = self._collect_telemetry()
 
         models_discovery_failed = (
@@ -537,6 +551,7 @@ class AdaptiveRoutingService:
         if total_outage:
             return self._legacy_fallback_decision(
                 capability, risk_level, blocked_models, blocked_providers,
+                approved_catalog=approved_catalog,
             )
 
         telemetry_attempted = (
@@ -557,14 +572,14 @@ class AdaptiveRoutingService:
 
         if models_discovery_authoritative:
             runtime_catalog = build_runtime_catalog(
-                self._approved_catalog,
+                approved_catalog,
                 snapshot,
             )
         else:
-            runtime_catalog = self._approved_catalog
+            runtime_catalog = approved_catalog
 
         resources = build_routing_resources(
-            self._approved_catalog,
+            approved_catalog,
             snapshot,
             overrides=self._overrides,
         )

@@ -697,5 +697,21 @@ def initialize_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_workspace_cost_authorization_leases_active
                 ON workspace_cost_authorization_leases(authorization_id, released_at, expires_at);
+
+            -- Operator-managed model activation is independent from model
+            -- qualification and project/model cost consent. Until the
+            -- operator saves the first selection, existing approved routes
+            -- retain their previous behavior.
+            CREATE TABLE IF NOT EXISTS workspace_model_settings (
+                model_id TEXT PRIMARY KEY,
+                active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
+                candidate INTEGER NOT NULL DEFAULT 0 CHECK (candidate IN (0, 1)),
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS workspace_model_settings_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                selection_configured INTEGER NOT NULL DEFAULT 0 CHECK (selection_configured IN (0, 1)),
+                updated_at TEXT NOT NULL
+            );
             """
         )

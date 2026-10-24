@@ -49,11 +49,29 @@ def _approved_dev_models(discovered_payload: dict) -> dict:
 
 
 def list_dev_models(*, refresh: bool = False) -> dict:
-    """Return only live, explicitly approved Development coding routes."""
+    """Return only live, qualified, operator-active Development routes."""
     from nexus.chat.service import list_models
+    from nexus.registry import workspace_model_settings
 
     discovered_payload = list_models(refresh=True) if refresh else list_models()
-    return _approved_dev_models(discovered_payload)
+    catalog = _approved_dev_models(discovered_payload)
+    qualified_ids = _qualified_dev_route_ids()
+    active_ids = workspace_model_settings.effective_active_ids(qualified_ids)
+    catalog["models"] = [row for row in catalog["models"] if row["id"] in active_ids]
+    if catalog["default_model"] not in active_ids:
+        catalog["default_model"] = next(
+            (row["id"] for row in catalog["models"] if row["cost_status"] == "free"),
+            None,
+        )
+    return catalog
+
+
+def _qualified_dev_route_ids() -> set[str]:
+    return {
+        route.model_id
+        for route in production_eligible(default_catalog())
+        if _DEVELOPMENT_CAPABILITIES & set(route.capabilities)
+    }
 
 
 def list_dev_model_catalog(*, refresh: bool = False) -> dict:
@@ -69,7 +87,12 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
     routes_by_id: dict[str, list] = {}
     for route in default_catalog():
         routes_by_id.setdefault(route.model_id, []).append(route)
+    from nexus.registry import workspace_model_settings
+
     approved_models = _approved_dev_models(discovered_payload)
+    qualified_ids = _qualified_dev_route_ids()
+    settings = workspace_model_settings.read()
+    active_ids = workspace_model_settings.effective_active_ids(qualified_ids)
     approved_ids = {item["id"] for item in approved_models["models"]}
     rows = []
     for discovered in discovered_payload.get("models", []):
@@ -80,9 +103,9 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
         if is_blocked_model(model_id):
             approval_status = "blocked"
             approval_reason = "This model is globally blocked by Nexus policy."
-        elif model_id in approved_ids:
+        elif model_id in qualified_ids:
             approval_status = "approved"
-            approval_reason = "Explicitly qualified for Development coding and currently selectable."
+            approval_reason = "Explicitly qualified for Development coding."
         else:
             approval_status = "not_qualified"
             if routes and any(route.approved for route in routes):
@@ -91,6 +114,15 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
                 approval_reason = "Discovered by OmniRoute; Nexus has not approved it for execution."
         cost_status = next(
             (route.cost_class for route in routes if route.cost_class), "unknown"
+        )
+        saved = settings["models"].get(model_id, {})
+        active = model_id in active_ids
+        management_status = (
+            "blocked" if approval_status == "blocked"
+            else "active" if active
+            else "inactive" if model_id in qualified_ids
+            else "candidate" if saved.get("candidate")
+            else "not_qualified"
         )
         rows.append(
             {
@@ -103,19 +135,51 @@ def list_dev_model_catalog(*, refresh: bool = False) -> dict:
                 "cost_status": cost_status,
                 "approval_status": approval_status,
                 "approval_reason": approval_reason,
-                "can_execute": model_id in approved_ids,
+                "qualification_status": "qualified" if model_id in qualified_ids else approval_status,
+                "active": active,
+                "candidate": bool(saved.get("candidate")),
+                "management_status": management_status,
+                "discovered": True,
+                "can_execute": active and model_id in approved_ids,
             }
         )
+    discovered_ids = {row["id"] for row in rows}
+    for model_id, saved in settings["models"].items():
+        if model_id in discovered_ids:
+            continue
+        blocked = is_blocked_model(model_id)
+        qualified = model_id in qualified_ids
+        rows.append({
+            "id": model_id,
+            "name": model_id,
+            "provider": "unknown",
+            "availability": "omniroute-unavailable" if discovered_payload.get("catalog_error") else "not-discovered",
+            "cost_status": "unknown",
+            "approval_status": "blocked" if blocked else "approved" if qualified else "not_qualified",
+            "approval_reason": "Model is no longer advertised by OmniRoute; saved policy is retained.",
+            "qualification_status": "qualified" if qualified else "not_qualified",
+            "active": model_id in active_ids and qualified and not blocked,
+            "candidate": bool(saved.get("candidate")),
+            "management_status": "blocked" if blocked else "inactive" if qualified else "candidate" if saved.get("candidate") else "not_qualified",
+            "discovered": None if discovered_payload.get("catalog_error") else False,
+            "can_execute": False,
+        })
     rows.sort(
         key=lambda item: (
-            item["approval_status"] != "approved",
+            item["management_status"] not in {"active", "inactive"},
+            item["management_status"] != "active",
             item["id"].casefold(),
         )
     )
+    executable_models = [item for item in approved_models["models"] if item["id"] in active_ids]
     return {
         "models": rows,
-        "approved_models": approved_models["models"],
-        "default_model": approved_models["default_model"],
+        "approved_models": executable_models,
+        "default_model": next(
+            (item["id"] for item in executable_models if item["cost_status"] == "free"),
+            executable_models[0]["id"] if executable_models else None,
+        ),
         "catalog_error": discovered_payload.get("catalog_error"),
+        "selection_configured": settings["selection_configured"],
     }
 
