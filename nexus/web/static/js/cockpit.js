@@ -7,6 +7,9 @@
   const modelCatalogCount = document.getElementById('model-catalog-count');
   const modelCatalogProjectNote = document.getElementById('model-catalog-project-note');
   const modelCatalogRefreshButton = document.getElementById('model-catalog-refresh');
+  const costAuthModel = document.getElementById('cost-auth-model');
+  const costAuthList = document.getElementById('cost-auth-list');
+  const costAuthCreate = document.getElementById('cost-auth-create');
   const groupControls = document.getElementById('group-controls');
   const savedLayouts = new Map();
   const gap = 6;
@@ -32,6 +35,7 @@
   let discoveredModelCatalog = [];
   let modelCatalogError = '';
   let modelCatalogRequest = 0;
+  let costAuthorizations = [];
   let testProfiles = [];
   let testProfilesLoading = false;
   let testProfilesError = '';
@@ -452,6 +456,10 @@
     return data;
   };
   const costOf = model => modelCatalog.find(row => row.id === model)?.cost_status || 'unknown';
+  const activeCostAuthorizationFor = model => costAuthorizations.find(auth => auth.model === model &&
+    auth.status === 'ACTIVE' && Number(auth.uses_remaining) > 0);
+  const agentAuthorizationApplies = agent => Boolean(agent.brief?.authorization?.applies ||
+    (agent.model && costOf(agent.model) !== 'free' && activeCostAuthorizationFor(agent.model)));
   const modelCostLabel = value => ({
     free: 'Grátis', low_cost: 'Baixo custo', standard: 'Padrão', premium: 'Premium', unknown: 'Desconhecido'
   })[value] || 'Desconhecido';
@@ -495,6 +503,60 @@
       return card;
     }));
   };
+  const renderCostAuthorizations = () => {
+    const selected = costAuthModel.value;
+    costAuthModel.replaceChildren(element('option', '', 'Selecione um modelo aprovado'));
+    modelCatalog.filter(model => model.cost_status !== 'free').forEach(model => {
+      const option = element('option', '', `${model.id} · ${model.cost_status || 'unknown'}`);
+      option.value = model.id;
+      costAuthModel.append(option);
+    });
+    if (costAuthModel.children.some(option => option.value === selected)) costAuthModel.value = selected;
+    costAuthCreate.disabled = !projectId || !costAuthModel.value || !document.getElementById('cost-auth-confirm').checked || pending.has('cost-auth');
+    if (!projectId) {
+      costAuthList.textContent = 'Selecione um projeto autorizado para consultar autorizações.';
+      return;
+    }
+    if (!costAuthorizations.length) {
+      costAuthList.textContent = 'Nenhuma autorização persistente registrada para este projeto.';
+      return;
+    }
+    costAuthList.replaceChildren(...costAuthorizations.map(auth => {
+      const item = element('div', 'cost-auth-item');
+      item.append(element('span', 'cost-auth-title', `${auth.model} · ${auth.cost_status} · ${auth.status}`),
+        element('span', 'cost-auth-meta', `${auth.uses_remaining}/${auth.max_uses} usos restantes · ${auth.active_executions}/${auth.max_concurrent} simultâneos · expira ${new Date(auth.expires_at).toLocaleString()}`));
+      if (auth.status === 'ACTIVE') {
+        const revokeButton = element('button', 'cost-auth-revoke', 'Revogar');
+        revokeButton.type = 'button';
+        revokeButton.addEventListener('click', async () => {
+          try {
+            await api(`/api/workspace/cost-authorizations/${encodeURIComponent(auth.authorization_id)}?project_id=${encodeURIComponent(projectId)}`, { method: 'DELETE' });
+            await refresh();
+          } catch (error) { costAuthList.append(element('p', 'model-catalog-status is-error', error.message)); }
+        });
+        item.append(revokeButton);
+      }
+      return item;
+    }));
+  };
+  costAuthModel.addEventListener('change', renderCostAuthorizations);
+  document.getElementById('cost-auth-confirm').addEventListener('change', renderCostAuthorizations);
+  costAuthCreate.addEventListener('click', async () => {
+    if (costAuthCreate.disabled || !projectId) return;
+    const confirmed = document.getElementById('cost-auth-confirm');
+    pending.add('cost-auth'); renderCostAuthorizations();
+    try {
+      await api('/api/workspace/cost-authorizations', { method: 'POST', body: {
+        project_id: projectId, model: costAuthModel.value, confirm_cost: true,
+        max_uses: Number(document.getElementById('cost-auth-uses').value),
+        validity_seconds: Number(document.getElementById('cost-auth-days').value) * 86400,
+        max_concurrent: Number(document.getElementById('cost-auth-concurrency').value)
+      } });
+      confirmed.checked = false;
+      await refresh();
+    } catch (error) { costAuthList.textContent = `Falha ao salvar: ${error.message}`; }
+    finally { pending.delete('cost-auth'); renderCostAuthorizations(); }
+  });
   const refreshModelCatalog = async (force = false) => {
     const request = ++modelCatalogRequest;
     modelCatalogRefreshButton.disabled = true;
@@ -580,14 +642,18 @@
     }));
     planningSelect.value = modelCatalog.some(row => row.id === selected) ? selected :
       (modelCatalog.some(row => row.id === planning?.model) ? planning.model : '');
-    planningCostLabel.hidden = !planningSelect.value || costOf(planningSelect.value) === 'free';
+    const planningGrant = activeCostAuthorizationFor(planningSelect.value);
+    planningCostLabel.hidden = true;
+    planningCost.checked = false;
     authorize.textContent = planning?.authorized ? 'Trocar modelo' : 'Autorizar planejamento';
     authorize.disabled = pending.has('authorize') || !projectId || !planningSelect.value ||
-      (planning?.authorized && planning.model === planningSelect.value) ||
-      (planningCostLabel.hidden === false && !planningCost.checked);
+      (costOf(planningSelect.value) !== 'free' && !planningGrant) ||
+      (planning?.authorized && planning.model === planningSelect.value);
     maestroComposer.note.textContent = planning?.authorized
-      ? `IA autorizada: ${planning.model} · ${planning.cost_status || 'unknown'} · planejamento somente leitura`
-      : 'Planejamento determinístico. Autorize um modelo para usar IA; execução de agentes exige aprovação separada.';
+      ? `IA autorizada: ${planning.model} · ${planning.cost_status || 'unknown'} · planejamento somente leitura${planningGrant ? ` · ${planningGrant.uses_remaining}/${planningGrant.max_uses} usos restantes` : ''}`
+      : (planningSelect.value && costOf(planningSelect.value) !== 'free' && !planningGrant
+        ? 'Crie uma autorização persistente com limites no Catálogo de modelos antes de habilitar este modelo no Maestro.'
+        : 'Planejamento determinístico. Autorize um modelo para usar IA; execução de agentes exige aprovação separada.');
     maestroComposer.send.disabled = pending.has('maestro') || pending.has('authorize') || !projectId || Boolean(maestroState?.busy);
   };
   planningCost.addEventListener('change', renderPlanningControls);
@@ -595,13 +661,11 @@
     if (pending.has('authorize') || !projectId || !planningSelect.value) return;
     const selectedProject = projectId;
     const model = planningSelect.value;
-    const paid = costOf(model) !== 'free';
-    if (paid && !planningCost.checked) return;
     pending.add('authorize');
     renderPlanningControls();
     try {
       await api('/api/workspace/maestro/authorize', { method: 'POST', body: {
-        project_id: selectedProject, model, confirm_cost: paid && planningCost.checked
+        project_id: selectedProject, model, confirm_cost: false
       } });
       maestroComposer.error.textContent = '';
     } catch (error) {
@@ -628,7 +692,7 @@
           (agent.messages || []).some(message => ['PENDING', 'RUNNING'].includes(message.status)) ||
           agent.session?.status !== 'ACTIVE') return;
       if (!agent.model) { composer.error.textContent = 'Selecione um modelo no Workspace antes de enviar.'; return; }
-      const authorized = Boolean(agent.brief?.authorization?.applies);
+      const authorized = agentAuthorizationApplies(agent);
       const confirmed = composer.controls.querySelector('.cockpit-model-confirm input');
       const costConfirmed = composer.controls.querySelector('.cockpit-cost-confirm input');
       if (!authorized && !confirmed?.checked) { composer.error.textContent = `Confirme o uso de ${agent.model}.`; return; }
@@ -673,7 +737,7 @@
       controls.error.textContent = 'Aguarde a dependência e o handoff antes de iniciar esta missão.';
       return;
     }
-    const authorized = Boolean(agent.brief?.authorization?.applies);
+    const authorized = agentAuthorizationApplies(agent);
     const confirmModel = controls.composer.controls.querySelector('.cockpit-model-confirm input');
     const confirmCost = controls.composer.controls.querySelector('.cockpit-cost-confirm input');
     if (!authorized && !confirmModel?.checked) {
@@ -756,7 +820,9 @@
     const agent = knownAgents.get(paneId);
     if (!pane || !agent) return;
     const composer = pane.composer;
-    const authorized = Boolean(agent.brief?.authorization?.applies);
+    const planAuthorized = Boolean(agent.brief?.authorization?.applies);
+    const costGrant = activeCostAuthorizationFor(agent.model);
+    const authorized = planAuthorized || Boolean(agent.model && costOf(agent.model) !== 'free' && costGrant);
     const modelConfirm = composer.controls.querySelector('.cockpit-model-confirm');
     const costConfirm = composer.controls.querySelector('.cockpit-cost-confirm');
     if (pane.dataset.confirmedModel !== (agent.model || '')) {
@@ -783,8 +849,11 @@
     );
     mission.profile.value = testProfiles.some(profile => profile.id === previousProfile) ? previousProfile : '';
     mission.profileNote.textContent = testProfilesError ? `Perfis de teste indisponíveis: ${testProfilesError}` : '';
-    composer.note.textContent = authorized ? `Modelo ${agent.model} autorizado pelo plano vigente` :
-      `Turno no worktree isolado · ${agent.model || 'modelo não selecionado'} · ${costOf(agent.model)}`;
+    composer.note.textContent = planAuthorized
+      ? `Modelo ${agent.model} autorizado pelo plano vigente`
+      : (costGrant && authorized
+        ? `Autorização ativa: ${agent.model} · ${costGrant.cost_status} · ${costGrant.uses_remaining}/${costGrant.max_uses} usos restantes · ${costGrant.active_executions}/${costGrant.max_concurrent} simultâneos`
+        : `Turno no worktree isolado · ${agent.model || 'modelo não selecionado'} · ${costOf(agent.model)}`);
     const activeMission = ['PENDING', 'RUNNING', 'TESTING', 'REPAIRING'].includes(agent.latest_mission?.status);
     const latestMission = agent.latest_mission;
     if (latestMission && !activeMission) interruptRequests.delete(latestMission.mission_id);
@@ -1172,13 +1241,17 @@
     const request = ++refreshRequest;
     try {
       const query = encodeURIComponent(projectId);
-      const [workspace, maestro] = await Promise.all([
+      const [workspace, maestro, authData] = await Promise.all([
         api(`/api/workspace/state?project_id=${query}`),
-        api(`/api/workspace/maestro?project_id=${query}`)
+        api(`/api/workspace/maestro?project_id=${query}`),
+        api(`/api/workspace/cost-authorizations?project_id=${query}`)
       ]);
       if (generation !== refreshGeneration || request !== refreshRequest) return;
       workspaceState = workspace;
       maestroState = maestro;
+      costAuthorizations = authData.authorizations || [];
+      renderCostAuthorizations();
+      renderPlanningControls();
       const agents = (workspace.panes || []).slice().sort((a, b) => (a.layout?.position || 0) - (b.layout?.position || 0));
       knownAgents.clear();
       agents.forEach(agent => knownAgents.set(agent.pane_id, agent));

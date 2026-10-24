@@ -148,6 +148,7 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
     diff: { base_sha: 'base-12345678', head_sha: 'head-abcdefgh',
       files: [{ path: 'nexus/example.py', status: 'M', patch: '--- a/nexus/example.py\n+++ b/nexus/example.py' }] },
     maestro: { conversation_id: 'MAESTRO-1', busy: false, planning: { authorized: false, model: null }, messages: [] },
+    authorizations: [],
     postError: null, postWait: null, profileError: null };
   const timers = [];
   const frames = new Map();
@@ -165,6 +166,10 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
   const fetch = async (url, options = {}) => {
     calls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
     let data;
+    if (options.method === 'DELETE' && url.startsWith('/api/workspace/cost-authorizations/')) {
+      box.authorizations = box.authorizations.map(auth => ({ ...auth, status: 'REVOKED' }));
+      return { ok: true, json: async () => ({ status: 'REVOKED' }) };
+    }
     if (options.method === 'POST') {
       if (box.postWait) await box.postWait;
       if (box.postError) throw box.postError;
@@ -176,6 +181,15 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
         box.maestro.messages.push({ author: 'user', text: body.text, status: 'COMPLETED' },
           { author: 'maestro', text: 'Plano pronto', status: 'COMPLETED', plan: { plan_id: 'PLAN-1', source: 'deterministic' } });
         data = box.maestro;
+      } else if (url === '/api/workspace/cost-authorizations') {
+        const body = JSON.parse(options.body);
+        box.authorizations.push({ authorization_id: 'AUTH-1', project_id: body.project_id, model: body.model,
+          cost_status: 'low_cost', max_uses: body.max_uses, uses_reserved: 0, uses_remaining: body.max_uses,
+          max_concurrent: body.max_concurrent, active_executions: 0, expires_at: new Date(Date.now() + body.validity_seconds * 1000).toISOString(), status: 'ACTIVE' });
+        data = box.authorizations.at(-1);
+      } else if (url.startsWith('/api/workspace/cost-authorizations/')) {
+        box.authorizations = box.authorizations.map(auth => ({ ...auth, status: 'REVOKED' }));
+        data = { status: 'REVOKED' };
       } else if (/\/api\/workspace\/panes\/[^/]+\/messages/.test(url)) {
         const paneId = url.split('/')[4];
         const pane = box.agents.find(item => item.pane_id === paneId);
@@ -204,6 +218,7 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
     }
     else if (url.startsWith('/api/workspace/state?')) data = { panes: box.agents, execution_enabled: true };
     else if (url.startsWith('/api/workspace/maestro?')) data = box.maestro;
+    else if (url.startsWith('/api/workspace/cost-authorizations?')) data = { authorizations: box.authorizations };
     else if (url.endsWith('/history')) data = { events: [{ kind: 'MISSION_STARTED', created_at: '2026-10-22' }] };
     else if (/\/api\/dev\/sessions\/[^/]+\/diff$/.test(url)) data = box.diff;
     else throw new Error(`Unexpected API call: ${url}`);
@@ -242,6 +257,31 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
   };
   return { byId, grid, box, calls, settle, refresh, sources, tick, resize };
 }
+
+test('persistent cost authorization captures bounded consent and can be revoked', async () => {
+  const app = harness([]);
+  await app.settle();
+  app.byId['cost-auth-model'].value = 'paid/model';
+  app.byId['cost-auth-model'].dispatch('change');
+  app.byId['cost-auth-uses'].value = '10';
+  app.byId['cost-auth-days'].value = '7';
+  app.byId['cost-auth-concurrency'].value = '1';
+  app.byId['cost-auth-confirm'].checked = true;
+  app.byId['cost-auth-confirm'].dispatch('change');
+  await app.settle();
+  assert.equal(app.byId['cost-auth-create'].disabled, false);
+  app.byId['cost-auth-create'].dispatch('click');
+  await app.settle();
+  const create = app.calls.find(call => call.url === '/api/workspace/cost-authorizations' && call.method === 'POST');
+  assert.deepEqual(create.body, { project_id: 'demo', model: 'paid/model', confirm_cost: true, max_uses: 10,
+    validity_seconds: 7 * 86400, max_concurrent: 1 });
+  assert.match(app.byId['cost-auth-list'].textContent, /10\/10 usos restantes/);
+  const revoke = app.byId['cost-auth-list'].querySelector('.cost-auth-revoke');
+  assert.ok(revoke);
+  revoke.dispatch('click');
+  await app.settle();
+  assert.ok(app.calls.some(call => call.url.includes('/api/workspace/cost-authorizations/AUTH-1?project_id=demo') && call.method === 'DELETE'));
+});
 
 const agent = index => ({
   pane_id: `PANE-${index}`, title: `Agente ${index}`, role_label: 'Implementação', model: 'free/model',
@@ -556,24 +596,42 @@ test('Maestro sends with Enter, preserves multiline draft and displays persisted
   assert.equal(app.grid.querySelector('[data-pane="maestro"]'), pane);
 });
 
-test('Maestro planning authorization uses exact catalog model and explicit non-free consent', async () => {
+test('Maestro planning requires and reuses a bounded persistent cost authorization', async () => {
   const app = harness([agent(1)]);
+  app.box.authorizations = [{ authorization_id: 'AUTH-1', model: 'paid/model', cost_status: 'low_cost', status: 'ACTIVE',
+    uses_remaining: 4, max_uses: 5, max_concurrent: 1, active_executions: 0, expires_at: new Date(Date.now() + 86400000).toISOString() }];
   await app.settle();
+  await app.refresh();
   const form = app.grid.querySelector('[data-pane="maestro"]').querySelector('.cockpit-composer');
   const select = form.querySelector('select');
   select.value = 'paid/model';
   select.dispatch('change');
   const authorize = form.querySelector('.cockpit-authorize');
-  assert.equal(authorize.disabled, true);
-  form.querySelector('.cockpit-confirm input').checked = true;
-  form.querySelector('.cockpit-confirm input').dispatch('change');
   assert.equal(authorize.disabled, false);
   authorize.dispatch('click');
   await app.settle();
   const posts = app.calls.filter(call => call.url === '/api/workspace/maestro/authorize');
   assert.equal(posts.length, 1);
-  assert.deepEqual(posts[0].body, { project_id: 'demo', model: 'paid/model', confirm_cost: true });
+  assert.deepEqual(posts[0].body, { project_id: 'demo', model: 'paid/model', confirm_cost: false });
   assert.match(form.querySelector('.cockpit-compose-note').textContent, /IA autorizada/);
+});
+
+test('agent execution reuses the active project/model authorization and displays remaining limits', async () => {
+  const paidAgent = agent(1);
+  paidAgent.model = 'paid/model';
+  const app = harness([paidAgent]);
+  app.box.authorizations = [{ authorization_id: 'AUTH-AGENT', model: 'paid/model', cost_status: 'low_cost', status: 'ACTIVE',
+    uses_remaining: 3, max_uses: 5, max_concurrent: 2, active_executions: 0, expires_at: new Date(Date.now() + 86400000).toISOString() }];
+  await app.settle();
+  await app.refresh();
+  const pane = app.grid.querySelector('[data-pane="PANE-1"]');
+  assert.match(pane.composer.note.textContent, /3\/5 usos restantes/);
+  assert.equal(pane.composer.controls.querySelector('.cockpit-cost-confirm').hidden, true);
+  pane.composer.input.value = 'Executar tarefa autorizada';
+  pane.composer.form.requestSubmit();
+  await app.settle();
+  const post = app.calls.find(call => call.url.endsWith('/messages') && call.method === 'POST');
+  assert.deepEqual(post.body, { text: 'Executar tarefa autorizada' });
 });
 
 test('agent messages reuse persisted plan approval and preserve draft, pane, scroll and minimization on refresh', async () => {

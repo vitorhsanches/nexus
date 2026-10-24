@@ -67,6 +67,16 @@ class MaestroAuthorizeRequest(BaseModel):
     confirm_cost: bool = False
 
 
+class CostAuthorizationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    model: str = Field(min_length=1, max_length=128)
+    confirm_cost: bool = False
+    max_uses: int = Field(ge=1, le=10000)
+    validity_seconds: int = Field(ge=60, le=31536000)
+    max_concurrent: int = Field(ge=1, le=100)
+
+
 class MaestroMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str = Field(min_length=1, max_length=128)
@@ -122,6 +132,29 @@ def workspace_state(project_id: str):
     from nexus.workspace import service
 
     return _call(service.workspace_state, project_id)
+
+
+@router.get("/cost-authorizations")
+def list_cost_authorizations(project_id: str):
+    from nexus.workspace import cost_authorizations
+
+    return _call(cost_authorizations.list_authorizations, project_id)
+
+
+@router.post("/cost-authorizations")
+def create_cost_authorization(request: CostAuthorizationRequest):
+    from nexus.workspace import cost_authorizations
+
+    return _call(cost_authorizations.authorize, request.project_id, request.model,
+                 confirm_cost=request.confirm_cost, max_uses=request.max_uses,
+                 validity_seconds=request.validity_seconds, max_concurrent=request.max_concurrent)
+
+
+@router.delete("/cost-authorizations/{authorization_id}")
+def revoke_cost_authorization(authorization_id: str, project_id: str):
+    from nexus.workspace import cost_authorizations
+
+    return _call(cost_authorizations.revoke, project_id, authorization_id)
 
 
 @router.post("/plans")
