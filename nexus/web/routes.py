@@ -422,6 +422,7 @@ def go_jobs():
 
 class ChatSessionCreateRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
+    runtime: str | None = Field(default=None, min_length=1, max_length=32)
     model: str | None = Field(default=None, min_length=1, max_length=128)
     effort: str | None = Field(default=None, min_length=1, max_length=32)
     allow_unknown_cost: bool = False
@@ -449,9 +450,17 @@ def create_chat_session(request: ChatSessionCreateRequest):
     from nexus.chat.service import ChatError, create_session  # noqa: PLC0415
 
     try:
-        if request.model is None and request.effort is None and not request.allow_unknown_cost:
+        if request.runtime is None and request.model is None and request.effort is None and not request.allow_unknown_cost:
             return create_session(request.project_id)
-        return create_session(request.project_id, request.model, request.effort, request.allow_unknown_cost)
+        if request.runtime is None:
+            return create_session(request.project_id, request.model, request.effort, request.allow_unknown_cost)
+        return create_session(
+            request.project_id,
+            request.model,
+            request.effort,
+            request.allow_unknown_cost,
+            runtime=request.runtime,
+        )
     except ChatError as error:
         raise _chat_error_response(error) from error
 
@@ -463,10 +472,19 @@ def list_chat_sessions(project_id: str | None = None):
     return {"sessions": list_sessions(project_id)}
 
 
+@router.get("/chat/runtimes")
+def list_chat_runtimes():
+    from nexus.chat.service import ChatError, list_runtimes  # noqa: PLC0415
+    try:
+        return list_runtimes()
+    except ChatError as error:
+        raise _chat_error_response(error) from error
+
+
 @router.get("/chat/models")
-def list_chat_models():
+def list_chat_models(runtime: str | None = Query(default=None, min_length=1, max_length=32)):
     from nexus.chat.service import list_models  # noqa: PLC0415
-    return list_models()
+    return list_models(runtime=runtime) if runtime is not None else list_models()
 
 
 @router.get("/chat/sessions/{session_id}")

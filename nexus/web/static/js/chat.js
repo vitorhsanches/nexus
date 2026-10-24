@@ -33,7 +33,7 @@
     // turn is confirmed terminal, instead of settling for just response_text.
     pendingHistorySync: new Set(),
     historyNextCursor: null, historyLoading: false, historyUnavailable: false,
-    modelOptions: [], defaultModel: null, modelsLoaded: false, selectedNewSessionModel: null,
+    runtime: "omniroute", modelOptions: [], defaultModel: null, modelsLoaded: false, selectedNewSessionModel: null,
     selectedNewSessionEffort: null, favoriteModels: new Set(), activityStartedAt: null,
     // setInterval handle ticking the elapsed-time display once per second
     // while a turn is running; always cleared via stopElapsedTicker() so
@@ -191,6 +191,8 @@
       modelSelect.disabled = !state.modelsLoaded || Boolean(state.sending || state.activeTurnId);
       if (state.selectedNewSessionModel) modelSelect.value = state.selectedNewSessionModel;
     }
+    var runtimeSelect = $("chat-runtime-select");
+    if (runtimeSelect) runtimeSelect.disabled = Boolean(state.sending || state.activeTurnId);
     var effortSelect = $("chat-effort-select");
     if (effortSelect) effortSelect.disabled = !state.modelsLoaded || Boolean(state.sending || state.activeTurnId) || !state.selectedNewSessionModel;
     var search = $("chat-model-search"); if (search) search.disabled = !state.modelsLoaded || Boolean(state.sending || state.activeTurnId);
@@ -203,7 +205,7 @@
     if (modelPlaceholder && state.session) {
       var conversationModel = state.session.requested_model || state.session.model;
       modelPlaceholder.textContent = conversationModel ?
-        "Conversation model: " + conversationModel + (state.session.requested_effort ? " · effort " + state.session.requested_effort : " · effort default/legacy") + (state.session.provider ? " · " + state.session.provider : "") :
+        "Conversation model: " + conversationModel + (state.session.requested_effort ? " · effort " + state.session.requested_effort : " · effort default/legacy") + (state.session.runtime ? " · " + state.session.runtime : "") + (state.session.provider ? " · " + state.session.provider : "") :
         "Conversation model: legacy session (provider/model reported after first turn)";
     }
     var help = $("chat-composer-help");
@@ -274,6 +276,7 @@
 
   function sessionStatusLabel(session) {
     var parts = [session.status || "UNKNOWN"];
+    if (session.runtime) parts.push(session.runtime);
     if (session.model || session.provider) parts.push([session.provider, session.model].filter(Boolean).join(" · "));
     return parts.join(" — ");
   }
@@ -355,28 +358,39 @@
           "Create a new conversation for the selected project";
   }
 
+  function applyModelCatalog(models) {
+    var select = $("chat-model-select");
+    if (models.runtime) state.runtime = models.runtime;
+    var runtimeSelect = $("chat-runtime-select");
+    if (runtimeSelect) runtimeSelect.value = state.runtime;
+    if (select) {
+      select.replaceChildren();
+      state.modelOptions = (models.models || []).filter(function (model) { return model.selectable === true && typeof model.id === "string"; });
+      state.defaultModel = models.default_model;
+      state.favoriteModels = new Set();
+      state.selectedNewSessionModel = state.modelOptions.some(function (item) { return item.id === models.default_model; }) ? models.default_model : null;
+    }
+    state.modelsLoaded = Boolean(state.modelOptions.length);
+    populateModelSelect();
+    populateEffortSelect();
+    var modelError = $("chat-model-error");
+    if (modelError) { modelError.hidden = !models.catalog_error; modelError.textContent = models.catalog_error || ""; }
+    setComposerState();
+    return models;
+  }
+
+  function loadModels(runtime) {
+    var suffix = runtime ? "?runtime=" + encodeURIComponent(runtime) : "";
+    return request("/chat/models" + suffix).then(applyModelCatalog);
+  }
+
   function loadProjects() {
     showStatus("Loading registered projects…", "loading");
     var projectsRequest = request("/projects").then(function (payload) {
       populateProjects(payload && payload.projects);
       return loadSessions();
     });
-    var modelsRequest = request("/chat/models").then(function (models) {
-        var select = $("chat-model-select");
-        if (select) {
-          select.replaceChildren();
-          state.modelOptions = (models.models || []).filter(function (model) { return model.selectable === true && typeof model.id === "string"; });
-          state.defaultModel = models.default_model;
-          state.favoriteModels = new Set();
-          state.selectedNewSessionModel = state.modelOptions.some(function (item) { return item.id === models.default_model; }) ? models.default_model : null;
-        }
-        state.modelsLoaded = Boolean(state.modelOptions.length);
-        populateModelSelect();
-        populateEffortSelect();
-        var modelError = $("chat-model-error");
-        if (modelError) { modelError.hidden = !models.catalog_error; modelError.textContent = models.catalog_error || ""; }
-        return models;
-    });
+    var modelsRequest = loadModels(null);
     return Promise.allSettled([projectsRequest, modelsRequest]).then(function (results) {
       if (results[0].status === "rejected") {
         var error = results[0].reason;
@@ -872,7 +886,7 @@
     if (modelError) { modelError.hidden = true; modelError.textContent = ""; }
     state.sending = true; updateNewButton(); setComposerState();
     showStatus("Creating a session for the selected project…", "loading");
-    request("/chat/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, model: selectedModel, effort: selectedEffort, allow_unknown_cost: Boolean(needsCostConsent && costConsent && costConsent.checked) }) })
+    request("/chat/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, runtime: state.runtime, model: selectedModel, effort: selectedEffort, allow_unknown_cost: Boolean(needsCostConsent && costConsent && costConsent.checked) }) })
       .then(function (session) {
         if (!session || !session.session_id || session.project_id !== projectId ||
             session.requested_model !== selectedModel || (session.requested_effort || null) !== selectedEffort) {
@@ -1323,6 +1337,17 @@
   if (composer) composer.addEventListener("submit", function (event) { event.preventDefault(); sendMessage(); });
   var projectSelect = $("chat-project-select");
   if (projectSelect) projectSelect.addEventListener("change", function () { chooseProject(projectSelect.value); });
+  var runtimeSelect = $("chat-runtime-select"); if (runtimeSelect) runtimeSelect.addEventListener("change", function () {
+    state.runtime = runtimeSelect.value;
+    state.modelsLoaded = false; state.modelOptions = []; state.selectedNewSessionModel = null; state.selectedNewSessionEffort = null;
+    setComposerState(); showStatus("Checking runtime " + state.runtime + "…", "loading");
+    loadModels(state.runtime).then(function () {
+      showStatus("Runtime " + state.runtime + " ready. Select a project or reopen a conversation.", "connected");
+    }).catch(function (error) {
+      var node = $("chat-model-error"); if (node) { node.hidden = false; node.textContent = error.code ? error.code + ": " + error.message : error.message; }
+      showStatus("Runtime " + state.runtime + " unavailable: " + error.message, "error");
+    });
+  });
   var modelSelect = $("chat-model-select"); if (modelSelect) modelSelect.addEventListener("change", function () {
     state.selectedNewSessionModel = modelSelect.value || null;
     state.selectedNewSessionEffort = null; populateEffortSelect(); updateFavoriteButton(); setComposerState();

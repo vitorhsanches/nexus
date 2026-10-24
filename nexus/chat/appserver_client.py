@@ -2,12 +2,11 @@
 
 Scope (Nexus Chat backend, task T1 -- transport only):
 
-* One ``AppServerClient`` owns exactly one ``codex app-server --listen
-  stdio://`` subprocess, isolated via the existing, unmodified
-  ``nexus.process_env.codex_subprocess_env(profile="omniroute")`` -- the
-  same helper Manager/Worker/Reviewer already use in production. No new
-  isolation mechanism, no shared/background app-server daemon, no
-  ``remote-control``.
+* One client owns exactly one ``codex app-server --listen stdio://``
+  subprocess, isolated via ``nexus.process_env.codex_subprocess_env``.
+  ``AppServerClient`` retains the OmniRoute profile/provider defaults;
+  ``CodexNativeAppServerClient`` selects the isolated native profile and
+  local CLI authentication. No shared/background daemon or remote control.
 * Protocol method/field names below (``initialize``, ``thread/start``,
   ``thread/resume``, ``turn/start``, ``turn/interrupt``, the
   ``item/*/requestApproval`` server requests and their ``decision``
@@ -41,8 +40,9 @@ import subprocess
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from nexus.dispatchers.manager import _find_codex
 from nexus.failure_contract import sanitize_error_text
@@ -56,9 +56,8 @@ DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5
 MAX_BUFFERED_EVENTS = 200
 STDERR_TAIL_LIMIT = 4000
 
-# The one requirement this whole module exists to enforce: every thread
-# this client creates or resumes must confirm it is routed through
-# OmniRoute. Never relaxed, never made configurable.
+# Default retained for every existing caller. Alternative runtimes must opt in
+# explicitly through the constructor (see CodexNativeAppServerClient below).
 REQUIRED_MODEL_PROVIDER = "omniroute"
 
 # Default approval policy for interactive Chat threads. Deliberately NOT
@@ -111,7 +110,7 @@ def _default_process_launcher(command: list[str], *, env: dict, cwd: str) -> sub
 
 
 class AppServerClient:
-    """One isolated, OmniRoute-only ``codex app-server`` process.
+    """One isolated, provider-pinned ``codex app-server`` process.
 
     ``process_launcher`` and ``codex_path`` are injectable for tests
     (mirrors ``nexus.dispatchers.review``'s ``process_launcher``
@@ -132,6 +131,10 @@ class AppServerClient:
         on_notification: Callable[[dict], None] | None = None,
         on_server_request: Callable[[str, dict], dict | None] | None = None,
         process_launcher: Callable[..., subprocess.Popen] | None = None,
+        runtime_profile: str = "omniroute",
+        required_model_provider: str = REQUIRED_MODEL_PROVIDER,
+        include_auth: bool = False,
+        process_config_overrides: tuple[str, ...] = (),
     ) -> None:
         """``codex_home``, when given, pins the isolated CODEX_HOME to this
         exact directory instead of a fresh one-shot directory -- required
@@ -183,6 +186,10 @@ class AppServerClient:
         self._sensitive_values: tuple[str, ...] = ()
         self._on_server_request = on_server_request
         self._launcher = process_launcher or _default_process_launcher
+        self._runtime_profile = runtime_profile
+        self._required_model_provider = required_model_provider
+        self._include_auth = include_auth
+        self._process_config_overrides = tuple(process_config_overrides)
 
         self._process: subprocess.Popen | None = None
         self._stdout_thread: threading.Thread | None = None
@@ -206,10 +213,9 @@ class AppServerClient:
     def start(self) -> dict:
         """Launch the isolated app-server process and send ``initialize``.
 
-        Raises ``AppServerError`` if Codex cannot be located, the
-        OmniRoute profile is unavailable or invalid (``codex_subprocess_env``
-        already fails closed for that -- never silently falls back to the
-        user's own ``~/.codex``), or the process exits before responding.
+        Raises ``AppServerError`` if Codex cannot be located, the explicitly
+        selected profile is unavailable or invalid, or the process exits
+        before responding. Profiles never fall back to one another.
         """
         if self._process is not None:
             raise AppServerError(
@@ -227,7 +233,9 @@ class AppServerClient:
         try:
             env = with_scoped_git_trust(
                 codex_subprocess_env(
-                    profile="omniroute", worker_home=self._codex_home, include_auth=False
+                    profile=self._runtime_profile,
+                    worker_home=self._codex_home,
+                    include_auth=self._include_auth,
                 ),
                 self.repo,
             )
@@ -237,10 +245,17 @@ class AppServerClient:
             # repo path -- propagate as the one error this client exists to
             # surface explicitly, never retried and never downgraded to a
             # silent default-profile fallback.
-            raise AppServerError(
-                "OMNIROUTE_PROFILE_UNAVAILABLE",
-                sanitize_error_text(str(error)) or "OmniRoute profile unavailable.",
-            ) from error
+            code = (
+                "OMNIROUTE_PROFILE_UNAVAILABLE"
+                if self._runtime_profile == "omniroute"
+                else "CODEX_NATIVE_PROFILE_UNAVAILABLE"
+            )
+            label = (
+                "OmniRoute profile unavailable."
+                if self._runtime_profile == "omniroute"
+                else "Codex Native profile unavailable."
+            )
+            raise AppServerError(code, sanitize_error_text(str(error)) or label) from error
 
         # Record whichever CODEX_HOME was actually used (our own
         # self._codex_home when given, otherwise the fresh directory
@@ -255,6 +270,8 @@ class AppServerClient:
             command += ["-c", f'sandbox_mode="{self._sandbox_mode_override}"']
         if self._approval_policy_override is not None:
             command += ["-c", f'approval_policy="{self._approval_policy_override}"']
+        for override in self._process_config_overrides:
+            command += ["-c", override]
 
         try:
             process = self._launcher(command, env=env, cwd=self.repo)
@@ -272,15 +289,20 @@ class AppServerClient:
             self._stderr_thread.start()
 
         try:
-            return self._send_request(
+            result = self._send_request(
                 "initialize",
                 {
                     "clientInfo": {
                         "name": self._client_name,
+                        "title": "Nexus Chat",
                         "version": self._client_version,
                     }
                 },
             )
+            # Required by the official App-Server handshake. It is a JSON-RPC
+            # notification (no id and therefore no response to await).
+            self._write_line({"method": "initialized", "params": {}})
+            return result
         except AppServerError:
             self.stop()
             raise
@@ -344,7 +366,7 @@ class AppServerClient:
         ephemeral: bool = True,
         extra_params: dict | None = None,
     ) -> dict:
-        params = self._omniroute_params(extra_params)
+        params = self._provider_params(extra_params)
         params.update(
             {
                 "cwd": cwd or self.repo,
@@ -357,7 +379,7 @@ class AppServerClient:
             params["model"] = model
 
         result = self._send_request("thread/start", params)
-        self._assert_omniroute(result)
+        self._assert_provider(result)
         return result
 
     def thread_resume(
@@ -367,13 +389,13 @@ class AppServerClient:
         model: str | None = None,
         extra_params: dict | None = None,
     ) -> dict:
-        params = self._omniroute_params(extra_params)
+        params = self._provider_params(extra_params)
         params["threadId"] = thread_id
         if model is not None:
             params["model"] = model
 
         result = self._send_request("thread/resume", params)
-        self._assert_omniroute(result)
+        self._assert_provider(result)
         return result
 
     def model_list(self, *, cursor: str | None = None, limit: int = 100) -> dict:
@@ -382,6 +404,14 @@ class AppServerClient:
         if cursor is not None:
             params["cursor"] = cursor
         return self._redact_event(self._send_request("model/list", params))
+
+    def account_read(self, *, refresh_token: bool = False) -> dict:
+        """Read authentication state without returning it beyond this client.
+
+        Callers should project this to booleans/type only. The raw response can
+        contain account identity metadata and must never be sent to the browser.
+        """
+        return self._send_request("account/read", {"refreshToken": refresh_token})
 
     def thread_settings_update(self, thread_id: str, *, model: str | None = None, effort: str | None = None) -> dict:
         """Apply per-thread settings through the App-Server's settings protocol."""
@@ -566,34 +596,51 @@ class AppServerClient:
         except queue.Empty:
             return None
 
-    # -- internals: OmniRoute enforcement --------------------------------
+    # -- internals: explicit provider enforcement -------------------------
 
-    def _omniroute_params(self, extra_params: dict | None) -> dict:
+    def _provider_params(self, extra_params: dict | None) -> dict:
         params = dict(extra_params or {})
         requested = params.get("modelProvider")
-        if requested is not None and requested != REQUIRED_MODEL_PROVIDER:
-            raise AppServerError(
-                "OMNIROUTE_OVERRIDE_REJECTED",
-                f"Refusing modelProvider={requested!r}; Nexus Chat only "
-                f"ever starts/resumes threads with "
-                f"modelProvider={REQUIRED_MODEL_PROVIDER!r}.",
+        if requested is not None and requested != self._required_model_provider:
+            code = (
+                "OMNIROUTE_OVERRIDE_REJECTED"
+                if self._required_model_provider == REQUIRED_MODEL_PROVIDER
+                else "CODEX_NATIVE_OVERRIDE_REJECTED"
             )
-        params["modelProvider"] = REQUIRED_MODEL_PROVIDER
+            raise AppServerError(
+                code,
+                f"Refusing modelProvider={requested!r}; this runtime requires "
+                f"modelProvider={self._required_model_provider!r}.",
+            )
+        params["modelProvider"] = self._required_model_provider
         return params
 
-    def _assert_omniroute(self, result: dict) -> None:
+    def _assert_provider(self, result: dict) -> None:
         thread = result.get("thread") if isinstance(result, dict) else None
         provider = thread.get("modelProvider") if isinstance(thread, dict) else None
         if provider is None and isinstance(result, dict):
             provider = result.get("modelProvider")
-        if provider != REQUIRED_MODEL_PROVIDER:
-            raise AppServerError(
-                "OMNIROUTE_NOT_ENFORCED",
-                "App-Server did not confirm "
-                f"modelProvider={REQUIRED_MODEL_PROVIDER!r} (got "
-                f"{provider!r}); refusing this thread rather than risk a "
-                "silent ChatGPT OAuth fallback.",
+        if provider != self._required_model_provider:
+            code = (
+                "OMNIROUTE_NOT_ENFORCED"
+                if self._required_model_provider == REQUIRED_MODEL_PROVIDER
+                else "CODEX_NATIVE_NOT_ENFORCED"
             )
+            raise AppServerError(
+                code,
+                "App-Server did not confirm "
+                f"modelProvider={self._required_model_provider!r} (got {provider!r}); "
+                "refusing this thread rather than silently switch runtimes.",
+            )
+
+    def _omniroute_params(self, extra_params: dict | None) -> dict:
+        """Compatibility wrapper retained for tests/downstream extensions."""
+        return self._provider_params(extra_params)
+
+    def _assert_omniroute(self, result: dict) -> None:
+        """Compatibility wrapper retained for the OmniRoute adapter contract."""
+        self._assert_provider(result)
+
 
     # -- internals: JSON-RPC plumbing ------------------------------------
 
@@ -847,3 +894,31 @@ class AppServerClient:
         if method == _PERMISSIONS_REQUEST_METHOD:
             return {"permissions": []}
         return None
+
+
+class CodexNativeAppServerClient(AppServerClient):
+    """Official App-Server transport using the local Codex CLI login.
+
+    The provider is pinned twice: in process configuration and in every
+    thread/start or thread/resume request. The response must confirm `openai`;
+    there is no fallback to OmniRoute (or any other configured provider).
+    """
+
+    def __init__(self, repo: str | Path, **kwargs: Any) -> None:
+        forbidden = {
+            "runtime_profile", "required_model_provider", "include_auth",
+            "process_config_overrides",
+        }.intersection(kwargs)
+        if forbidden:
+            raise TypeError(f"Codex Native runtime options are fixed: {sorted(forbidden)!r}")
+        super().__init__(
+            repo,
+            runtime_profile="native",
+            required_model_provider="openai",
+            include_auth=True,
+            process_config_overrides=(
+                'model_provider="openai"',
+                'approval_policy="on-request"',
+            ),
+            **kwargs,
+        )

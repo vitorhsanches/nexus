@@ -30,7 +30,7 @@ import time
 
 import pytest
 
-from nexus.chat.appserver_client import AppServerClient, AppServerError
+from nexus.chat.appserver_client import AppServerClient, AppServerError, CodexNativeAppServerClient
 
 
 # -- fakes -------------------------------------------------------------
@@ -140,6 +140,7 @@ def _make_client(
     close_after=frozenset(),
     terminates_on_stdin_close: bool = True,
     request_timeout_seconds: float = 2,
+    client_class=AppServerClient,
     **client_kwargs,
 ):
     captured = {}
@@ -154,7 +155,7 @@ def _make_client(
         captured["server"] = server
         return process
 
-    client = AppServerClient(
+    client = client_class(
         r"C:\fake\repo",
         codex_path=r"C:\fake\codex.exe",
         process_launcher=launcher,
@@ -195,8 +196,9 @@ def test_request_response_correlation_matches_by_id():
     assert result["thread"]["id"] == "THREAD-1"
     sent = captured["server"].sent
     assert sent[0]["method"] == "initialize"
-    assert sent[1]["method"] == "thread/start"
-    assert sent[1]["id"] == 2
+    assert sent[1] == {"method": "initialized", "params": {}}
+    assert sent[2]["method"] == "thread/start"
+    assert sent[2]["id"] == 2
 
 
 def test_an_unmatched_stray_response_id_does_not_break_later_correlation():
@@ -488,7 +490,7 @@ def test_thread_start_sends_required_omniroute_fields():
     )
     client.start()
     client.thread_start(model="cc/claude-sonnet-5-low", cwd=r"C:\fake\repo")
-    sent = captured["server"].sent[1]
+    sent = captured["server"].sent[2]
     assert sent["method"] == "thread/start"
     assert sent["params"]["modelProvider"] == "omniroute"
     assert sent["params"]["model"] == "cc/claude-sonnet-5-low"
@@ -505,7 +507,7 @@ def test_thread_resume_sends_thread_id_and_omniroute():
     )
     client.start()
     result = client.thread_resume("THREAD-RESUMED")
-    sent = captured["server"].sent[1]
+    sent = captured["server"].sent[2]
     assert sent["method"] == "thread/resume"
     assert sent["params"]["threadId"] == "THREAD-RESUMED"
     assert sent["params"]["modelProvider"] == "omniroute"
@@ -518,9 +520,62 @@ def test_thread_resume_passes_explicit_selected_model():
     )
     client.start()
     client.thread_resume("THREAD-SELECTED", model="cx/gpt-5.6-sol-high")
-    sent = captured["server"].sent[1]
+    sent = captured["server"].sent[2]
     assert sent["params"]["model"] == "cx/gpt-5.6-sol-high"
     assert sent["params"]["modelProvider"] == "omniroute"
+
+
+def test_codex_native_pins_openai_profile_auth_and_provider(monkeypatch):
+    import nexus.chat.appserver_client as mod
+
+    env_calls = []
+    monkeypatch.setattr(
+        mod,
+        "codex_subprocess_env",
+        lambda profile, worker_home=None, include_auth=True: env_calls.append(
+            (profile, worker_home, include_auth)
+        ) or {"CODEX_HOME": worker_home or "native-home"},
+    )
+    client, captured = _make_client(
+        {
+            "initialize": [_ok(1, {})],
+            "account/read": [_ok(2, {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True})],
+            "thread/start": [_ok(3, _thread_result(provider="openai", model="gpt-test"))],
+        },
+        client_class=CodexNativeAppServerClient,
+    )
+    client.start()
+    account = client.account_read()
+    result = client.thread_start(model="gpt-test")
+
+    assert env_calls == [("native", None, True)]
+    assert account["account"]["type"] == "chatgpt"
+    assert result["modelProvider"] == "openai"
+    assert 'model_provider="openai"' in captured["command"]
+    assert captured["server"].sent[1] == {"method": "initialized", "params": {}}
+    assert captured["server"].sent[3]["params"]["modelProvider"] == "openai"
+
+
+def test_codex_native_rejects_cross_runtime_override_and_response():
+    client, _ = _make_client(
+        {"initialize": [_ok(1, {})]}, client_class=CodexNativeAppServerClient
+    )
+    client.start()
+    with pytest.raises(AppServerError) as excinfo:
+        client.thread_start(extra_params={"modelProvider": "omniroute"})
+    assert excinfo.value.code == "CODEX_NATIVE_OVERRIDE_REJECTED"
+
+    client2, _ = _make_client(
+        {
+            "initialize": [_ok(1, {})],
+            "thread/start": [_ok(2, _thread_result(provider="omniroute"))],
+        },
+        client_class=CodexNativeAppServerClient,
+    )
+    client2.start()
+    with pytest.raises(AppServerError) as response_error:
+        client2.thread_start()
+    assert response_error.value.code == "CODEX_NATIVE_NOT_ENFORCED"
 
 
 def test_model_list_and_thread_effort_settings_use_appserver_protocol():
@@ -532,7 +587,7 @@ def test_model_list_and_thread_effort_settings_use_appserver_protocol():
     client.start()
     models = client.model_list()
     client.thread_settings_update("T1", model="cx/gpt-5.6-sol", effort="high")
-    model_request, effort_request = captured["server"].sent[1:]
+    model_request, effort_request = captured["server"].sent[2:]
     assert model_request["method"] == "model/list"
     assert model_request["params"] == {"limit": 100, "includeHidden": False}
     assert models["data"][0]["supportedReasoningEfforts"][0]["reasoningEffort"] == "high"
@@ -552,7 +607,7 @@ def test_thread_history_wrappers_preserve_opaque_cursor_and_redact_response():
     items = client.thread_items_list("THREAD-1", cursor=cursor, limit=17, turn_id="TURN-1")
     turns = client.thread_turns_list("THREAD-1", cursor="turn-cursor", limit=9, sort_direction="asc")
 
-    item_request, turn_request = captured["server"].sent[1:]
+    item_request, turn_request = captured["server"].sent[2:]
     assert item_request["method"] == "thread/items/list"
     assert item_request["params"] == {
         "threadId": "THREAD-1", "cursor": cursor, "limit": 17,
@@ -870,7 +925,7 @@ def test_turn_interrupt_sends_both_thread_and_turn_id():
     )
     client.start()
     client.turn_interrupt("THREAD-1", "CODEX-TURN-1")
-    sent = captured["server"].sent[1]
+    sent = captured["server"].sent[2]
     assert sent["method"] == "turn/interrupt"
     assert sent["params"]["threadId"] == "THREAD-1"
     assert sent["params"]["turnId"] == "CODEX-TURN-1"

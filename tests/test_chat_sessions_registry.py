@@ -67,6 +67,7 @@ def test_create_and_get_session(isolated_registry):
     assert row["project_id"] == "demo"
     assert row["workspace_path"] == workspace_path
     assert row["status"] == "CREATED"
+    assert row["runtime"] == "omniroute"
     assert row["codex_thread_id"] is None
 
 
@@ -95,6 +96,7 @@ def test_old_chat_sessions_table_gets_nullable_requested_model_column(isolated_r
     row = chat_sessions.get_session("OLD")
     assert row["requested_model"] is None
     assert row["requested_effort"] is None
+    assert row["runtime"] == "omniroute"
 
 
 def test_list_sessions_filters_by_project(isolated_registry):

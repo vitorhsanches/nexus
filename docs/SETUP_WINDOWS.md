@@ -6,7 +6,8 @@
 - Python 3.10 or newer.
 - Node.js for the frontend checks.
 - Codex CLI available to Nexus for Codex App-Server and worker execution.
-- OmniRoute installed and configured locally when model-backed features are needed.
+- OmniRoute installed and configured locally only when the `omniroute` runtime is selected.
+- A local `codex login` when the `codex-native` Chat runtime is selected.
 
 Nexus does not include Codex or OmniRoute credentials. Sign in and configure
 those tools separately on each computer; do not copy authentication files from
@@ -46,10 +47,19 @@ From the repository root:
 
     .\scripts\start-nexus.ps1
 
-The launcher expects .venv to exist, checks the local OmniRoute service, then
-starts the Nexus Control Center. Codex CLI/App-Server calls are launched by
-Nexus as needed. Start or configure OmniRoute locally before using model-backed
-features.
+The launcher expects `.venv` and Codex CLI to exist. Its default Chat runtime
+remains OmniRoute. To start read-only Chat with the already authenticated local
+Codex CLI and without installing, probing, or starting OmniRoute:
+
+    .\scripts\start-nexus.ps1 -ChatRuntime codex-native
+
+The two modes are explicit and never fall back to one another. Codex Native
+checks `codex login status`; Nexus does not ask for, log, or send tokens to the
+browser. Development execution remains separately disabled unless explicitly
+enabled as described below.
+
+See [Codex Native runtime](CODEX_NATIVE_RUNTIME.md) for architecture and the
+operator-authorized real smoke procedure.
 
 The SQLite database and runtime logs are created locally under Nexus storage
 or the Windows local application data directory. They are not required for a

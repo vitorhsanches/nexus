@@ -20,16 +20,27 @@ caller-supplied parameter, and not merely a frontend convention.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
-import uuid
-import os
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from nexus.chat.appserver_client import AppServerClient, AppServerError
+from nexus.chat.appserver_client import (
+    AppServerClient,
+    AppServerError,
+    CodexNativeAppServerClient,
+)
+from nexus.chat.runtime import (
+    CODEX_NATIVE_RUNTIME,
+    OMNIROUTE_RUNTIME,
+    assert_native_authenticated,
+    get_runtime,
+    public_runtime_catalog,
+)
 from nexus.failure_contract import sanitize_error_text
 from nexus.registry import chat_sessions
 from nexus.registry.projects import get_project
@@ -51,6 +62,7 @@ HISTORY_MAX_TURN_PAGES = 100
 DEFAULT_CHAT_MODEL = "cx/gpt-5.6-sol"
 _model_catalog_lock = threading.Lock()
 _model_catalog_cache: tuple[float, list[dict]] | None = None
+_native_model_catalog_cache: tuple[float, list[dict], str] | None = None
 
 
 def _chat_turn_timeout_seconds() -> int:
@@ -168,17 +180,108 @@ def _model_catalog(*, refresh: bool = False) -> list[dict]:
         return [dict(item) for item in rows]
 
 
-def list_models(*, refresh: bool = False) -> dict:
+def _native_model_catalog(*, refresh: bool = False) -> tuple[list[dict], str]:
+    """Discover official Codex models after validating local CLI auth.
+
+    This performs only `initialize`, `account/read`, and paginated
+    `model/list`; it never starts a thread or invokes a model.
+    """
+    global _native_model_catalog_cache
+    with _model_catalog_lock:
+        if not refresh and _native_model_catalog_cache and _native_model_catalog_cache[0] > time.monotonic():
+            return ([dict(item) for item in _native_model_catalog_cache[1]], _native_model_catalog_cache[2])
+        client = CodexNativeAppServerClient(str(Path.cwd()), sandbox_mode_override=CHAT_SANDBOX)
+        try:
+            client.start()
+            auth_type = assert_native_authenticated(client)
+            rows: list[dict] = []
+            cursor = None
+            seen_cursors: set[str] = set()
+            for _page in range(10):
+                response = client.model_list(cursor=cursor, limit=100)
+                entries = response.get("data") if isinstance(response, dict) else None
+                if not isinstance(entries, list):
+                    raise AppServerError("MODEL_CATALOG_UNAVAILABLE", "Codex returned an unreadable model catalog.")
+                for entry in entries:
+                    if not isinstance(entry, dict) or entry.get("hidden") is True:
+                        continue
+                    model_id = entry.get("id") or entry.get("model")
+                    if not isinstance(model_id, str) or not model_id:
+                        continue
+                    effort_rows = entry.get("supportedReasoningEfforts") or []
+                    efforts = []
+                    if isinstance(effort_rows, list):
+                        for effort_row in effort_rows:
+                            value = effort_row.get("reasoningEffort") if isinstance(effort_row, dict) else effort_row
+                            if isinstance(value, str) and value not in efforts:
+                                efforts.append(value)
+                    default_effort = entry.get("defaultReasoningEffort")
+                    if not isinstance(default_effort, str) or default_effort not in efforts:
+                        default_effort = None
+                    rows.append({
+                        "id": model_id,
+                        "name": str(entry.get("displayName") or model_id),
+                        "provider": "openai",
+                        "selectable": True,
+                        "availability": "codex-cli-listed-unverified",
+                        "reason": "Advertised by the authenticated local Codex CLI; inference has not been run.",
+                        "cost_status": "unknown",
+                        "supported_efforts": efforts,
+                        "default_effort": default_effort,
+                        "appserver_compatible": True,
+                        "is_default": entry.get("isDefault") is True,
+                    })
+                next_cursor = response.get("nextCursor")
+                if not next_cursor:
+                    break
+                if not isinstance(next_cursor, str) or next_cursor in seen_cursors:
+                    raise AppServerError("MODEL_CATALOG_UNAVAILABLE", "Codex returned an invalid model cursor.")
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+            _native_model_catalog_cache = (time.monotonic() + 30, rows, auth_type)
+            return ([dict(item) for item in rows], auth_type)
+        finally:
+            client.stop()
+
+
+def list_runtimes() -> dict:
     try:
-        models = _model_catalog(refresh=refresh)
+        return public_runtime_catalog()
+    except AppServerError as error:
+        raise ChatError(error.code, str(error), http_status=500) from error
+
+
+def list_models(*, refresh: bool = False, runtime: str | None = None) -> dict:
+    try:
+        runtime_id = get_runtime(runtime).runtime_id
+    except AppServerError as error:
+        return {"models": [], "default_model": None, "catalog_error": str(error), "runtime": runtime}
+    auth_type = None
+    try:
+        if runtime_id == CODEX_NATIVE_RUNTIME:
+            models, auth_type = _native_model_catalog(refresh=refresh)
+        else:
+            models = _model_catalog(refresh=refresh)
         error = None
-    except Exception as exc:
+    except AppServerError as exc:
+        models = []
+        error = f"{exc.code}: {exc}"
+    except Exception:
         models = []
         error = "Model discovery is unavailable. Existing sessions remain accessible; new sessions are disabled."
+    if runtime_id == CODEX_NATIVE_RUNTIME:
+        default = next((item["id"] for item in models if item.get("is_default")), None)
+        if default is None and models:
+            default = models[0]["id"]
+    else:
+        default = DEFAULT_CHAT_MODEL if any(item["id"] == DEFAULT_CHAT_MODEL for item in models) else None
     return {
         "models": models,
-        "default_model": DEFAULT_CHAT_MODEL if any(item["id"] == DEFAULT_CHAT_MODEL for item in models) else None,
+        "default_model": default,
         "catalog_error": error,
+        "runtime": runtime_id,
+        "authenticated": auth_type is not None if runtime_id == CODEX_NATIVE_RUNTIME else None,
+        "auth_type": auth_type,
     }
 
 
@@ -250,6 +353,7 @@ def _session_dict(row) -> dict:
         "requested_model": row["requested_model"] if "requested_model" in row.keys() else None,
         "requested_effort": row["requested_effort"] if "requested_effort" in row.keys() else None,
         "provider": row["provider"],
+        "runtime": row["runtime"] if "runtime" in row.keys() and row["runtime"] else OMNIROUTE_RUNTIME,
         "status": row["status"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -302,18 +406,44 @@ def _validate_project(project_id: str) -> str:
     return workspace_path
 
 
-def create_session(project_id: str, model: str = DEFAULT_CHAT_MODEL, effort: str | None = None, allow_unknown_cost: bool = False) -> dict:
-    _require_chat_provider(model)
-    catalog = {item["id"]: item for item in _model_catalog()}
+def create_session(
+    project_id: str,
+    model: str | None = None,
+    effort: str | None = None,
+    allow_unknown_cost: bool = False,
+    runtime: str | None = None,
+) -> dict:
+    try:
+        runtime_id = get_runtime(runtime).runtime_id
+    except AppServerError as error:
+        raise ChatError(error.code, str(error), http_status=422) from error
+    if runtime_id == OMNIROUTE_RUNTIME:
+        model = model or DEFAULT_CHAT_MODEL
+        _require_chat_provider(model)
+        catalog_rows = _model_catalog()
+    else:
+        try:
+            catalog_rows, _auth_type = _native_model_catalog()
+        except AppServerError as error:
+            status = 409 if error.code == "CODEX_AUTH_UNAVAILABLE" else 503
+            raise ChatError(error.code, str(error), http_status=status) from error
+        if model is None:
+            model = next((item["id"] for item in catalog_rows if item.get("is_default")), None)
+            if model is None and catalog_rows:
+                model = catalog_rows[0]["id"]
+        if model is None:
+            raise ChatError("MODEL_CATALOG_EMPTY", "Codex CLI reported no selectable models.", http_status=503)
+    catalog = {item["id"]: item for item in catalog_rows}
     selected = catalog.get(model)
     if selected is None:
-        raise ChatError("MODEL_NOT_ALLOWED", "The selected Chat model is not currently advertised by OmniRoute.", http_status=422)
+        source = "OmniRoute" if runtime_id == OMNIROUTE_RUNTIME else "the local Codex CLI"
+        raise ChatError("MODEL_NOT_ALLOWED", f"The selected Chat model is not currently advertised by {source}.", http_status=422)
     if selected["cost_status"] == "unknown" and not allow_unknown_cost:
         raise ChatError("MODEL_COST_CONFIRMATION_REQUIRED", "Route cost is unknown. Explicitly confirm before creating a session.", http_status=422)
     if effort is not None and effort not in selected["supported_efforts"]:
         raise ChatError("EFFORT_NOT_SUPPORTED", "The selected reasoning effort is not supported by this model.", http_status=422)
     workspace_path = _validate_project(project_id)
-    session_id = chat_sessions.create_session(project_id, workspace_path, model, effort)
+    session_id = chat_sessions.create_session(project_id, workspace_path, model, effort, runtime=runtime_id)
     return _session_dict(chat_sessions.get_session(session_id))
 
 
@@ -324,6 +454,29 @@ def _require_chat_provider(model: str) -> None:
         require_connected_route(model)
     except DevServiceError as error:
         raise ChatError(error.code, str(error), http_status=error.http_status) from error
+
+
+def _session_runtime(row) -> str:
+    runtime_id = row["runtime"] if "runtime" in row.keys() and row["runtime"] else OMNIROUTE_RUNTIME
+    try:
+        return get_runtime(runtime_id).runtime_id
+    except AppServerError as error:
+        raise ChatError(error.code, str(error), http_status=409) from error
+
+
+def _require_session_runtime(row) -> str:
+    runtime_id = _session_runtime(row)
+    if runtime_id == OMNIROUTE_RUNTIME:
+        _require_chat_provider(row["requested_model"] or "")
+    return runtime_id
+
+
+def _new_runtime_client(runtime_id: str, workspace_path: str, **kwargs):
+    if runtime_id == OMNIROUTE_RUNTIME:
+        return AppServerClient(workspace_path, **kwargs)
+    if runtime_id == CODEX_NATIVE_RUNTIME:
+        return CodexNativeAppServerClient(workspace_path, **kwargs)
+    raise ChatError("CHAT_RUNTIME_NOT_SUPPORTED", f"Unsupported Chat runtime {runtime_id!r}.", http_status=409)
 
 
 def _get_session_row(session_id: str):
@@ -541,13 +694,17 @@ def get_history(
             raise ChatError("HISTORY_UNAVAILABLE", "This session has turns but no readable Codex thread.", http_status=409)
         return {"session_id": session_id, "items": [], "turns": [], "next_cursor": None, "source": "codex_thread"}
 
-    client = AppServerClient(
+    runtime_id = _require_session_runtime(session_row)
+    client = _new_runtime_client(
+        runtime_id,
         workspace_path,
         codex_home=session_row["codex_home"],
         sandbox_mode_override=CHAT_SANDBOX,
     )
     try:
         client.start()
+        if runtime_id == CODEX_NATIVE_RUNTIME:
+            assert_native_authenticated(client)
         _validated_session_workspace(_get_session_row(session_id))
         try:
             client.thread_resume(codex_thread_id, model=session_row["requested_model"])
@@ -614,7 +771,7 @@ def list_sessions(project_id: str | None = None) -> list[dict]:
 def send_turn(session_id: str, text: str, *, idempotency_key: str | None = None) -> dict:
     session_row = _get_session_row(session_id)
     _validated_session_workspace(session_row)
-    _require_chat_provider(session_row["requested_model"] or "")
+    _require_session_runtime(session_row)
 
     if idempotency_key is None:
         idempotency_key = uuid.uuid4().hex
@@ -712,8 +869,9 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
         turn_timeout_seconds = _chat_turn_timeout_seconds()
         session_row = _get_session_row(session_id)
         workspace_path = _validated_session_workspace(session_row)
-        _require_chat_provider(session_row["requested_model"] or "")
-        client = AppServerClient(
+        runtime_id = _require_session_runtime(session_row)
+        client = _new_runtime_client(
+            runtime_id,
             workspace_path,
             codex_home=session_row["codex_home"],
             # The profile is shared with writable orchestration clients;
@@ -723,6 +881,8 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
         )
         active.client = client
         client.start()
+        if runtime_id == CODEX_NATIVE_RUNTIME:
+            assert_native_authenticated(client)
         _validated_session_workspace(_get_session_row(session_id))
 
         if session_row["codex_thread_id"]:

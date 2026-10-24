@@ -228,6 +228,7 @@ def _patch_client(monkeypatch):
         {"id": "cc/claude-sonnet-5-low", "name": "Claude", "selectable": True, "availability": "catalog-compatible-unverified", "reason": "test catalog", "cost_status": "free", "supported_efforts": ["low"], "default_effort": "low"},
     ]
     monkeypatch.setattr(service, "_model_catalog_cache", (time.monotonic() + 60, test_catalog))
+    monkeypatch.setattr(service, "_native_model_catalog_cache", None)
     # Defensive fallback only: the pre-seeded cache above is what every test in
     # this file relies on, but a background turn-processing thread left running
     # past a prior test's teardown can race in and overwrite/expire it. Without
@@ -288,6 +289,66 @@ def test_create_session_explicit_model_and_rejects_unknown(isolated_registry):
     with pytest.raises(service.ChatError) as excinfo:
         service.create_session("demo", "unapproved/model")
     assert excinfo.value.code == "MODEL_NOT_ALLOWED"
+
+
+def test_codex_native_session_uses_local_runtime_without_omniroute_gate(isolated_registry, monkeypatch):
+    _register_project(isolated_registry)
+
+    class FakeNativeClient(FakeAppServerClient):
+        def account_read(self, *, refresh_token=False):
+            return {"account": {"type": "chatgpt", "email": "must-not-leak@example.test"}, "requiresOpenaiAuth": True}
+
+        def model_list(self, **_kwargs):
+            return {"data": [{
+                "id": "gpt-native-test", "displayName": "Native Test", "isDefault": True,
+                "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
+                "defaultReasoningEffort": "low",
+            }], "nextCursor": None}
+
+        def thread_start(self, **kwargs):
+            self.thread_start_kwargs = kwargs
+            FakeAppServerClient.start_models.append(kwargs.get("model"))
+            return {"thread": {"id": "NATIVE-THREAD", "modelProvider": "openai"},
+                    "model": kwargs.get("model"), "modelProvider": "openai"}
+
+        def thread_resume(self, thread_id, **kwargs):
+            self.resumed_thread_id = thread_id
+            FakeAppServerClient.resume_models.append(kwargs.get("model"))
+            return {"thread": {"id": thread_id, "modelProvider": "openai"},
+                    "model": kwargs.get("model"), "modelProvider": "openai",
+                    "reasoningEffort": FakeAppServerClient.reasoning_effort}
+
+    monkeypatch.setattr(service, "CodexNativeAppServerClient", FakeNativeClient)
+    monkeypatch.setattr(service, "_require_chat_provider", lambda _model: pytest.fail("OmniRoute gate must not run"))
+
+    catalog = service.list_models(runtime="codex-native")
+    assert catalog["authenticated"] is True
+    assert catalog["auth_type"] == "chatgpt"
+    assert "must-not-leak" not in repr(catalog)
+
+    session = service.create_session(
+        "demo", "gpt-native-test", "low", allow_unknown_cost=True, runtime="codex-native"
+    )
+    assert session["runtime"] == "codex-native"
+    turn = service.send_turn(session["session_id"], "hello native")
+    assert _wait_until(lambda: chat_sessions.get_turn(turn["turn_id"])["status"] == "COMPLETED")
+    persisted = chat_sessions.get_session(session["session_id"])
+    assert persisted["codex_thread_id"] == "NATIVE-THREAD"
+    assert persisted["provider"] == "openai"
+
+
+def test_codex_native_missing_login_is_clear_and_does_not_create_session(isolated_registry, monkeypatch):
+    _register_project(isolated_registry)
+
+    class SignedOutClient(FakeAppServerClient):
+        def account_read(self, *, refresh_token=False):
+            return {"account": None, "requiresOpenaiAuth": True}
+
+    monkeypatch.setattr(service, "CodexNativeAppServerClient", SignedOutClient)
+    with pytest.raises(service.ChatError) as excinfo:
+        service.create_session("demo", "gpt-native-test", runtime="codex-native")
+    assert excinfo.value.code == "CODEX_AUTH_UNAVAILABLE"
+    assert chat_sessions.list_sessions() == []
 
 
 def test_model_catalog_is_restricted_and_marks_operational_status_unverified():
