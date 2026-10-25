@@ -9,6 +9,7 @@
     agents: [],
     runtime: null,
     routing: null,
+    routingQueried: false,
     featuredProgram: null,
     programDetail: null,
     featuredRun: null,
@@ -212,6 +213,7 @@
 
   function loadRouting() {
     if (overviewPollingSuspended()) return;
+    state.routingQueried = true;
     fetchJSON("/api/routing/status").then(function (payload) {
       state.routing = payload;
       renderRuntime();
@@ -244,12 +246,6 @@
     var blockedRuns = state.runs.filter(function (r) {
       return normalized(r.display_status || r.status) === "BLOCKED";
     }).length;
-    var providerNames = {};
-    if (state.routing) {
-      (state.routing.routes || []).forEach(function (route) {
-        if (route.callable) providerNames[route.provider] = true;
-      });
-    }
     text("kpi-programs", state.availability.programs ? activePrograms : "UNKNOWN");
     text("kpi-tasks", state.availability.agents ? runningTasks : "UNKNOWN");
     text("kpi-review", state.availability.agents ? waitingReview : "UNKNOWN");
@@ -259,7 +255,7 @@
     var nativeReady = state.runtime && state.runtime.runtimes
       ? Object.values(state.runtime.runtimes).filter(function (runtime) { return runtime.status === "READY"; }).length
       : null;
-    text("kpi-providers", state.routing ? Object.keys(providerNames).length : nativeReady === null ? "UNKNOWN" : nativeReady);
+    text("kpi-native-agents", nativeReady === null ? "UNKNOWN" : nativeReady);
   }
 
   function renderProgram() {
@@ -323,8 +319,8 @@
 
   function stateKind(value) {
     var status = normalized(value);
-    if (["ONLINE", "HEALTHY", "AVAILABLE", "YES"].indexOf(status) !== -1) return "good";
-    if (["AUTH REQUIRED", "UNKNOWN", "CONFIGURED", "DEGRADED"].indexOf(status) !== -1) return "warn";
+    if (["ONLINE", "HEALTHY", "AVAILABLE", "YES", "READY"].indexOf(status) !== -1) return "good";
+    if (["AUTH REQUIRED", "UNKNOWN", "CHECKING", "UNVERIFIED", "CONFIGURED", "DEGRADED", "NOT QUERIED"].indexOf(status) !== -1) return "warn";
     return "bad";
   }
 
@@ -344,9 +340,9 @@
     var native = state.runtime && state.runtime.runtimes;
     var codex = native && native.codex_native;
     var claude = native && native.claude_native;
-    var nativeReady = state.runtime && state.runtime.native_ready;
+    var nativeStatus = state.runtime && state.runtime.native_status || "UNKNOWN";
     var badge = $("overview-runtime-badge");
-    runtimeValue("runtime-native", nativeReady === true ? "READY" : nativeReady === false ? "DEGRADED" : "UNKNOWN");
+    runtimeValue("runtime-native", nativeStatus);
     runtimeValue("runtime-codex-native", codex ? codex.status : "UNKNOWN");
     runtimeValue("runtime-claude-native", claude ? claude.status : "UNKNOWN");
 
@@ -362,9 +358,8 @@
       runtimeValue("runtime-providers", routeRuntime.providers);
       runtimeValue("runtime-routes", state.routing.summary.callable_routes);
     }
-    var display = nativeReady === true ? "READY" : nativeReady === false ? "AUTH REQUIRED" : "UNKNOWN";
-    badge.textContent = "NATIVE " + display;
-    badge.className = "ops-badge " + (nativeReady === true ? "online" : nativeReady === false ? "degraded" : "neutral");
+    badge.textContent = "NATIVE " + nativeStatus.replaceAll("_", " ");
+    badge.className = "ops-badge " + (nativeStatus === "READY" ? "online" : nativeStatus === "UNKNOWN" || nativeStatus === "CHECKING" ? "neutral" : "degraded");
   }
 
   function cssToken(value) {
@@ -376,11 +371,13 @@
     body.innerHTML = "";
     if (!state.routing) {
       var unavailable = node("tr");
-      var cell = node("td", "ops-empty", "Routing telemetry not queried. Open Models & Routing to inspect OmniRoute.");
+      var cell = node("td", "ops-empty", state.routingQueried
+        ? "OmniRoute routing telemetry is unavailable."
+        : "Routing telemetry not queried. Open Models & Routing to inspect OmniRoute.");
       cell.colSpan = 4;
       unavailable.appendChild(cell);
       body.appendChild(unavailable);
-      text("routing-count", "UNKNOWN");
+      text("routing-count", state.routingQueried ? "UNAVAILABLE" : "NOT QUERIED");
       return;
     }
     var routes = state.routing.routes || [];
@@ -577,7 +574,9 @@
     var available = !!(state.routing && state.routing.summary && state.routing.summary.actions_available);
     runButton.dataset.runtimeDisabled = available ? "false" : "true";
     runButton.disabled = !available;
-    reason.textContent = available ? "" : "Disabled: no callable provider route is currently observed.";
+    reason.textContent = available ? "" : state.routingQueried
+      ? "Disabled: no callable OmniRoute provider route is currently observed."
+      : "Open Models & Routing to check OmniRoute routes before running a mission.";
   }
 
   function showOverview(targetId) {
@@ -684,6 +683,7 @@
   });
 
   window.NexusControlCenter = { refresh: loadOverview, refreshRouting: loadRouting, showOverview: showOverview };
+  gateActions();
   loadOverview();
   setInterval(loadOverview, 6000);
 })();
