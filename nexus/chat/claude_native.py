@@ -37,16 +37,22 @@ from nexus.process_timeout import kill_process_tree
 
 BACKEND_CLAUDE_NATIVE = "claude_native"
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
-# Development (P4.1B): file edits gated by a human decision through the
-# SDK-host permission channel. Shell tools are NOT offered: Bash/PowerShell
-# have no filesystem confinement on Windows (neither the worktree cwd nor a
-# human approval is a sandbox), so arbitrary commands are blocked outright.
-# Tests run through Nexus' operator-owned verification profiles
-# (nexus.dev.test_profiles), never through a command the model composes.
+# Development (P4.1B): edits are gated by a human decision through the
+# SDK-host permission channel. Native reads/searches are intentionally not
+# offered: Claude Code can satisfy Read/Grep/Glob from its own permissions
+# without asking the SDK host, so Nexus cannot reliably inspect their paths
+# before file contents reach the model. Shell tools are also NOT offered:
+# Bash/PowerShell have no filesystem confinement on Windows (neither the
+# worktree cwd nor a human approval is a sandbox), so arbitrary commands are
+# blocked outright. Tests run through Nexus' operator-owned verification
+# profiles (nexus.dev.test_profiles), never through a command the model composes.
 WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 COMMAND_TOOLS = frozenset({"Bash", "PowerShell"})
 PATH_READ_TOOLS = frozenset({"Read", "Grep", "Glob"})
-DEV_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write")
+# Development must not expose native readers/searchers: the SDK permission
+# callback is not guaranteed to run for every read, so path validation there
+# cannot protect file contents before Claude sees them.
+DEV_TOOLS = ("Edit", "Write")
 MODEL_ALIASES = ("default", "sonnet", "opus", "haiku")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 STATUS_TIMEOUT_SECONDS = 20
@@ -228,9 +234,10 @@ def build_command(executable: str, *, session_id: str, resume: bool, model: str 
                   development: bool = False) -> list[str]:
     """The only command lines Nexus ever uses for Claude Native.
 
-    Chat is read-only (prompts denied automatically). Development keeps the
-    same restricted profile but names the editing and shell tools and routes
-    every permission prompt to Nexus (the SDK host) for a human decision.
+    Chat is read-only (prompts denied automatically). Development exposes
+    only editing tools and routes permission prompts to Nexus (the SDK host)
+    for a human decision. Native read/search tools are excluded because their
+    executions are not guaranteed to prompt the host.
     """
     if not _SESSION_ID_RE.match(session_id or ""):
         raise ClaudeNativeError("INVALID_SESSION_ID", "Claude session id must be a lowercase UUID.")

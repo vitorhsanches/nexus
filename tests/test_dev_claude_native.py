@@ -41,7 +41,7 @@ def test_development_command_routes_every_prompt_to_nexus_and_never_bypasses():
     command = build_command("claude.exe", session_id=SESSION, resume=False, model="claude-opus-4-8", effort="high",
                             development=True)
     assert command[command.index("--input-format") + 1] == "stream-json"
-    assert command[command.index("--tools") + 1] == "Read,Grep,Glob,Edit,Write"
+    assert command[command.index("--tools") + 1] == "Edit,Write"
     assert "Bash" not in command and "PowerShell" not in command, "no shell tool is offered on Windows"
     assert command[command.index("--permission-mode") + 1] == "manual"
     assert command[command.index("--permission-prompt-tool") + 1] == "stdio"
@@ -220,6 +220,12 @@ def test_a_session_that_exposes_a_shell_tool_is_refused(tmp_path):
     ("Read", {"file_path": "config/.aws/credentials"}),
     ("Read", {}),
     ("Grep", {"pattern": "x", "path": ".."}),
+    ("Grep", {"pattern": "AWS_SECRET_ACCESS_KEY"}),
+    ("Grep", {"pattern": "AWS_SECRET_ACCESS_KEY", "path": "."}),
+    ("Grep", {"pattern": "AWS_SECRET_ACCESS_KEY", "path": "config"}),
+    ("Glob", {"pattern": "**/*"}),
+    ("Glob", {"pattern": "**/.env*"}),
+    ("Glob", {"pattern": "**/*", "path": "."}),
     ("Glob", {"pattern": "../**/*.py"}),
     ("Glob", {"pattern": "C:\\Users\\**\\*"}),
     ("Edit", {"file_path": ".git\\config", "old_string": "a", "new_string": "b"}),
@@ -280,14 +286,24 @@ def test_writes_outside_the_worktree_are_denied_before_reaching_a_human(tmp_path
     assert "confined to the session worktree" in responses[0]["response"]["message"]
 
 
-def test_writes_inside_the_worktree_go_to_the_human(tmp_path):
-    process = FakeHostProcess([_init(), _can_use("r1", "Edit", {"file_path": str(tmp_path / "calc.py"), "old_string": "a", "new_string": "b"}),
+@pytest.mark.parametrize(("tool", "tool_input"), [
+    ("Edit", {"file_path": "calc.py", "old_string": "a", "new_string": "b"}),
+    ("Edit", {"file_path": "", "old_string": "a", "new_string": "b"}),
+    ("Write", {"file_path": "calc.py", "content": "new file"}),
+    ("Write", {"file_path": "", "content": "new file"}),
+])
+def test_supported_cli_edit_and_write_path_forms_go_to_the_human(tmp_path, tool, tool_input):
+    tool_input = dict(tool_input)
+    if not tool_input["file_path"]:
+        tool_input["file_path"] = str(tmp_path / "calc.py")
+    process = FakeHostProcess([_init(), _can_use("r1", tool, tool_input),
                                "WAIT", RESULT])
     asked = []
     turn = _turn(process, tmp_path, lambda *args: asked.append(args) or True)
     worker = threading.Thread(target=lambda: turn.run("x", timeout_seconds=30))
     worker.start()
     assert _wait_until(lambda: asked)
+    assert asked == [("r1", tool, tool_input)]
     turn.respond_server_request("r1", {"decision": "decline"})
     worker.join(timeout=5)
 
