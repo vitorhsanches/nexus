@@ -20,6 +20,8 @@ never passed.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -35,11 +37,28 @@ from nexus.process_timeout import kill_process_tree
 
 BACKEND_CLAUDE_NATIVE = "claude_native"
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
+# Development (P4.1B): edits are gated by a human decision through the
+# SDK-host permission channel. Native reads/searches are intentionally not
+# offered: Claude Code can satisfy Read/Grep/Glob from its own permissions
+# without asking the SDK host, so Nexus cannot reliably inspect their paths
+# before file contents reach the model. Shell tools are also NOT offered:
+# Bash/PowerShell have no filesystem confinement on Windows (neither the
+# worktree cwd nor a human approval is a sandbox), so arbitrary commands are
+# blocked outright. Tests run through Nexus' operator-owned verification
+# profiles (nexus.dev.test_profiles), never through a command the model composes.
+WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+COMMAND_TOOLS = frozenset({"Bash", "PowerShell"})
+PATH_READ_TOOLS = frozenset({"Read", "Grep", "Glob"})
+# Development must not expose native readers/searchers: the SDK permission
+# callback is not guaranteed to run for every read, so path validation there
+# cannot protect file contents before Claude sees them.
+DEV_TOOLS = ("Edit", "Write")
 MODEL_ALIASES = ("default", "sonnet", "opus", "haiku")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 STATUS_TIMEOUT_SECONDS = 20
 TOOL_TEXT_LIMIT = 2000
 
+_MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]{0,63}$")
 _SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SECRET_KEY_RE = re.compile(r"(?i)(?:api[_-]?key|token|secret|password|credential)")
 # Variables that would change who answers or where requests go: an enclosing
@@ -52,6 +71,27 @@ class ClaudeNativeError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def operation_digest(tool: str, tool_input: dict) -> str:
+    """Stable identity of one exact operation (tool + complete input).
+
+    The same digest is stored with the approval, shown to the human, echoed in
+    the decision and re-checked just before the input is released to Claude.
+    """
+    canonical = json.dumps({"tool": tool, "input": tool_input}, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _absolute_like(value: str) -> bool:
+    return value.startswith(("/", "\\", "~")) or bool(re.match(r"^[A-Za-z]:", value))
+
+
+def _sensitive_path(relative: str) -> bool:
+    from nexus.dev.worktree import _sensitive_review_path  # noqa: PLC0415 -- shared credential-path rules
+
+    return _sensitive_review_path(relative)
 
 
 def find_claude() -> str:
@@ -140,22 +180,90 @@ def cli_status(*, runner=subprocess.run) -> dict:
     return status
 
 
-def build_command(executable: str, *, session_id: str, resume: bool, model: str | None, effort: str | None) -> list[str]:
-    """The only command line Nexus ever uses for Claude Native Chat."""
+def _control_session_command(executable: str) -> list[str]:
+    return [
+        executable, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+        "--restricted", "--tools", ",".join(READ_ONLY_TOOLS), "--permission-prompts", "none",
+        "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence",
+    ]
+
+
+def discover_models(*, timeout_seconds: int = STATUS_TIMEOUT_SECONDS, launcher=None) -> list[dict]:
+    """Models offered to the signed-in account, from the CLI's own ``initialize``
+    control response. No user message is sent, so no inference happens."""
+    try:
+        process = (launcher or _default_launcher)(_control_session_command(find_claude()), env=claude_env(),
+                                                  cwd=os.environ.get("TEMP") or os.getcwd())
+    except OSError as error:
+        raise ClaudeNativeError("MODEL_DISCOVERY_FAILED", sanitize_error_text(str(error)) or "Claude Code could not start.") from error
+    timer = threading.Timer(timeout_seconds, lambda: kill_process_tree(process))
+    timer.daemon = True
+    timer.start()
+    try:
+        process.stdin.write(json.dumps({"type": "control_request", "request_id": "nexus-init",
+                                        "request": {"subtype": "initialize", "hooks": None}}) + "\n")
+        process.stdin.close()
+        for raw in process.stdout:
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue
+            response = (event.get("response") or {}) if isinstance(event, dict) and event.get("type") == "control_response" else {}
+            if response.get("request_id") != "nexus-init":
+                continue
+            if response.get("subtype") != "success":
+                raise ClaudeNativeError("MODEL_DISCOVERY_FAILED", "Claude Code refused the initialize request.")
+            models = []
+            for row in (response.get("response") or {}).get("models") or []:
+                value = row.get("value") if isinstance(row, dict) else None
+                if isinstance(value, str) and _MODEL_ID_RE.match(value):
+                    efforts = row.get("supportedEffortLevels") if isinstance(row.get("supportedEffortLevels"), list) else []
+                    models.append({"id": value, "name": str(row.get("displayName") or value),
+                                   "efforts": [item for item in efforts if item in EFFORTS]})
+            return models
+    except (OSError, ValueError) as error:
+        raise ClaudeNativeError("MODEL_DISCOVERY_FAILED", sanitize_error_text(str(error)) or "Model discovery failed.") from error
+    finally:
+        timer.cancel()
+        if process.poll() is None:
+            kill_process_tree(process)
+    raise ClaudeNativeError("MODEL_DISCOVERY_FAILED", "Claude Code did not answer the initialize request.")
+
+
+def build_command(executable: str, *, session_id: str, resume: bool, model: str | None, effort: str | None,
+                  development: bool = False) -> list[str]:
+    """The only command lines Nexus ever uses for Claude Native.
+
+    Chat is read-only (prompts denied automatically). Development exposes
+    only editing tools and routes permission prompts to Nexus (the SDK host)
+    for a human decision. Native read/search tools are excluded because their
+    executions are not guaranteed to prompt the host.
+    """
     if not _SESSION_ID_RE.match(session_id or ""):
         raise ClaudeNativeError("INVALID_SESSION_ID", "Claude session id must be a lowercase UUID.")
-    if model is not None and model not in MODEL_ALIASES:
-        raise ClaudeNativeError("MODEL_NOT_ALLOWED", "Unsupported Claude model alias.")
+    if model is not None and not _MODEL_ID_RE.match(model):
+        raise ClaudeNativeError("MODEL_NOT_ALLOWED", "Unsupported Claude model identifier.")
     if effort is not None and effort not in EFFORTS:
         raise ClaudeNativeError("EFFORT_NOT_SUPPORTED", "Unsupported Claude effort level.")
-    tools = ",".join(READ_ONLY_TOOLS)
-    command = [
-        executable, "-p",
-        "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-        "--restricted", "--tools", tools, "--allowedTools", tools,
-        "--permission-mode", "dontAsk", "--permission-prompts", "none",
-        "--strict-mcp-config", "--disable-slash-commands",
-    ]
+    if development:
+        command = [
+            executable, "-p",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+            "--restricted", "--tools", ",".join(DEV_TOOLS),
+            "--permission-mode", "manual",
+            "--permission-prompt-tool", "stdio", "--permission-prompts", "host",
+            "--strict-mcp-config", "--disable-slash-commands",
+        ]
+    else:
+        tools = ",".join(READ_ONLY_TOOLS)
+        command = [
+            executable, "-p",
+            "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+            "--restricted", "--tools", tools, "--allowedTools", tools,
+            "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--strict-mcp-config", "--disable-slash-commands",
+        ]
     command += ["--resume", session_id] if resume else ["--session-id", session_id]
     if model and model != "default":
         command += ["--model", model]
@@ -182,8 +290,16 @@ class ClaudeTurn:
 
     def __init__(self, cwd: str, *, session_id: str, resume: bool, model: str | None = None,
                  effort: str | None = None, on_event: Callable[[dict], None] | None = None,
-                 on_session: Callable[[str, str | None], None] | None = None, launcher=None) -> None:
+                 on_session: Callable[[str, str | None], None] | None = None, launcher=None,
+                 development: bool = False,
+                 on_permission: Callable[[str, str, dict], bool] | None = None) -> None:
         self.cwd = cwd
+        self.development = development
+        # Development only: returns True when it took ownership of answering
+        # the request later (respond_server_request), False to deny it now.
+        self._on_permission = on_permission
+        self._pending_inputs: dict[str, tuple[str, dict]] = {}
+        self._write_lock = threading.Lock()
         self.session_id = session_id
         self.resume = resume
         self.model = model
@@ -198,6 +314,7 @@ class ClaudeTurn:
         self.session_confirmed = False
         self._stderr: list[str] = []
         self._tool_names: dict[str, str] = {}
+        self._tool_inputs: dict[str, dict] = {}
 
     # -- public ---------------------------------------------------------
 
@@ -208,6 +325,29 @@ class ClaudeTurn:
         if process is not None and process.poll() is None:
             kill_process_tree(process)
         return {}
+
+    def respond_server_request(self, request_id, result: dict) -> None:
+        """Answer one permission request with the human decision.
+
+        ``accept`` allows exactly the input that was presented (sent back as
+        ``updatedInput``); anything else denies it.
+        """
+        pending = self._pending_inputs.pop(request_id, None)
+        if pending is None:
+            return
+        tool, tool_input, digest = pending
+        decision = result or {}
+        if decision.get("decision") == "accept":
+            # Execute only what was presented and approved: the approved digest
+            # must match the exact input held for this request.
+            approved = decision.get("operation_sha256")
+            if not isinstance(approved, str) or not hmac.compare_digest(approved, digest) \
+                    or operation_digest(tool, tool_input) != digest:
+                self._deny(request_id, "Denied by Nexus: the approval does not match the requested operation.")
+                return
+            self._answer(request_id, {"behavior": "allow", "updatedInput": tool_input})
+        else:
+            self._answer(request_id, {"behavior": "deny", "message": "Declined by the Nexus operator."})
 
     def stop(self) -> None:
         process = self._process
@@ -221,7 +361,7 @@ class ClaudeTurn:
     def run(self, prompt: str, *, timeout_seconds: int) -> str:
         executable = find_claude()
         command = build_command(executable, session_id=self.session_id, resume=self.resume,
-                                model=self.model, effort=self.effort)
+                                model=self.model, effort=self.effort, development=self.development)
         env = claude_env()
         self._secrets = _secrets(env)
         try:
@@ -238,8 +378,16 @@ class ClaudeTurn:
         try:
             try:
                 # The prompt goes through stdin, never through the command line.
-                process.stdin.write(prompt)
-                process.stdin.close()
+                if self.development:
+                    # SDK-host session: stdin stays open to answer permission
+                    # requests and is closed once the result arrives.
+                    self._send({"type": "control_request", "request_id": "nexus-init",
+                                "request": {"subtype": "initialize", "hooks": None}})
+                    self._send({"type": "user", "message": {"role": "user", "content": prompt},
+                                "parent_tool_use_id": None, "session_id": self.session_id})
+                else:
+                    process.stdin.write(prompt)
+                    process.stdin.close()
             except (OSError, ValueError):
                 pass
             result = self._consume(process)
@@ -261,6 +409,86 @@ class ClaudeTurn:
         return str(result.get("result") or "")
 
     # -- internals ----------------------------------------------------------
+
+    def _send(self, message: dict) -> None:
+        process = self._process
+        if process is None or process.stdin is None:
+            return
+        with self._write_lock:
+            try:
+                process.stdin.write(json.dumps(message) + "\n")
+                process.stdin.flush()
+            except (OSError, ValueError):
+                pass
+
+    def _answer(self, request_id, response: dict) -> None:
+        self._send({"type": "control_response",
+                    "response": {"subtype": "success", "request_id": request_id, "response": response}})
+
+    def _deny(self, request_id, message: str) -> None:
+        self._answer(request_id, {"behavior": "deny", "message": message})
+
+    def _unsafe_path(self, tool: str, tool_input: dict) -> str | None:
+        """Why a tool's target is refused, or None when it stays inside the worktree.
+
+        Fails closed: anything unresolvable, remote/device/stream-style, inside
+        ``.git`` or credential-like is refused before a human is asked.
+        """
+        if tool == "Glob":
+            pattern = tool_input.get("pattern")
+            if not isinstance(pattern, str) or _absolute_like(pattern) or ".." in re.split(r"[\\/]", pattern):
+                return "glob patterns must be relative to the session worktree"
+        target = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
+        if target is None and tool in {"Grep", "Glob"}:
+            return None  # searches default to the worktree
+        if not isinstance(target, str) or not target or "\0" in target:
+            return "a worktree path is required"
+        normalized = target.replace("\\", "/")
+        if normalized.startswith("//") or ":" in normalized[2:]:
+            return "network, device and stream paths are not allowed"
+        try:
+            root = os.path.realpath(self.cwd)
+            resolved = os.path.realpath(os.path.join(root, target))
+            inside = os.path.normcase(os.path.commonpath([root, resolved])) == os.path.normcase(root)
+        except (ValueError, OSError):
+            return "paths outside the session worktree are not allowed"
+        if not inside:
+            return "paths outside the session worktree are not allowed"
+        relative = os.path.relpath(resolved, root).replace("\\", "/")
+        if ".git" in {part.lower() for part in relative.split("/")}:
+            return "the Git metadata of the worktree is off limits"
+        if _sensitive_path(relative):
+            return "credential and secret files are off limits"
+        return None
+
+    def _on_control_request(self, request_id, request: dict) -> None:
+        if request.get("subtype") != "can_use_tool":
+            self._send({"type": "control_response", "response": {
+                "subtype": "error", "request_id": request_id, "error": "Unsupported request from Claude Code."}})
+            return
+        tool = request.get("tool_name")
+        tool_input = request.get("input") if isinstance(request.get("input"), dict) else {}
+        if tool in COMMAND_TOOLS:
+            self._deny(request_id, "Denied by Nexus: arbitrary commands are not available in Claude Native "
+                                   "Development; run tests through a Nexus verification profile.")
+            return
+        if not self.development or tool not in DEV_TOOLS:
+            self._deny(request_id, "Denied by Nexus: tool not allowed in this session.")
+            return
+        reason = self._unsafe_path(tool, tool_input)
+        if reason:
+            self._deny(request_id, f"Denied by Nexus: {reason}; access is confined to the session worktree.")
+            return
+        self._pending_inputs[request_id] = (tool, tool_input, operation_digest(tool, tool_input))
+        accepted = False
+        if self._on_permission is not None:
+            try:
+                accepted = bool(self._on_permission(request_id, tool, tool_input))
+            except Exception:
+                accepted = False
+        if not accepted:
+            self._pending_inputs.pop(request_id, None)
+            self._deny(request_id, "Denied by Nexus: no human approval channel.")
 
     def _timeout(self) -> None:
         self._timed_out = True
@@ -298,6 +526,9 @@ class ClaudeTurn:
             if not isinstance(event, dict):
                 continue
             kind = event.get("type")
+            if kind == "control_request":
+                self._on_control_request(event.get("request_id"), event.get("request") or {})
+                continue
             if kind == "system" and event.get("subtype") == "init":
                 self._on_init(event)
             elif kind == "stream_event":
@@ -311,6 +542,11 @@ class ClaudeTurn:
                 result = dict(event)
                 result["_error"] = last_error
                 self._on_result(result)
+                if self.development:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError):
+                        pass
         return result
 
     def _on_init(self, event: dict) -> None:
@@ -319,9 +555,10 @@ class ClaudeTurn:
             self.stop()
             raise ClaudeNativeError("SESSION_MISMATCH", "Claude Code started a different session than requested.")
         tools = event.get("tools") or []
-        if any(tool not in READ_ONLY_TOOLS for tool in tools):
+        allowed = DEV_TOOLS if self.development else READ_ONLY_TOOLS
+        if any(tool not in allowed for tool in tools):
             self.stop()
-            raise ClaudeNativeError("UNSAFE_TOOLS", "Claude Code exposed tools beyond the read-only allowlist.")
+            raise ClaudeNativeError("UNSAFE_TOOLS", "Claude Code exposed tools beyond the allowlist.")
         self.session_confirmed = True
         self.active_model = event.get("model") if isinstance(event.get("model"), str) else None
         if self._on_session is not None:
@@ -347,10 +584,8 @@ class ClaudeTurn:
             elif block.get("type") == "tool_use":
                 if isinstance(block.get("id"), str) and isinstance(block.get("name"), str):
                     self._tool_names[block["id"]] = block["name"]
-                arguments = json.dumps(block.get("input") or {}, ensure_ascii=False)[:TOOL_TEXT_LIMIT]
-                self._emit({"method": "item/started", "params": {"item": {
-                    "type": "dynamicToolCall", "id": block.get("id"), "tool": block.get("name"),
-                    "status": "inProgress", "arguments": arguments}}})
+                    self._tool_inputs[block["id"]] = block.get("input") if isinstance(block.get("input"), dict) else {}
+                self._emit({"method": "item/started", "params": {"item": self._tool_item(block.get("id"), "inProgress")}})
         if texts:
             self._emit({"method": "item/completed", "params": {"item": {
                 "type": "agentMessage", "id": message.get("id"), "text": "".join(texts)}}})
@@ -366,11 +601,32 @@ class ClaudeTurn:
             if isinstance(raw, list):
                 raw = "\n".join(part.get("text", "") for part in raw if isinstance(part, dict))
             text = str(raw or "")[:TOOL_TEXT_LIMIT]
-            self._emit({"method": "item/completed", "params": {"item": {
-                "type": "dynamicToolCall", "id": block.get("tool_use_id"),
-                "tool": self._tool_names.get(block.get("tool_use_id")),
-                "status": "failed" if block.get("is_error") else "completed",
-                "contentItems": [{"type": "inputText", "text": text}]}}})
+            if self._tool_is_sensitive(block.get("tool_use_id")):
+                text = "<content withheld: sensitive path>"
+            item = self._tool_item(block.get("tool_use_id"), "failed" if block.get("is_error") else "completed")
+            if item["type"] == "commandExecution":
+                item["aggregatedOutput"] = text
+            else:
+                item["contentItems"] = [{"type": "inputText", "text": text}]
+            self._emit({"method": "item/completed", "params": {"item": item}})
+
+    def _tool_is_sensitive(self, tool_use_id) -> bool:
+        tool_input = self._tool_inputs.get(tool_use_id, {})
+        target = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
+        return isinstance(target, str) and bool(target) and _sensitive_path(target.replace("\\", "/").lstrip("/"))
+
+    def _tool_item(self, tool_use_id, status: str) -> dict:
+        """Command and file tools use the item shapes the cockpit already renders."""
+        name = self._tool_names.get(tool_use_id)
+        tool_input = self._tool_inputs.get(tool_use_id, {})
+        if name in COMMAND_TOOLS:
+            return {"type": "commandExecution", "id": tool_use_id, "tool": name, "status": status,
+                    "command": str(tool_input.get("command", ""))[:TOOL_TEXT_LIMIT]}
+        if name in WRITE_TOOLS:
+            return {"type": "fileChange", "id": tool_use_id, "tool": name, "status": status,
+                    "path": str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")}
+        return {"type": "dynamicToolCall", "id": tool_use_id, "tool": name, "status": status,
+                "arguments": json.dumps(tool_input, ensure_ascii=False)[:TOOL_TEXT_LIMIT]}
 
     def _on_result(self, result: dict) -> None:
         for denial in result.get("permission_denials") or []:
@@ -378,7 +634,7 @@ class ClaudeTurn:
                 self._emit({"method": "item/completed", "params": {"item": {
                     "type": "dynamicToolCall", "id": denial.get("tool_use_id"), "tool": denial.get("tool_name"),
                     "status": "declined", "contentItems": [{"type": "inputText",
-                    "text": "Denied: Claude Native Chat is read-only."}]}}})
+                    "text": "Denied by Nexus." if self.development else "Denied: Claude Native Chat is read-only."}]}}})
         failed = bool(result.get("is_error"))
         self._emit({"method": "turn/completed", "params": {"turn": {
             "id": self.session_id, "status": "failed" if failed else "completed"}}})

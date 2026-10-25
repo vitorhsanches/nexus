@@ -172,6 +172,8 @@ function setup(options = {}) {
     if (parsed.pathname.endsWith("/interrupt") && method === "POST") return response({ status: "INTERRUPT_REQUESTED" });
     const approvalsMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals$/);
     if (approvalsMatch && method === "GET") return response({ approvals: backend.approvals || [] });
+    const operationMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals\/([^/]+)\/operation$/);
+    if (operationMatch && method === "GET") return response(backend.operation || { detail: { message: "gone" } }, backend.operation ? 200 : 409);
     const decideMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals\/([^/]+)$/);
     if (decideMatch && method === "POST") {
       const decision = JSON.parse(opts.body).decision;
@@ -863,3 +865,37 @@ test("command executions stream with their exit code and output", async () => {
 function nexusTemplate() {
   return require("node:fs").readFileSync(require("node:path").join(__dirname, "../../nexus/web/templates/nexus.html"), "utf8");
 }
+
+test("Claude Native can be chosen for Development and its approvals show the exact operation", async () => {
+  const ui = setup({ executionEnabled: true });
+  assert.match(nexusTemplate(), /<option value="claude_native">Claude Native \(Claude Code CLI, approvals required\)<\/option>/);
+  await ui.window.NexusDev.enter();
+  await flush();
+  ui.backend.models = { backend: "claude_native", models: [{ id: "default", name: "Default (recommended)", selectable: true, availability: "claude-native", supported_efforts: ["low"] }], default_model: "default", catalog_error: null };
+  ui.elements["dev-backend-select"].value = "claude_native"; ui.elements["dev-backend-select"].dispatch("change");
+  await flush();
+  assert.ok(ui.calls.some((call) => call.path === "/api/dev/models?backend=claude_native"));
+  ui.elements["dev-project-select"].value = "demo"; ui.elements["dev-project-select"].dispatch("change");
+  await flush();
+  ui.elements["dev-create-session"].dispatch("click");
+  await flush();
+  const body = ui.calls.filter((call) => call.method === "POST" && call.path === "/api/dev/sessions").pop().body;
+  assert.deepEqual(body, { project_id: "demo", backend: "claude_native", requested_model: "default" });
+
+  const digest = "ab".repeat(32);
+  ui.backend.approvals = [{ approval_id: "APPROVAL-C", dev_session_id: "DEV-1", turn_id: "T", kind: "file_change", status: "PENDING",
+    summary: { tool: "Edit", grantRoot: "calc.py", reason: "Edit in the session worktree", operation_sha256: digest, operation_bytes: 60 } }];
+  ui.backend.operation = { approval_id: "APPROVAL-C", tool: "Edit", operation_sha256: digest, operation: "{\n \"new_string\": \"a + b\"\n}" };
+  ui.elements["dev-session-list"].children[0].dispatch("click");
+  await flush();
+  const row = ui.elements["dev-approvals"].children[0];
+  const exact = row.children.find((child) => child.className === "dev-approval-input");
+  assert.ok(exact, "the exact operation is displayed");
+  assert.match(exact.textContent, /^Edit \{\n "new_string": "a \+ b"\n\}$/);
+  assert.ok(!JSON.stringify(ui.backend.approvals).includes("new_string"), "the listed approval carries no tool input");
+  const approve = row.children.find((child) => child.textContent === "Approve once");
+  approve.dispatch("click");
+  await flush();
+  const decision = ui.calls.filter((call) => call.method === "POST" && /\/approvals\//.test(call.path)).pop();
+  assert.deepEqual(decision.body, { decision: "accept", operation_sha256: digest }, "the decision is bound to the shown operation");
+});

@@ -482,6 +482,9 @@ def initialize_database() -> None:
         dev_session_columns = {row[1] for row in connection.execute("PRAGMA table_info(dev_sessions)")}
         if "backend" not in dev_session_columns:
             connection.execute("ALTER TABLE dev_sessions ADD COLUMN backend TEXT NOT NULL DEFAULT 'omniroute'")
+        if "claude_session_id" not in dev_session_columns:
+            # Claude Code's own conversation id (Claude Native Development only).
+            connection.execute("ALTER TABLE dev_sessions ADD COLUMN claude_session_id TEXT")
         # Human decisions on Codex approval requests (P4.0B). The live request
         # only exists while its App-Server process runs; this is the audit
         # trail, and a PENDING row without a live request is expired on read.
@@ -503,6 +506,15 @@ def initialize_database() -> None:
                 ON dev_approvals(dev_session_id, status);
             """
         )
+        try:
+            # Claude Native approvals once persisted the complete tool input;
+            # only its digest/size are kept now, so drop what older rows hold.
+            connection.execute(
+                "UPDATE dev_approvals SET summary_json = json_remove(summary_json, '$.input') "
+                "WHERE json_valid(summary_json) AND json_type(summary_json, '$.input') IS NOT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass  # SQLite built without JSON1; reads still strip the field
 
         # Intelligent Maestro (P2A). A conversation is backed by exactly one
         # read-only Nexus Chat session (the Codex thread holds the content);

@@ -92,12 +92,17 @@ def create_dev_session(project_id: str, *, requested_model: str | None = None, b
     authorized cleanup.
     """
     workspace_path = validate_dev_project(project_id)
-    if backend not in {"omniroute", "codex_native"}:
+    if backend not in {"omniroute", "codex_native", "claude_native"}:
         raise DevServiceError("UNSUPPORTED_BACKEND", f"Unsupported Development backend: {backend!r}", http_status=422)
     if backend == "codex_native":
         from nexus.dev.executor import validate_native_choice
 
         validate_native_choice(requested_model, None)
+    if backend == "claude_native":
+        from nexus.dev.executor import validate_claude_choice
+
+        requested_model = requested_model or "default"
+        validate_claude_choice(requested_model, None)
 
     session_id = dev_sessions.new_session_id()
     branch = branch_name_for_session(session_id)

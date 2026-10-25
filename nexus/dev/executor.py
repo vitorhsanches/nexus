@@ -61,11 +61,15 @@ investigation this is based on):
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
+import uuid
 from collections import deque
 
 from nexus.chat.appserver_client import BACKEND_CODEX_NATIVE, BACKEND_OMNIROUTE, AppServerClient, AppServerError
+from nexus.chat import claude_native
+from nexus.chat.claude_native import BACKEND_CLAUDE_NATIVE
 from nexus.dev import approvals, feature_gate
 from nexus.dev.service import DevServiceError, validate_dev_project
 from nexus.dev.worktree import (
@@ -218,9 +222,53 @@ def _require_active_session(dev_session_id: str):
 def session_backend(session) -> str:
     """The backend a Development session was created for; never switched silently."""
     backend = session["backend"] if "backend" in session.keys() and session["backend"] else BACKEND_OMNIROUTE
-    if backend not in {BACKEND_OMNIROUTE, BACKEND_CODEX_NATIVE}:
+    if backend not in {BACKEND_OMNIROUTE, BACKEND_CODEX_NATIVE, BACKEND_CLAUDE_NATIVE}:
         raise DevServiceError("UNSUPPORTED_BACKEND", f"Session has an unsupported backend: {backend!r}", http_status=409)
     return backend
+
+
+def validate_claude_choice(model: str | None, effort: str | None) -> None:
+    """Claude Native: the model/effort must be offered by the local Claude Code login."""
+    from nexus.chat.service import ChatError, validate_claude_choice as _validate
+
+    try:
+        _validate(model or "default", effort)
+    except ChatError as error:
+        raise DevServiceError(error.code, str(error), http_status=error.http_status) from error
+
+
+# Larger inputs cannot be shown to the human in full, so they are never approvable.
+CLAUDE_APPROVAL_INPUT_LIMIT = 20_000
+
+
+def _claude_permission_bridge(dev_session_id: str, turn_id: str, worktree_path: str, runner_ref: list, emit=None):
+    """Turns a Claude Code permission request into a pending human approval.
+
+    The exact tool input is held in memory only (never persisted or listed);
+    the approval record keeps its digest. The decision must echo that digest
+    and the runner re-checks it before answering with the same input, so a
+    different operation can never be approved. Commands never reach this
+    bridge: Claude Native Development has no shell tool.
+    """
+    handler = approvals.deferred_handler(dev_session_id, turn_id, runner_ref)
+
+    def on_permission(request_id, tool: str, tool_input: dict) -> bool:
+        if tool in claude_native.COMMAND_TOOLS or tool not in claude_native.DEV_TOOLS:
+            return False
+        text = json.dumps(tool_input, ensure_ascii=False, indent=1, sort_keys=True)
+        if len(text) > CLAUDE_APPROVAL_INPUT_LIMIT:
+            return False
+        method = "item/fileChange/requestApproval"
+        params = {"grantRoot": str(tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path") or ""),
+                  "reason": f"{tool} in the session worktree"}
+        params.update({"tool": tool, "input": text, "operation_sha256": claude_native.operation_digest(tool, tool_input)})
+        deferred = handler(method, params, request_id)
+        if deferred and emit is not None:
+            # Same live signal the Codex path sends, so the cockpit refreshes its panel.
+            emit({"method": method, "id": request_id, "params": {"tool": tool}})
+        return deferred
+
+    return on_permission
 
 
 def validate_native_choice(model: str | None, effort: str | None) -> None:
@@ -291,8 +339,11 @@ def run_dev_turn(dev_session_id: str, prompt: str, *, model: str | None = None,
 
     session, _workspace_path, _worktree = _require_active_session(dev_session_id)
     selected_model = model or session["requested_model"]
-    if session_backend(session) == BACKEND_CODEX_NATIVE:
+    backend = session_backend(session)
+    if backend == BACKEND_CODEX_NATIVE:
         validate_native_choice(selected_model, effort)
+    elif backend == BACKEND_CLAUDE_NATIVE:
+        validate_claude_choice(selected_model, effort)
     else:
         _validate_omniroute_choice(selected_model, effort)
 
@@ -359,6 +410,9 @@ def _run_dev_turn_body(
         # this background thread actually starting.
         session, _workspace_path, worktree_path = _require_active_session(dev_session_id)
         backend = session_backend(session)
+        if backend == BACKEND_CLAUDE_NATIVE:
+            _run_claude_dev_turn(dev_session_id, turn_id, prompt, model, effort, active, session, worktree_path)
+            return
         native = backend == BACKEND_CODEX_NATIVE
         if not native:
             from nexus.workspace.omniroute_oauth import require_connected_route
@@ -441,6 +495,48 @@ def _run_dev_turn_body(
                 pass
         with _active_lock:
             _active_dev_turns.pop(turn_id, None)
+
+
+def _run_claude_dev_turn(dev_session_id, turn_id, prompt, model, effort, active, session, worktree_path) -> None:
+    """One Claude Code Development turn inside the session's worktree.
+
+    Edits and commands reach the human approval panel; nothing falls back to
+    Codex or OmniRoute, and every failure is recorded on this turn.
+    """
+    stored = session["claude_session_id"] if "claude_session_id" in session.keys() else None
+    conversation_id = stored or str(uuid.uuid4())
+    runner_ref: list = []
+
+    def on_session(confirmed_id: str, _model: str | None) -> None:
+        dev_sessions.update_claude_session(dev_session_id, claude_session_id=confirmed_id)
+        active.codex_turn_id = turn_id
+
+    runner = claude_native.ClaudeTurn(
+        worktree_path,
+        session_id=conversation_id,
+        resume=bool(stored),
+        model=model or session["requested_model"],
+        effort=effort,
+        development=True,
+        on_event=lambda event: _on_event(active, event),
+        on_session=on_session,
+        on_permission=_claude_permission_bridge(dev_session_id, turn_id, worktree_path, runner_ref,
+                                                emit=lambda event: _on_event(active, event)),
+    )
+    runner_ref.append(runner)
+    active.client = runner
+    active.thread_id = conversation_id
+    try:
+        response_text = runner.run(prompt, timeout_seconds=NATIVE_DEV_TURN_TIMEOUT_SECONDS)
+    except claude_native.ClaudeNativeError as error:
+        cancelled = runner.interrupted or active.interrupted.is_set()
+        dev_sessions.update_turn_status(
+            turn_id, "CANCELLED" if cancelled else "FAILED",
+            error_code="TURN_INTERRUPTED" if cancelled else error.code,
+            error_message=sanitize_error_text(str(error)) or str(error),
+        )
+        return
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text=response_text)
 
 
 def interrupt_dev_turn(dev_session_id: str, turn_id: str | None = None) -> dict:
