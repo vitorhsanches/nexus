@@ -1190,7 +1190,7 @@
         var finished = /item\/completed$/.test(type) && item.type === "commandExecution";
         var output = finished && typeof item.aggregatedOutput === "string" ? item.aggregatedOutput.trim() : "";
         logActivityEvent(
-          item.type + (item.command ? ": " + item.command : "") +
+          item.type + (item.tool && !item.command ? " " + item.tool : "") + (item.command ? ": " + item.command : "") +
           (finished && typeof item.exitCode === "number" ? " → exit " + item.exitCode : "") +
           (finished && typeof item.exitCode !== "number" && item.status ? " → " + item.status : "") +
           (/item\/completed$/.test(type) && item.type === "fileChange" && item.path ? " " + item.path + " → " + (item.status || "done") : "") +

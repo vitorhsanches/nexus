@@ -241,7 +241,7 @@ def validate_claude_choice(model: str | None, effort: str | None) -> None:
 CLAUDE_APPROVAL_INPUT_LIMIT = 20_000
 
 
-def _claude_permission_bridge(dev_session_id: str, turn_id: str, worktree_path: str, runner_ref: list):
+def _claude_permission_bridge(dev_session_id: str, turn_id: str, worktree_path: str, runner_ref: list, emit=None):
     """Turns a Claude Code permission request into a pending human approval.
 
     The approval stores the exact tool input; an accept answers with that
@@ -262,7 +262,11 @@ def _claude_permission_bridge(dev_session_id: str, turn_id: str, worktree_path: 
             params = {"grantRoot": str(tool_input.get("file_path") or tool_input.get("notebook_path") or ""),
                       "reason": f"{tool} in the session worktree"}
         params.update({"tool": tool, "input": text})
-        return handler(method, params, request_id)
+        deferred = handler(method, params, request_id)
+        if deferred and emit is not None:
+            # Same live signal the Codex path sends, so the cockpit refreshes its panel.
+            emit({"method": method, "id": request_id, "params": {"tool": tool}})
+        return deferred
 
     return on_permission
 
@@ -516,7 +520,8 @@ def _run_claude_dev_turn(dev_session_id, turn_id, prompt, model, effort, active,
         development=True,
         on_event=lambda event: _on_event(active, event),
         on_session=on_session,
-        on_permission=_claude_permission_bridge(dev_session_id, turn_id, worktree_path, runner_ref),
+        on_permission=_claude_permission_bridge(dev_session_id, turn_id, worktree_path, runner_ref,
+                                                emit=lambda event: _on_event(active, event)),
     )
     runner_ref.append(runner)
     active.client = runner

@@ -407,6 +407,10 @@ def _start_pending(tmp_path, request=("Bash", BASH_INPUT)):
 
 def test_a_claude_command_is_shown_exactly_and_runs_only_after_accept(isolated_registry, claude_dev):
     session_id, turn_id, pending = _start_pending(isolated_registry)
+    live = executor._active_dev_turns[turn_id]
+    with live.lock:
+        methods = [event.get("method") for _seq, event in live.buffer]
+    assert "item/commandExecution/requestApproval" in methods, "the cockpit is told live that a decision is needed"
     summary = pending["summary"]
     assert (pending["kind"], summary["tool"], summary["command"]) == ("command", "Bash", "python -m pytest -q")
     assert json.loads(summary["input"]) == BASH_INPUT
