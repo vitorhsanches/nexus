@@ -65,6 +65,7 @@ function setup(options = {}) {
     querySelector() { return null; },
   };
   const calls = [];
+  const failedUrls = new Set(options.failures || []);
   const inFlight = { current: 0, max: 0 };
   const fetchImpl = (url) => {
     calls.push(url);
@@ -73,7 +74,8 @@ function setup(options = {}) {
     return new Promise((resolve) => {
       setTimeout(() => {
         inFlight.current -= 1;
-        resolve({ ok: true, json: () => Promise.resolve(options.responses && options.responses[url] || {}) });
+        resolve({ ok: !failedUrls.has(url), status: 503,
+          json: () => Promise.resolve(options.responses && options.responses[url] || {}) });
       }, 0);
     });
   };
@@ -90,7 +92,7 @@ function setup(options = {}) {
     setTimeout, clearTimeout,
   };
   vm.runInNewContext(controlCenterSource, context);
-  return { elements, body, nav, window, calls, inFlight, document };
+  return { elements, body, nav, window, calls, inFlight, document, failedUrls };
 }
 
 async function settle() {
@@ -152,6 +154,31 @@ test("opening Models & Routing is the explicit action that queries OmniRoute tel
   routingNav.dispatch("click");
   await drain(ui);
   assert.ok(ui.calls.includes("/api/routing/status"));
+});
+
+test("failed explicit routing query shows UNAVAILABLE until an explicit successful retry", async () => {
+  const ui = setup({ initialView: "overview", failures: ["/api/routing/status"], responses: {
+    "/api/routing/status": { runtime: { status: "ONLINE", credential_store: "READY", providers: "READY" },
+      summary: { actions_available: true, callable_routes: 1 }, routes: [] },
+  } });
+  await drain(ui);
+  assert.equal(ui.elements["runtime-omniroute"].textContent, "NOT QUERIED");
+  ui.nav.find((item) => item.getAttribute("data-target") === "overview-routing").dispatch("click");
+  await drain(ui);
+  assert.equal(ui.elements["runtime-omniroute"].textContent, "UNAVAILABLE");
+  assert.equal(ui.elements["routing-count"].textContent, "UNAVAILABLE");
+  assert.equal(ui.elements["run-btn"].disabled, true);
+  const queried = ui.calls.filter((url) => url === "/api/routing/status").length;
+  ui.window.NexusControlCenter.refresh();
+  await drain(ui);
+  assert.equal(ui.calls.filter((url) => url === "/api/routing/status").length, queried,
+    "Overview refresh must not retry OmniRoute implicitly");
+  ui.failedUrls.delete("/api/routing/status");
+  ui.window.NexusControlCenter.refreshRouting();
+  await drain(ui);
+  assert.equal(ui.elements["runtime-omniroute"].textContent, "ONLINE");
+  assert.equal(ui.elements["routing-count"].textContent, "1 CALLABLE");
+  assert.equal(ui.elements["run-btn"].disabled, false);
 });
 
 test("explicit routing observation restores the legacy mission gate only for callable routes", async () => {

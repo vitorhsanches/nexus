@@ -348,10 +348,10 @@
 
     var routeRuntime = state.routing && state.routing.runtime;
     if (!routeRuntime) {
-      runtimeValue("runtime-omniroute", "NOT QUERIED");
-      runtimeValue("runtime-credentials", "UNKNOWN");
-      runtimeValue("runtime-providers", "UNKNOWN");
-      runtimeValue("runtime-routes", "UNKNOWN");
+      runtimeValue("runtime-omniroute", state.routingQueried ? "UNAVAILABLE" : "NOT QUERIED");
+      runtimeValue("runtime-credentials", state.routingQueried ? "UNAVAILABLE" : "UNKNOWN");
+      runtimeValue("runtime-providers", state.routingQueried ? "UNAVAILABLE" : "UNKNOWN");
+      runtimeValue("runtime-routes", state.routingQueried ? "UNAVAILABLE" : "UNKNOWN");
     } else {
       runtimeValue("runtime-omniroute", routeRuntime.status);
       runtimeValue("runtime-credentials", routeRuntime.credential_store);
