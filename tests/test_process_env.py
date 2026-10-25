@@ -368,3 +368,27 @@ def test_native_profile_shares_one_credential_across_many_sessions(tmp_path, mon
     # One session ending (its name removed) never affects the login or its siblings.
     (homes[0] / "auth.json").unlink()
     assert source.is_file() and all(os.path.samefile(home / "auth.json", source) for home in homes[1:])
+
+
+def test_native_profile_accepts_state_codex_itself_adds_to_the_session_config(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch)
+    session_home = tmp_path / "session-home"
+    codex_subprocess_env(profile="native", worker_home=str(session_home))
+    # Observed live: Codex appends project trust to the session's config.toml.
+    with (session_home / "config.toml").open("a", encoding="utf-8") as config:
+        config.write('\n[projects.\'c:\\repo\']\ntrust_level = "trusted"\n')
+
+    env = codex_subprocess_env(profile="native", worker_home=str(session_home))
+
+    assert env["CODEX_HOME"] == str(session_home)
+    with (session_home / "config.toml").open("rb") as stream:
+        assert "model_provider" not in tomllib.load(stream)
+
+
+def test_native_profile_refuses_an_unreadable_session_config(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch)
+    session_home = tmp_path / "session-home"
+    session_home.mkdir()
+    (session_home / "config.toml").write_text("this is [not toml", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="another backend"):
+        codex_subprocess_env(profile="native", worker_home=str(session_home))

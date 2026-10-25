@@ -1098,3 +1098,43 @@ def test_account_read_never_requests_a_token_refresh_and_redacts_secrets():
     assert captured["server"].sent[1]["params"] == {"refreshToken": False}
     assert result["account"]["type"] == "chatgpt"
     assert result["account"]["accessToken"] == "<redacted>"
+
+
+# -- deferred human decisions (P4.0B) --------------------------------------------
+
+
+def _approval_request(request_id=9):
+    return json.dumps({"id": request_id, "method": "item/commandExecution/requestApproval",
+                       "params": {"command": "python -m pytest -q", "itemId": "i", "threadId": "t", "turnId": "u", "startedAtMs": 1}})
+
+
+def test_a_deferred_request_is_not_answered_until_the_human_decides():
+    seen = []
+    client, captured = _make_client(
+        {"initialize": [_ok(1, {}), _approval_request()]},
+        backend="codex_native",
+        on_deferred_server_request=lambda method, params, request_id: seen.append((method, params, request_id)) or True,
+    )
+    client.start()
+    deadline = time.time() + 2
+    while not seen and time.time() < deadline:
+        time.sleep(0.01)
+    assert seen and seen[0][0] == "item/commandExecution/requestApproval" and seen[0][2] == 9
+    assert not [m for m in captured["server"].sent if m.get("id") == 9], "no answer may be sent on its own"
+
+    client.respond_server_request(9, {"decision": "accept"})
+    assert {"id": 9, "result": {"decision": "accept"}} in captured["server"].sent
+
+
+def test_a_failing_or_declining_deferred_handler_falls_back_to_the_fail_closed_denial():
+    for handler in (lambda *_args: False, lambda *_args: (_ for _ in ()).throw(RuntimeError("boom"))):
+        client, captured = _make_client(
+            {"initialize": [_ok(1, {}), _approval_request()]}, backend="codex_native", on_deferred_server_request=handler,
+        )
+        client.start()
+        deadline = time.time() + 2
+        while not [m for m in captured["server"].sent if m.get("id") == 9] and time.time() < deadline:
+            time.sleep(0.01)
+        reply = [m for m in captured["server"].sent if m.get("id") == 9][0]
+        assert reply["result"]["decision"] != "accept"
+        assert "accept" not in json.dumps(reply["result"])

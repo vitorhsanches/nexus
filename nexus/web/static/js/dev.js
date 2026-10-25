@@ -27,6 +27,7 @@
     allProjects: [], projects: [], sessions: [], session: null,
     modelOptions: [], defaultModel: null, testProfiles: [],
     selectedModel: null, selectedEffort: null,
+    newSessionBackend: "codex_native", modelsBackend: null, approvals: [],
     executionEnabled: false, executionStatusChecked: false,
     review: null, selectedReviewPath: null, reviewLoading: false,
     integrationEnabled: false, integrationReview: null, integrationPreflight: null, integrationBusy: false,
@@ -237,18 +238,27 @@
       populateProjects(payload && payload.projects);
       return loadSessions();
     }).then(function () {
-      return request("/dev/models");
-    }).then(function (models) {
+      return loadModels(state.newSessionBackend);
+    }).catch(function (error) {
+      showStatus("Could not load Development Mode data: " + error.message, "error");
+    });
+  }
+
+  // Each Development session runs on the backend it was created with; the
+  // model list always comes from that same backend (never mixed).
+  function loadModels(backend) {
+    return request("/dev/models?backend=" + encodeURIComponent(backend)).then(function (models) {
+      state.modelsBackend = backend;
       state.modelOptions = (models.models || []).filter(function (model) { return model.selectable === true && typeof model.id === "string"; });
       state.defaultModel = models.default_model;
       state.selectedModel = state.modelOptions.some(function (item) { return item.id === models.default_model; }) ? models.default_model : null;
+      state.selectedEffort = null;
       populateModelSelect();
       populateEffortSelect();
       updateMissionControls();
       if (models.catalog_error) showStatus(models.catalog_error, "error");
       else showStatus("Ready.", "ready");
-    }).catch(function (error) {
-      showStatus("Could not load Development Mode data: " + error.message, "error");
+      return models;
     });
   }
 
@@ -375,7 +385,12 @@
     if (!projectId) return;
     var button = $("dev-create-session"); if (button) button.disabled = true;
     showStatus("Creating a Development session…", "loading");
-    request("/dev/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId }) })
+    var body = { project_id: projectId };
+    if (state.newSessionBackend === "codex_native") {
+      body.backend = "codex_native";
+      if (state.modelsBackend === "codex_native" && state.selectedModel) body.requested_model = state.selectedModel;
+    }
+    request("/dev/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       .then(function (session) {
         state.sessions.unshift(session);
         renderSessions();
@@ -403,6 +418,8 @@
     closeStream();
     request("/dev/sessions/" + encodeURIComponent(sessionId)).then(function (session) {
       state.session = session;
+      var sessionBackend = session.backend || "omniroute";
+      if (state.modelsBackend !== sessionBackend) loadModels(sessionBackend).catch(function () {});
       state.integrationReview = null; state.integrationPreflight = null;
       state.integrationReviewOutdated = false; state.integrationReviewUncertain = false;
       integrationMessage("Loading persisted review history…", "");
@@ -423,6 +440,7 @@
       loadReview();
       loadIntegrationHistory();
       loadAutonomousMissions();
+      loadApprovals();
       setComposerState();
     }).catch(function (error) { showStatus("Could not load this Development session: " + error.message, "error"); });
   }
@@ -494,6 +512,7 @@
         .then(function (mission) {
           var wasActive = missionIsActive(state.mission);
           renderMission(mission);
+          loadApprovals();
           if (wasActive && !missionIsActive(mission)) { loadChangedFiles(); loadReview(); }
         })
         .catch(function (error) { showStatus("Could not refresh autonomous mission: " + error.message, "error"); });
@@ -530,6 +549,7 @@
     var authorized = Boolean(project && project.enabled && (project.dev_enabled === true || project.dev_enabled === 1));
     var rows = [
       ["Session", state.session.session_id],
+      ["Backend", state.session.backend === "codex_native" ? "Codex Native" : "OmniRoute"],
       ["Status", state.session.status],
       ["Project authorization", authorized ? "Authorized (dev_enabled)" : "NOT authorized — revoked or disabled"],
       ["Branch", state.session.branch],
@@ -921,6 +941,67 @@
     while (list.children.length > 30) list.removeChild(list.children[0]);
   }
 
+  // -- Human approvals (P4.0B) ------------------------------------------------
+
+  function loadApprovals() {
+    if (!state.session) return Promise.resolve();
+    var sessionId = state.session.session_id;
+    return request("/dev/sessions/" + encodeURIComponent(sessionId) + "/approvals").then(function (payload) {
+      if (!state.session || state.session.session_id !== sessionId) return;
+      state.approvals = (payload && payload.approvals) || [];
+      renderApprovals();
+    }).catch(function () {});
+  }
+
+  function renderApprovals() {
+    var list = $("dev-approvals");
+    if (!list) return;
+    list.replaceChildren();
+    var shown = state.approvals.filter(function (item) { return item.status === "PENDING"; })
+      .concat(state.approvals.filter(function (item) { return item.status !== "PENDING"; }).slice(0, 5));
+    if (!shown.length) {
+      var empty = document.createElement("li"); empty.textContent = "No approval requests.";
+      list.appendChild(empty);
+      return;
+    }
+    shown.forEach(function (approval) {
+      var row = document.createElement("li");
+      row.className = "dev-approval dev-approval-" + String(approval.status || "").toLowerCase();
+      var summary = approval.summary || {};
+      var text = document.createElement("span");
+      text.textContent = redacted(
+        (approval.kind === "file_change" ? "File change" : "Command") + " · " + approval.status +
+        (summary.command ? " · " + summary.command : "") +
+        (summary.grantRoot ? " · write access to " + summary.grantRoot : "") +
+        (summary.reason ? " · reason: " + summary.reason : "")
+      );
+      row.appendChild(text);
+      if (approval.status === "PENDING") {
+        [["accept", "Approve once"], ["decline", "Decline"]].forEach(function (pair) {
+          var button = document.createElement("button");
+          button.type = "button"; button.className = "chat-secondary-button";
+          button.textContent = pair[1];
+          button.addEventListener("click", function () { decideApproval(approval.approval_id, pair[0]); });
+          row.appendChild(button);
+        });
+      }
+      list.appendChild(row);
+    });
+  }
+
+  function decideApproval(approvalId, decision) {
+    if (!state.session) return;
+    request("/dev/sessions/" + encodeURIComponent(state.session.session_id) + "/approvals/" + encodeURIComponent(approvalId), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision: decision }),
+    }).then(function () {
+      logActivityEvent((decision === "accept" ? "Approved" : "Declined") + " " + approvalId);
+      return loadApprovals();
+    }).catch(function (error) {
+      showStatus("Could not record the decision: " + error.message, "error");
+      loadApprovals();
+    });
+  }
+
   function setExecutionState(rawState, detail) {
     var key = normalizeExecutionState(rawState) || "idle";
     var node = $("dev-activity-status");
@@ -1090,7 +1171,8 @@
       reconcileAfterTerminal(turnId);
       return;
     }
-    if (type === "nexus/turnEnded") { closeStream(); reconcileAfterTerminal(turnId); return; }
+    if (type === "nexus/turnEnded") { closeStream(); reconcileAfterTerminal(turnId); loadApprovals(); return; }
+    if (/requestApproval$/.test(type)) { logActivityEvent("Approval requested — see Approvals."); loadApprovals(); return; }
     if (/turn\/started$/.test(type)) setExecutionState("running", "Turn started.");
     if (/turn\/(failed|interrupted|completed)$/.test(type)) {
       closeStream(); reconcileAfterTerminal(turnId); return;
@@ -1098,7 +1180,13 @@
     if (/item\/(started|updated|completed)$/.test(type)) {
       var item = (event.params && event.params.item) || {};
       if (item.type && item.type !== "agentMessage" && item.type !== "userMessage") {
-        logActivityEvent(item.type + (item.command ? ": " + item.command : ""));
+        var finished = /item\/completed$/.test(type) && item.type === "commandExecution";
+        var output = finished && typeof item.aggregatedOutput === "string" ? item.aggregatedOutput.trim() : "";
+        logActivityEvent(
+          item.type + (item.command ? ": " + item.command : "") +
+          (finished && typeof item.exitCode === "number" ? " → exit " + item.exitCode : "") +
+          (output ? "\n" + output.slice(-600) : "")
+        );
       }
     }
   }
@@ -1152,6 +1240,10 @@
     var devReturn = $("dev-return"); if (devReturn) devReturn.addEventListener("click", exit);
     var projectSelect = $("dev-project-select"); if (projectSelect) projectSelect.addEventListener("change", function () { chooseProject(projectSelect.value); });
     var createButton = $("dev-create-session"); if (createButton) createButton.addEventListener("click", createSession);
+    var backendSelect = $("dev-backend-select"); if (backendSelect) backendSelect.addEventListener("change", function () {
+      state.newSessionBackend = backendSelect.value === "omniroute" ? "omniroute" : "codex_native";
+      loadModels(state.newSessionBackend).catch(function (error) { showStatus("Could not load models: " + error.message, "error"); });
+    });
     var refreshReview = $("dev-review-refresh"); if (refreshReview) refreshReview.addEventListener("click", loadReview);
     var createReview = $("dev-create-review"); if (createReview) createReview.addEventListener("click", createIntegrationReview);
     var preflightReview = $("dev-integration-preflight"); if (preflightReview) preflightReview.addEventListener("click", checkIntegrationPreflight);

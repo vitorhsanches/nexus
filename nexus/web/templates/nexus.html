@@ -505,6 +505,12 @@
               <option value="">Loading projects…</option>
             </select>
           </label>
+          <label class="chat-project-picker">Backend
+            <select id="dev-backend-select" aria-label="Development backend">
+              <option value="codex_native">Codex Native (local login, no OmniRoute)</option>
+              <option value="omniroute">OmniRoute</option>
+            </select>
+          </label>
           <button id="dev-create-session" class="chat-secondary-button" type="button" disabled>+ New session</button>
           <button id="dev-return" class="chat-return" type="button" hidden>Return to previous view</button>
         </header>
@@ -601,6 +607,11 @@
           <aside class="chat-context-panel" aria-label="Development activity">
             <div class="chat-context-header"><h2>Activity</h2></div>
             <div class="chat-context-body">
+              <section class="chat-context-section">
+                <h3>Approvals</h3>
+                <p class="dev-approvals-note">Codex asks here before sensitive commands or file changes outside its sandbox. Nothing runs until you approve; no answer, an interrupt or a restart declines.</p>
+                <ul id="dev-approvals" class="dev-approvals" aria-live="assertive"></ul>
+              </section>
               <section class="chat-context-section">
                 <h3>Tool activity</h3>
                 <ul id="dev-activity-events" class="chat-activity-events" aria-live="polite"></ul>

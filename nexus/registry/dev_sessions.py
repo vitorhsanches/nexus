@@ -108,7 +108,14 @@ def new_session_id() -> str:
     return f"DEV-{uuid4().hex[:8].upper()}"
 
 
-def reserve_session(session_id: str, project_id: str, branch: str, *, requested_model: str | None = None) -> str:
+def reserve_session(
+    session_id: str,
+    project_id: str,
+    branch: str,
+    *,
+    requested_model: str | None = None,
+    backend: str = "omniroute",
+) -> str:
     """Atomically reserve a new, CREATING development session row.
 
     BEGIN IMMEDIATE makes the branch-uniqueness check and the insertion one
@@ -130,12 +137,12 @@ def reserve_session(session_id: str, project_id: str, branch: str, *, requested_
         connection.execute(
             """
             INSERT INTO dev_sessions
-                (id, project_id, branch, requested_model, status,
+                (id, project_id, branch, requested_model, backend, status,
                  owner_host, owner_pid, owner_acquired_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                session_id, project_id, branch, requested_model, STATUS_CREATING,
+                session_id, project_id, branch, requested_model, backend, STATUS_CREATING,
                 socket.gethostname(), os.getpid(), _now(), _now(), _now(),
             ),
         )
