@@ -35,11 +35,13 @@ def prepare_fixture(destination: Path) -> Path:
     destination = destination.resolve()
     if destination.exists():
         raise FileExistsError(f"Refusing to overwrite existing fixture path: {destination}")
-    shutil.copytree(FIXTURE, destination)
+    # Never copy interpreter/test artifacts a previous import or pytest run left
+    # next to the fixture; the repo's own .gitignore keeps new ones out of Git.
+    shutil.copytree(FIXTURE, destination, ignore=shutil.ignore_patterns("__pycache__", "*.py[cod]", ".pytest_cache"))
     subprocess.run(["git", "init", "-q"], cwd=destination, check=True)
     subprocess.run(["git", "config", "user.name", "Nexus E2E Fixture"], cwd=destination, check=True)
     subprocess.run(["git", "config", "user.email", "nexus-e2e-fixture@localhost"], cwd=destination, check=True)
-    subprocess.run(["git", "add", "calc.py", "test_calc.py"], cwd=destination, check=True)
+    subprocess.run(["git", "add", "calc.py", "test_calc.py", ".gitignore"], cwd=destination, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "Create disposable Nexus E2E fixture"], cwd=destination, check=True)
     return destination
 

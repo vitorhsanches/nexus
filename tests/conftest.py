@@ -11,6 +11,10 @@ from unittest.mock import patch
 
 import pytest
 
+# The Development E2E fixture is a disposable project with an intentional bug; its
+# tests fail by design and are run only explicitly, inside the smoke worktree.
+collect_ignore_glob = ["fixtures/dev_e2e_project/*"]
+
 
 @pytest.fixture(autouse=True)
 def _stub_review_git_prerequisites():

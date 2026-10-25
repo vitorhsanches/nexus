@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import socket
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -315,6 +319,52 @@ def test_cli_defaults_to_codex_native_and_real_turns_need_explicit_confirmation(
     assert run_dev_e2e.main() == 0
     assert seen[0].backend == "codex_native" and seen[0].confirm_agent_call is False
     assert isinstance(run_dev_e2e._backend_for(seen[0]), run_dev_e2e.CodexNativeDevBackend)
+
+
+def _bytecode_env():
+    env = os.environ.copy()
+    env.pop("PYTHONDONTWRITEBYTECODE", None)  # CI writes bytecode; so must these tests
+    return env
+
+
+def test_prepared_fixture_stays_clean_after_import_and_pytest(tmp_path):
+    destination = run_dev_e2e.prepare_fixture(tmp_path / "fixture")
+    baseline = subprocess.run([sys.executable, "-m", "pytest", "-q", "test_calc.py"], cwd=destination,
+                              capture_output=True, text=True, env=_bytecode_env(), check=False)
+    assert baseline.returncode != 0, "the intentional bug must still fail the fixture's own tests"
+    assert (destination / "__pycache__").exists(), "the run really produced test artifacts"
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=destination, capture_output=True, text=True, check=True)
+    assert status.stdout == ""
+    tracked = subprocess.run(["git", "ls-files"], cwd=destination, capture_output=True, text=True, check=True).stdout.split()
+    assert sorted(tracked) == [".gitignore", "calc.py", "test_calc.py"]
+
+
+def test_prepare_fixture_never_copies_artifacts_left_in_the_template(tmp_path, monkeypatch):
+    template = tmp_path / "template"
+    shutil.copytree(run_dev_e2e.FIXTURE, template)
+    (template / "__pycache__").mkdir()
+    (template / "__pycache__" / "calc.cpython-312.pyc").write_bytes(b"\x00")
+    (template / ".pytest_cache").mkdir()
+    (template / ".pytest_cache" / "README.md").write_text("cache", encoding="utf-8")
+    (template / "stray.pyc").write_bytes(b"\x00")
+    monkeypatch.setattr(run_dev_e2e, "FIXTURE", template)
+    destination = run_dev_e2e.prepare_fixture(tmp_path / "fixture")
+    assert not (destination / "__pycache__").exists()
+    assert not (destination / ".pytest_cache").exists()
+    assert not (destination / "stray.pyc").exists()
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=destination, capture_output=True, text=True, check=True)
+    assert status.stdout == ""
+
+
+def test_global_collection_skips_the_intentionally_broken_fixture(tmp_path):
+    root = Path(run_dev_e2e.ROOT)
+    collected = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+         "tests/fixtures", "tests/test_dev_e2e_harness.py"],
+        cwd=root, capture_output=True, text=True, env=_bytecode_env(), check=False)
+    assert "dev_e2e_project" not in collected.stdout
+    assert "tests/test_dev_e2e_harness.py::" in collected.stdout
+    assert not (run_dev_e2e.FIXTURE / "__pycache__").exists(), "collecting must not import the fixture"
 
 
 def test_smoke_refuses_real_agent_call_without_confirmation():
