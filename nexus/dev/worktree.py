@@ -165,9 +165,15 @@ def _require_git_repo(project_path: str) -> Path:
         raise InvalidProjectError(f"project_path does not exist: {project_path!r}") from exc
     if not resolved.is_dir():
         raise InvalidProjectError(f"project_path is not a directory: {project_path!r}")
-    probe = _run_git(["rev-parse", "--is-inside-work-tree"], cwd=str(resolved), check=False)
-    if probe.returncode != 0 or probe.stdout.strip() != "true":
+    probe = _run_git(["rev-parse", "--show-toplevel"], cwd=str(resolved), check=False)
+    if probe.returncode != 0 or not probe.stdout.strip():
         raise InvalidProjectError(f"project_path is not a Git repository: {project_path!r}")
+    try:
+        repo_root = Path(probe.stdout.strip()).resolve(strict=True)
+    except OSError as exc:
+        raise InvalidProjectError(f"project_path is not a Git repository: {project_path!r}") from exc
+    if os.path.normcase(str(repo_root)) != os.path.normcase(str(resolved)):
+        raise InvalidProjectError(f"project_path must be the Git repository root: {project_path!r}")
     return resolved
 
 

@@ -115,8 +115,12 @@ def test_changes_inside_the_worktree_never_modify_the_main_project(tmp_path):
 # -- 5: invalid repository ---------------------------------------------------
 
 
-def test_create_rejects_a_project_path_that_is_not_a_git_repository(tmp_path):
-    not_a_repo = tmp_path / "plain_dir"
+def test_create_rejects_a_project_subdirectory_that_is_not_a_git_repository_root(tmp_path):
+    # tmp_path can itself live inside the user's Git repository. A nested
+    # directory is not an independent project root, even though Git reports
+    # that it is inside a worktree.
+    project = _project(tmp_path)
+    not_a_repo = project / "plain_dir"
     not_a_repo.mkdir()
     with pytest.raises(InvalidProjectError):
         create_dev_worktree(str(not_a_repo), "session-x")
