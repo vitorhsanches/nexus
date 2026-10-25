@@ -629,6 +629,32 @@ def test_approved_snapshot_applies_exact_contents_and_persists_history(isolated_
     assert repeated.value.code == "APPLY_ALREADY_ATTEMPTED"
 
 
+def test_apply_normalizes_crlf_worktree_like_git_add_so_commit_matches_review(isolated_registry, monkeypatch):
+    # core.autocrlf=true checks the worktree out with CRLF while the repo
+    # stores LF; `git diff` (the review) hides that, so Apply must too.
+    monkeypatch.setenv(integration_gate.ENV_VAR, "1")
+    session = _active_session(isolated_registry)
+    project_path = projects.get_project("demo")["path"]
+    _run(["config", "core.autocrlf", "true"], cwd=project_path)
+    worktree = Path(session["worktree_path"])
+    (worktree / "README.md").write_bytes(b"placeholder\r\nsecond line\r\n")
+    review = integration.create_review(session["session_id"])
+    [reviewed] = review["snapshot"]["diff"]["files"]
+    assert (reviewed["additions"], reviewed["deletions"]) == (1, 0)
+    assert integration.integration_preflight(session["session_id"], review["review_id"])["ready"] is True
+    applied = integration.apply_review(session["session_id"], review["review_id"], confirmed=True)
+    assert applied["status"] == "APPLIED"
+    commit = applied["commit_sha"]
+    blob = subprocess.run(["git", "cat-file", "blob", f"{commit}:README.md"], cwd=project_path,
+                          capture_output=True, check=True).stdout
+    assert blob == b"placeholder\nsecond line\n"
+    assert _run(["diff", "--numstat", f"{commit}^", commit], cwd=project_path) == "1\t0\tREADME.md"
+    integrated_patch = _run(["diff", "--no-ext-diff", "--no-textconv", f"{commit}^", commit, "--", "README.md"], cwd=project_path)
+    reviewed_patch = _run(["diff", "--no-ext-diff", "--no-textconv", session["base_sha"], "--", "README.md"], cwd=str(worktree))
+    assert integrated_patch == reviewed_patch
+    assert reviewed["patch"].strip() in integrated_patch
+
+
 def test_rejection_preserves_original_repository_and_worktree(isolated_registry):
     session = _active_session(isolated_registry)
     worktree = Path(session["worktree_path"])
