@@ -7,7 +7,9 @@
     programs: [],
     runs: [],
     agents: [],
+    runtime: null,
     routing: null,
+    routingQueried: false,
     featuredProgram: null,
     programDetail: null,
     featuredRun: null,
@@ -121,6 +123,7 @@
       ["programs", fetchJSON("/api/programs")],
       ["runs", fetchJSON("/api/operational/runs")],
       ["agents", fetchJSON("/api/operational/agents")],
+      ["runtime", fetchJSON("/api/runtime/status")],
     ].map(function (entry) {
       return entry[1].then(
         function (payload) { return { key: entry[0], ok: true, payload: payload }; },
@@ -134,10 +137,12 @@
         if (result.key === "programs") state.programs = result.ok ? (result.payload.programs || []) : [];
         if (result.key === "runs") state.runs = result.ok ? (result.payload.runs || []) : [];
         if (result.key === "agents") state.agents = result.ok ? (result.payload.agents || []) : [];
+        if (result.key === "runtime") state.runtime = result.ok ? result.payload : null;
       });
       state.featuredProgram = newestProgram(state.programs);
       state.featuredRun = newestRun(state.runs);
       renderKpis();
+      renderRuntime();
       loadFeaturedDetails();
     });
   }
@@ -208,6 +213,7 @@
 
   function loadRouting() {
     if (overviewPollingSuspended()) return;
+    state.routingQueried = true;
     fetchJSON("/api/routing/status").then(function (payload) {
       state.routing = payload;
       renderRuntime();
@@ -240,19 +246,16 @@
     var blockedRuns = state.runs.filter(function (r) {
       return normalized(r.display_status || r.status) === "BLOCKED";
     }).length;
-    var providerNames = {};
-    if (state.routing) {
-      (state.routing.routes || []).forEach(function (route) {
-        if (route.callable) providerNames[route.provider] = true;
-      });
-    }
     text("kpi-programs", state.availability.programs ? activePrograms : "UNKNOWN");
     text("kpi-tasks", state.availability.agents ? runningTasks : "UNKNOWN");
     text("kpi-review", state.availability.agents ? waitingReview : "UNKNOWN");
     text("kpi-blocked", state.availability.programs && state.availability.runs
       ? blockedPrograms + blockedRuns
       : "UNKNOWN");
-    text("kpi-providers", state.routing ? Object.keys(providerNames).length : "UNKNOWN");
+    var nativeReady = state.runtime && state.runtime.runtimes
+      ? Object.values(state.runtime.runtimes).filter(function (runtime) { return runtime.status === "READY"; }).length
+      : null;
+    text("kpi-native-agents", nativeReady === null ? "UNKNOWN" : nativeReady);
   }
 
   function renderProgram() {
@@ -316,8 +319,8 @@
 
   function stateKind(value) {
     var status = normalized(value);
-    if (["ONLINE", "HEALTHY", "AVAILABLE", "YES"].indexOf(status) !== -1) return "good";
-    if (["AUTH REQUIRED", "UNKNOWN", "CONFIGURED", "DEGRADED"].indexOf(status) !== -1) return "warn";
+    if (["ONLINE", "HEALTHY", "AVAILABLE", "YES", "READY"].indexOf(status) !== -1) return "good";
+    if (["AUTH REQUIRED", "UNKNOWN", "CHECKING", "UNVERIFIED", "CONFIGURED", "DEGRADED", "NOT QUERIED"].indexOf(status) !== -1) return "warn";
     return "bad";
   }
 
@@ -334,23 +337,29 @@
   }
 
   function renderRuntime() {
-    var runtime = state.routing && state.routing.runtime;
+    var native = state.runtime && state.runtime.runtimes;
+    var codex = native && native.codex_native;
+    var claude = native && native.claude_native;
+    var nativeStatus = state.runtime && state.runtime.native_status || "UNKNOWN";
     var badge = $("overview-runtime-badge");
-    if (!runtime) {
-      runtimeValue("runtime-omniroute", "UNKNOWN");
-      runtimeValue("runtime-credentials", "UNKNOWN");
-      runtimeValue("runtime-providers", "UNKNOWN");
-      runtimeValue("runtime-routes", "UNKNOWN");
-      badge.textContent = "RUNTIME UNKNOWN";
-      badge.className = "ops-badge neutral";
-      return;
+    runtimeValue("runtime-native", nativeStatus);
+    runtimeValue("runtime-codex-native", codex ? codex.status : "UNKNOWN");
+    runtimeValue("runtime-claude-native", claude ? claude.status : "UNKNOWN");
+
+    var routeRuntime = state.routing && state.routing.runtime;
+    if (!routeRuntime) {
+      runtimeValue("runtime-omniroute", state.routingQueried ? "UNAVAILABLE" : "NOT QUERIED");
+      runtimeValue("runtime-credentials", state.routingQueried ? "UNAVAILABLE" : "UNKNOWN");
+      runtimeValue("runtime-providers", state.routingQueried ? "UNAVAILABLE" : "UNKNOWN");
+      runtimeValue("runtime-routes", state.routingQueried ? "UNAVAILABLE" : "UNKNOWN");
+    } else {
+      runtimeValue("runtime-omniroute", routeRuntime.status);
+      runtimeValue("runtime-credentials", routeRuntime.credential_store);
+      runtimeValue("runtime-providers", routeRuntime.providers);
+      runtimeValue("runtime-routes", state.routing.summary.callable_routes);
     }
-    runtimeValue("runtime-omniroute", runtime.status);
-    runtimeValue("runtime-credentials", runtime.credential_store);
-    runtimeValue("runtime-providers", runtime.providers);
-    runtimeValue("runtime-routes", state.routing.summary.callable_routes);
-    badge.textContent = "RUNTIME " + runtime.status;
-    badge.className = "ops-badge " + (runtime.status === "ONLINE" ? "online" : runtime.status === "DEGRADED" ? "degraded" : "offline");
+    badge.textContent = "NATIVE " + nativeStatus.replaceAll("_", " ");
+    badge.className = "ops-badge " + (nativeStatus === "READY" ? "online" : nativeStatus === "UNKNOWN" || nativeStatus === "CHECKING" ? "neutral" : "degraded");
   }
 
   function cssToken(value) {
@@ -362,11 +371,13 @@
     body.innerHTML = "";
     if (!state.routing) {
       var unavailable = node("tr");
-      var cell = node("td", "ops-empty", "Routing telemetry unavailable.");
+      var cell = node("td", "ops-empty", state.routingQueried
+        ? "OmniRoute routing telemetry is unavailable."
+        : "Routing telemetry not queried. Open Models & Routing to inspect OmniRoute.");
       cell.colSpan = 4;
       unavailable.appendChild(cell);
       body.appendChild(unavailable);
-      text("routing-count", "UNKNOWN");
+      text("routing-count", state.routingQueried ? "UNAVAILABLE" : "NOT QUERIED");
       return;
     }
     var routes = state.routing.routes || [];
@@ -563,7 +574,9 @@
     var available = !!(state.routing && state.routing.summary && state.routing.summary.actions_available);
     runButton.dataset.runtimeDisabled = available ? "false" : "true";
     runButton.disabled = !available;
-    reason.textContent = available ? "" : "Disabled: no callable provider route is currently observed.";
+    reason.textContent = available ? "" : state.routingQueried
+      ? "Disabled: no callable OmniRoute provider route is currently observed."
+      : "Open Models & Routing to check OmniRoute routes before running a mission.";
   }
 
   function showOverview(targetId) {
@@ -586,6 +599,7 @@
     }
     if (lower === "models" || lower === "routing" || lower === "models & routing") {
       showOverview("overview-routing");
+      loadRouting();
       feedback.textContent = "Routing opened";
       return;
     }
@@ -635,7 +649,10 @@
       // paused (see overviewPollingSuspended()) the whole time Chat/Dev
       // was open, so returning here is exactly the case that must not
       // show stale data.
-      if (!overviewPollingSuspended()) { loadOverview(); loadRouting(); }
+      if (!overviewPollingSuspended()) {
+        loadOverview();
+        if (target === "overview-routing") loadRouting();
+      }
     });
   });
 
@@ -665,9 +682,8 @@
     runCommand($("nexus-command-input").value);
   });
 
-  window.NexusControlCenter = { refresh: loadOverview, showOverview: showOverview };
+  window.NexusControlCenter = { refresh: loadOverview, refreshRouting: loadRouting, showOverview: showOverview };
+  gateActions();
   loadOverview();
-  loadRouting();
   setInterval(loadOverview, 6000);
-  setInterval(loadRouting, 20000);
 })();
