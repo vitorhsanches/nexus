@@ -367,6 +367,90 @@ def test_global_collection_skips_the_intentionally_broken_fixture(tmp_path):
     assert not (run_dev_e2e.FIXTURE / "__pycache__").exists(), "collecting must not import the fixture"
 
 
+def _process_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        listing = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                                 capture_output=True, text=True, check=False).stdout
+        return f'"{pid}"' in listing
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _wait_gone(pid: int, seconds: float = 10) -> bool:
+    deadline = run_dev_e2e.time.monotonic() + seconds
+    while run_dev_e2e.time.monotonic() < deadline:
+        if not _process_is_running(pid):
+            return True
+        run_dev_e2e.time.sleep(0.2)
+    return False
+
+
+def test_a_fixture_test_timeout_is_bounded_kills_the_tree_and_explains_itself(tmp_path):
+    # subprocess.run(timeout=...) kills only the child; a grandchild that keeps the
+    # output pipes open then holds the call far beyond the timeout (25 s here).
+    pid_file = tmp_path / "grandchild.pid"
+    grandchild = "import time; time.sleep(30)"
+    parent = (
+        "import subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "print('partial-output-marker', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    started = run_dev_e2e.time.monotonic()
+    with pytest.raises(RuntimeError) as excinfo:
+        run_dev_e2e.run_fixture_tests(tmp_path, 3, command=[sys.executable, "-c", parent])
+    elapsed = run_dev_e2e.time.monotonic() - started
+    message = str(excinfo.value)
+    assert elapsed < 20, f"the timeout overran: {elapsed:.1f}s"
+    assert "did not finish within 3s" in message and "process tree was killed" in message
+    assert "partial-output-marker" in message
+    assert f"cwd: {tmp_path}" in message and sys.executable in message and "command:" in message
+    assert _wait_gone(int(pid_file.read_text())), "the grandchild survived the timeout"
+
+
+def test_fixture_tests_run_without_inherited_pytest_options_cache_or_bytecode(tmp_path, monkeypatch):
+    destination = run_dev_e2e.prepare_fixture(tmp_path / "fixture")
+    (destination / "calc.py").write_text("def add(left, right):\n    return left + right\n", encoding="utf-8")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--definitely-not-a-pytest-option")
+    monkeypatch.setenv("PYTEST_PLUGINS", "definitely_not_a_plugin")
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    result = run_dev_e2e.run_fixture_tests(destination, 60)
+    assert result["returncode"] == 0 and "2 passed" in result["stdout"]
+    leftovers = {entry.name for entry in destination.iterdir()} - {".git", ".gitignore", "calc.py", "test_calc.py"}
+    assert leftovers == set(), f"the run left artifacts in the worktree: {leftovers}"
+
+
+def test_a_failing_fixture_test_reports_command_python_and_output(tmp_path):
+    destination = run_dev_e2e.prepare_fixture(tmp_path / "fixture")  # intentional bug: tests fail
+    with pytest.raises(RuntimeError) as excinfo:
+        run_dev_e2e.run_fixture_tests(destination, 60)
+    message = str(excinfo.value)
+    assert "Fixture pytest failed (1)" in message and "2 failed" in message
+    assert "-m pytest" in message and f"cwd: {destination}" in message and sys.executable in message
+
+
+def test_fixture_tests_cannot_wait_for_input(tmp_path):
+    result = run_dev_e2e.run_fixture_tests(
+        tmp_path, 15, command=[sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"])
+    assert result["stdout"] == "''"
+
+
+def test_a_fixture_test_failure_stops_the_smoke_before_any_review_is_recorded(tmp_path, monkeypatch):
+    source, api = _world(tmp_path)
+
+    def stalled(*_args, **_kwargs):
+        raise RuntimeError("Fixture pytest did not finish within 120s")
+
+    monkeypatch.setattr(run_dev_e2e, "run_fixture_tests", stalled)
+    with pytest.raises(RuntimeError, match="did not finish"):
+        _run(source, api)
+    assert not [call for call in api.calls if call[1].endswith("/reviews")]
+
+
 def test_smoke_refuses_real_agent_call_without_confirmation():
     args = SimpleNamespace(confirm_agent_call=False)
     with pytest.raises(RuntimeError, match="real agent"):

@@ -27,7 +27,13 @@ the Nexus Development cockpit.
    You decide them in the cockpit; the harness waits and records the final
    statuses.
 5. **Changes and tests.** Changed files and the diff must be non-empty, and the
-   fixture's pytest suite is run in the isolated worktree.
+   fixture's pytest suite is run in the isolated worktree. That run is bounded
+   (`--test-timeout`, default 120 s) and isolated: no inherited
+   `PYTEST_ADDOPTS`/`PYTEST_PLUGINS`, plugin autoload and cache off, no bytecode,
+   stdin closed, output captured in files. On a timeout the whole process tree is
+   killed (a plain `subprocess.run` timeout would wait for any grandchild holding
+   the pipes) and the error names the command, cwd, Python, elapsed time and the
+   partial output. No review is recorded after a failed test step.
 6. **Review.** A review snapshot is recorded (`POST .../reviews`): it must be
    `REVIEWED`, approval-ready, bound to the session's base commit and list
    exactly the files of the inspected diff. The preflight result is reported

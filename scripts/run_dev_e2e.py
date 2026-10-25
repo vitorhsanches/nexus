@@ -15,8 +15,10 @@ import http.client
 import json
 import shutil
 import socket
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Protocol
 import urllib.error
@@ -28,6 +30,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "dev_e2e_project"
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"}
+# Environment that could change which plugins/options/startup code pytest runs with.
+PYTEST_ENV_DROP = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DEBUG", "PYTHONSTARTUP", "PYTHONINSPECT")
+OUTPUT_TAIL_CHARS = 4000
 
 
 def prepare_fixture(destination: Path) -> Path:
@@ -232,6 +237,69 @@ def parse_sse_events(body: str) -> list[dict]:
     return events
 
 
+def fixture_test_environment(base: dict | None = None) -> dict:
+    """Environment for the fixture's pytest run: no inherited options/plugins,
+    no bytecode, no plugin autoload. PYTHONPATH is kept so the interpreter can
+    still find pytest in unusual setups."""
+    env = dict(os.environ if base is None else base)
+    for name in PYTEST_ENV_DROP:
+        env.pop(name, None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
+def _tail(path: Path) -> str:
+    text = path.read_bytes().decode("utf-8", "replace").strip() if path.exists() else ""
+    return text[-OUTPUT_TAIL_CHARS:]
+
+
+def run_fixture_tests(worktree: Path, timeout: float, *, command: list[str] | None = None) -> dict:
+    """Run the fixture's own tests in the session worktree, bounded and diagnosable.
+
+    Output goes to files, not pipes, and stdin is closed, so a stray grandchild
+    can neither keep this call waiting past ``timeout`` nor block on input; on a
+    timeout the whole process tree is killed. Failures name the command, cwd,
+    interpreter, elapsed time and the output tail.
+    """
+    # Same tree-kill the Codex watchdogs use; the script lives inside the repository.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from nexus.process_timeout import kill_process_tree
+
+    command = command or [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                          "--rootdir", str(worktree), "test_calc.py"]
+    where = f"command: {' '.join(command)}\ncwd: {worktree}\npython: {sys.executable}"
+    with tempfile.TemporaryDirectory(prefix="nexus-e2e-pytest-", ignore_cleanup_errors=True) as scratch:
+        out_path, err_path = Path(scratch) / "stdout.txt", Path(scratch) / "stderr.txt"
+        started = time.monotonic()
+        with open(out_path, "wb") as out, open(err_path, "wb") as err:
+            process = subprocess.Popen(command, cwd=worktree, env=fixture_test_environment(),
+                                       stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+            try:
+                returncode = process.wait(timeout=timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                kill_process_tree(process)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+                returncode, timed_out = None, True
+        elapsed = round(time.monotonic() - started, 1)
+        stdout, stderr = _tail(out_path), _tail(err_path)
+    if timed_out:
+        raise RuntimeError(
+            f"Fixture pytest did not finish within {timeout}s (elapsed {elapsed}s); its process tree was killed.\n"
+            f"{where}\npartial stdout:\n{stdout or '(none)'}\npartial stderr:\n{stderr or '(none)'}\n"
+            "Run the same command by hand in the worktree to compare; a pending approval or sandbox permission "
+            "prompt in the Nexus cockpit can also keep a test run from completing.")
+    if returncode:
+        raise RuntimeError(f"Fixture pytest failed ({returncode}) after {elapsed}s:\n{where}\n{stdout}\n{stderr}")
+    return {"returncode": returncode, "stdout": stdout, "stderr": stderr, "elapsed": elapsed}
+
+
 def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout
 
@@ -383,15 +451,7 @@ def run_smoke(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
     if not (worktree / "calc.py").is_file() or not (worktree / "test_calc.py").is_file():
         raise RuntimeError("Expected fixture files are missing from the session worktree.")
 
-    test_run = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "test_calc.py"],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-        timeout=args.test_timeout,
-    )
-    if test_run.returncode:
-        raise RuntimeError(f"Fixture pytest failed ({test_run.returncode}):\n{test_run.stdout}\n{test_run.stderr}")
+    test_run = run_fixture_tests(worktree, args.test_timeout)
 
     # Review: a snapshot of exactly what the human would approve. Apply/Reject
     # are deliberately not part of the harness.
@@ -428,7 +488,7 @@ def run_smoke(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
         "approvals": approvals_seen,
         "changed_files": changes,
         "diff_files": diff["files"],
-        "fixture_tests": test_run.stdout.strip(),
+        "fixture_tests": test_run["stdout"],
         "review": {"review_id": review["review_id"], "status": review["status"], "files": review_paths,
                    "snapshot_hash": snapshot.get("snapshot_hash")},
         "preflight": {"ready": bool(preflight.get("ready")),
