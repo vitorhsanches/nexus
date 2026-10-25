@@ -2,8 +2,6 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,10 +12,9 @@ from nexus.workspace import cost_authorizations, service
 
 
 @pytest.fixture
-def cost_db():
+def cost_db(tmp_path):
     original_path, original_dir = database.DATABASE_PATH, database.STORAGE_DIR
-    test_root = Path(r"C:\Users\Vitor Sanches\.codex\visualizations\2026\10\19\01a15662-5393-7000-be06-f93ba92c6579")
-    database.STORAGE_DIR = test_root / f"cost-auth-test-{uuid4().hex}"
+    database.STORAGE_DIR = tmp_path / "cost-auth-test"
     database.DATABASE_PATH = database.STORAGE_DIR / "nexus.db"
     database.initialize_database()
     with database.get_connection() as connection:

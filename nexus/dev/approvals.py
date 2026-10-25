@@ -123,16 +123,19 @@ def deferred_handler(dev_session_id: str, turn_id: str, client_ref: list):
         if kind is None or not client_ref:
             return False
         approval_id = f"APPROVAL-{uuid.uuid4().hex[:12].upper()}"
-        with get_connection() as connection:
-            connection.execute(
-                """INSERT INTO dev_approvals (id, dev_session_id, turn_id, kind, summary_json, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, 'PENDING', ?)""",
-                (approval_id, dev_session_id, turn_id, kind, json.dumps(_summary(kind, params)), _now()),
-            )
-        pending = _Pending(approval_id, dev_session_id, turn_id, client_ref[0], request_id)
-        pending.timer = threading.Timer(timeout_seconds(), _expire, args=(approval_id,))
-        pending.timer.daemon = True
         with _lock:
+            # A reader treats a durable PENDING row without a live request as
+            # orphaned. Publish both under the same lock so it cannot expire
+            # an approval between the SQLite commit and in-memory registration.
+            with get_connection() as connection:
+                connection.execute(
+                    """INSERT INTO dev_approvals (id, dev_session_id, turn_id, kind, summary_json, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, 'PENDING', ?)""",
+                    (approval_id, dev_session_id, turn_id, kind, json.dumps(_summary(kind, params)), _now()),
+                )
+            pending = _Pending(approval_id, dev_session_id, turn_id, client_ref[0], request_id)
+            pending.timer = threading.Timer(timeout_seconds(), _expire, args=(approval_id,))
+            pending.timer.daemon = True
             _pending[approval_id] = pending
         pending.timer.start()
         return True

@@ -306,6 +306,50 @@ def test_a_decision_must_target_the_owning_session(isolated_registry):
     approvals.decide(session_id, pending["approval_id"], "decline")
 
 
+def test_pending_approval_cannot_expire_during_registration(isolated_registry, monkeypatch):
+    """A polling reader must not mistake a newly inserted row for an orphan."""
+    inserted = threading.Event()
+    release_registration = threading.Event()
+    original_pending = approvals._Pending
+
+    class PausedPending(original_pending):
+        def __init__(self, *args, **kwargs):
+            inserted.set()  # The SQLite PENDING row has already committed.
+            assert release_registration.wait(5)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(approvals, "_Pending", PausedPending)
+    session = _native_session(isolated_registry, model="gpt-native")
+    NativeFake.approval_request = COMMAND_REQUEST
+    turn = executor.run_dev_turn(session["session_id"], "fix and run pytest")
+    assert inserted.wait(5)
+
+    reader_started = threading.Event()
+    reader_finished = threading.Event()
+    observed = []
+
+    def read_approvals():
+        reader_started.set()
+        try:
+            observed.extend(approvals.list_for_session(session["session_id"]))
+        finally:
+            reader_finished.set()
+
+    reader = threading.Thread(target=read_approvals, daemon=True)
+    reader.start()
+    try:
+        assert reader_started.wait(5)
+        assert not reader_finished.wait(1), "reader observed a row before its live request was registered"
+    finally:
+        release_registration.set()
+        reader.join(timeout=5)
+
+    assert reader_finished.is_set()
+    assert len(observed) == 1 and observed[0]["status"] == "PENDING"
+    approvals.decide(session["session_id"], observed[0]["approval_id"], "decline")
+    assert _wait_until(lambda: _turn_status(turn["turn_id"]) == "COMPLETED")
+
+
 def test_only_command_and_file_change_requests_are_deferred():
     handler = approvals.deferred_handler("DEV-1", "TURN-1", [object()])
     assert handler("item/permissions/requestApproval", {}, 1) is False
