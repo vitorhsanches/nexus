@@ -506,6 +506,15 @@ def initialize_database() -> None:
                 ON dev_approvals(dev_session_id, status);
             """
         )
+        try:
+            # Claude Native approvals once persisted the complete tool input;
+            # only its digest/size are kept now, so drop what older rows hold.
+            connection.execute(
+                "UPDATE dev_approvals SET summary_json = json_remove(summary_json, '$.input') "
+                "WHERE json_valid(summary_json) AND json_type(summary_json, '$.input') IS NOT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass  # SQLite built without JSON1; reads still strip the field
 
         # Intelligent Maestro (P2A). A conversation is backed by exactly one
         # read-only Nexus Chat session (the Codex thread holds the content);

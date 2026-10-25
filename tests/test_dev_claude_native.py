@@ -29,6 +29,9 @@ from tests.test_dev_executor import (  # noqa: F401 -- fixtures are used by name
 
 SESSION = "11111111-2222-4333-8444-555555555555"
 BASH_INPUT = {"command": "python -m pytest -q", "description": "Run the tests"}
+EDIT_INPUT = {"file_path": "calc.py", "old_string": "a - b", "new_string": "a + b"}
+EDIT_DIGEST = claude_native.operation_digest("Edit", EDIT_INPUT)
+SECRET_CONTENT = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
 
 # -- adapter: command line ---------------------------------------------------------
@@ -38,7 +41,8 @@ def test_development_command_routes_every_prompt_to_nexus_and_never_bypasses():
     command = build_command("claude.exe", session_id=SESSION, resume=False, model="claude-opus-4-8", effort="high",
                             development=True)
     assert command[command.index("--input-format") + 1] == "stream-json"
-    assert command[command.index("--tools") + 1] == "Read,Grep,Glob,Edit,Write,Bash,PowerShell"
+    assert command[command.index("--tools") + 1] == "Read,Grep,Glob,Edit,Write"
+    assert "Bash" not in command and "PowerShell" not in command, "no shell tool is offered on Windows"
     assert command[command.index("--permission-mode") + 1] == "manual"
     assert command[command.index("--permission-prompt-tool") + 1] == "stdio"
     assert command[command.index("--permission-prompts") + 1] == "host"
@@ -144,20 +148,20 @@ def _control_responses(process):
     return [m["response"] for m in process.written if m.get("type") == "control_response"]
 
 
-def test_a_sensitive_command_waits_for_a_decision_and_only_the_exact_input_is_allowed(tmp_path):
-    process = FakeHostProcess([_init(), _can_use("r1", "Bash", BASH_INPUT), "WAIT", RESULT])
+def test_a_sensitive_edit_waits_for_a_decision_and_only_the_exact_input_is_allowed(tmp_path):
+    process = FakeHostProcess([_init(), _can_use("r1", "Edit", EDIT_INPUT), "WAIT", RESULT])
     seen = []
     turn = _turn(process, tmp_path, lambda rid, tool, tool_input: seen.append((rid, tool, tool_input)) or True)
     worker = threading.Thread(target=lambda: turn.run("fix the bug", timeout_seconds=30))
     worker.start()
     assert _wait_until(lambda: seen)
-    assert seen == [("r1", "Bash", BASH_INPUT)]
+    assert seen == [("r1", "Edit", EDIT_INPUT)]
     assert _control_responses(process) == [], "nothing is answered before a human decides"
 
-    turn.respond_server_request("r1", {"decision": "accept"})
+    turn.respond_server_request("r1", {"decision": "accept", "operation_sha256": EDIT_DIGEST})
     worker.join(timeout=5)
     assert _control_responses(process) == [{"subtype": "success", "request_id": "r1",
-                                             "response": {"behavior": "allow", "updatedInput": BASH_INPUT}}]
+                                             "response": {"behavior": "allow", "updatedInput": EDIT_INPUT}}]
     first, second = process.written[0], process.written[1]
     assert first["request"]["subtype"] == "initialize"
     assert second == {"type": "user", "message": {"role": "user", "content": "fix the bug"},
@@ -167,14 +171,101 @@ def test_a_sensitive_command_waits_for_a_decision_and_only_the_exact_input_is_al
 
 @pytest.mark.parametrize("decision", ["decline", "cancel", "acceptForSession", None])
 def test_anything_but_accept_denies(tmp_path, decision):
-    process = FakeHostProcess([_init(), _can_use("r1", "Bash", BASH_INPUT), "WAIT", RESULT])
+    process = FakeHostProcess([_init(), _can_use("r1", "Edit", EDIT_INPUT), "WAIT", RESULT])
     turn = _turn(process, tmp_path, lambda *_: True)
     worker = threading.Thread(target=lambda: turn.run("x", timeout_seconds=30))
     worker.start()
     assert _wait_until(lambda: "r1" in turn._pending_inputs)
-    turn.respond_server_request("r1", {"decision": decision})
+    turn.respond_server_request("r1", {"decision": decision, "operation_sha256": EDIT_DIGEST})
     worker.join(timeout=5)
     assert _control_responses(process)[0]["response"]["behavior"] == "deny"
+
+
+@pytest.mark.parametrize("approved", [None, "", "0" * 64, claude_native.operation_digest("Edit", {**EDIT_INPUT, "new_string": "evil"})])
+def test_an_accept_that_does_not_match_the_requested_operation_is_denied(tmp_path, approved):
+    process = FakeHostProcess([_init(), _can_use("r1", "Edit", EDIT_INPUT), "WAIT", RESULT])
+    turn = _turn(process, tmp_path, lambda *_: True)
+    worker = threading.Thread(target=lambda: turn.run("x", timeout_seconds=30))
+    worker.start()
+    assert _wait_until(lambda: "r1" in turn._pending_inputs)
+    turn.respond_server_request("r1", {"decision": "accept", "operation_sha256": approved})
+    worker.join(timeout=5)
+    [response] = _control_responses(process)
+    assert response["response"]["behavior"] == "deny" and "updatedInput" not in response["response"]
+
+
+@pytest.mark.parametrize("tool", ["Bash", "PowerShell"])
+def test_arbitrary_commands_are_denied_before_any_approval_exists(tmp_path, tool):
+    process = FakeHostProcess([_init(), _can_use("r1", tool, BASH_INPUT), "WAIT", RESULT])
+    asked = []
+    _turn(process, tmp_path, lambda *args: asked.append(args) or True).run("x", timeout_seconds=30)
+    assert asked == []
+    [response] = _control_responses(process)
+    assert response["response"]["behavior"] == "deny" and "verification profile" in response["response"]["message"]
+
+
+def test_a_session_that_exposes_a_shell_tool_is_refused(tmp_path):
+    process = FakeHostProcess([_init(tools=("Read", "Bash")), RESULT])
+    with pytest.raises(ClaudeNativeError) as excinfo:
+        _turn(process, tmp_path, lambda *_: True).run("x", timeout_seconds=30)
+    assert excinfo.value.code == "UNSAFE_TOOLS"
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Read", {"file_path": "..\\outside.txt"}),
+    ("Read", {"file_path": "C:\\Windows\\win.ini"}),
+    ("Read", {"file_path": "\\\\server\\share\\x.txt"}),
+    ("Read", {"file_path": "notes.txt:hidden"}),
+    ("Read", {"file_path": ".env"}),
+    ("Read", {"file_path": "config/.aws/credentials"}),
+    ("Read", {}),
+    ("Grep", {"pattern": "x", "path": ".."}),
+    ("Glob", {"pattern": "../**/*.py"}),
+    ("Glob", {"pattern": "C:\\Users\\**\\*"}),
+    ("Edit", {"file_path": ".git\\config", "old_string": "a", "new_string": "b"}),
+    ("Write", {"file_path": "sub/.GIT/hooks/pre-commit", "content": "x"}),
+    ("Write", {"file_path": ".env.local", "content": "x"}),
+    ("Write", {"file_path": "", "content": "x"}),
+])
+def test_access_outside_the_worktree_or_to_secrets_is_denied_before_a_human_is_asked(tmp_path, tool, tool_input):
+    process = FakeHostProcess([_init(), _can_use("r1", tool, tool_input), "WAIT", RESULT])
+    asked = []
+    _turn(process, tmp_path, lambda *args: asked.append(args) or True).run("x", timeout_seconds=30)
+    assert asked == []
+    assert _control_responses(process)[0]["response"]["behavior"] == "deny"
+
+
+def test_a_junction_or_symlink_escaping_the_worktree_is_denied(tmp_path):
+    import os
+    import subprocess
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    link = worktree / "link"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except OSError:
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+    process = FakeHostProcess([_init(), _can_use("r1", "Write", {"file_path": "link/pwn.txt", "content": "x"}), "WAIT", RESULT])
+    asked = []
+    _turn(process, worktree, lambda *args: asked.append(args) or True).run("x", timeout_seconds=30)
+    assert asked == [] and _control_responses(process)[0]["response"]["behavior"] == "deny"
+
+
+def test_reads_of_sensitive_paths_never_stream_their_content(tmp_path):
+    events = []
+    process = FakeHostProcess([
+        _init(),
+        {"type": "assistant", "message": {"id": "m1", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": ".env"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": SECRET_CONTENT}]}},
+        RESULT,
+    ])
+    ClaudeTurn(str(tmp_path), session_id=SESSION, resume=False, development=True, on_event=events.append,
+               launcher=lambda command, env, cwd: process).run("x", timeout_seconds=30)
+    assert SECRET_CONTENT not in json.dumps(events)
 
 
 def test_writes_outside_the_worktree_are_denied_before_reaching_a_human(tmp_path):
@@ -242,7 +333,7 @@ def test_commands_and_file_edits_stream_as_cockpit_items(tmp_path):
 
 
 def test_interrupt_while_a_decision_is_pending_stops_the_process(tmp_path):
-    process = FakeHostProcess([_init(), _can_use("r1", "Bash", BASH_INPUT), "HANG"])
+    process = FakeHostProcess([_init(), _can_use("r1", "Edit", EDIT_INPUT), "HANG"])
     turn = _turn(process, tmp_path, lambda *_: True)
     errors = []
 
@@ -397,7 +488,7 @@ def test_claude_turn_runs_in_the_worktree_and_resumes_its_conversation(isolated_
     assert ScriptedDevTurn.instances[1].effort == "high"
 
 
-def _start_pending(tmp_path, request=("Bash", BASH_INPUT)):
+def _start_pending(tmp_path, request=("Edit", EDIT_INPUT)):
     session = _claude_session(tmp_path)
     ScriptedDevTurn.request = request
     turn = executor.run_dev_turn(session["session_id"], "fix and test")
@@ -405,29 +496,85 @@ def _start_pending(tmp_path, request=("Bash", BASH_INPUT)):
     return session["session_id"], turn["turn_id"], _pending(session["session_id"])
 
 
-def test_a_claude_command_is_shown_exactly_and_runs_only_after_accept(isolated_registry, claude_dev):
+def test_a_claude_edit_is_decided_on_the_exact_operation_and_runs_only_after_accept(isolated_registry, claude_dev):
     session_id, turn_id, pending = _start_pending(isolated_registry)
     live = executor._active_dev_turns[turn_id]
     with live.lock:
         methods = [event.get("method") for _seq, event in live.buffer]
-    assert "item/commandExecution/requestApproval" in methods, "the cockpit is told live that a decision is needed"
+    assert "item/fileChange/requestApproval" in methods, "the cockpit is told live that a decision is needed"
     summary = pending["summary"]
-    assert (pending["kind"], summary["tool"], summary["command"]) == ("command", "Bash", "python -m pytest -q")
-    assert json.loads(summary["input"]) == BASH_INPUT
+    assert pending["kind"] == "file_change" and summary["tool"] == "Edit" and summary["grantRoot"] == "calc.py"
+    assert summary["operation_sha256"] == EDIT_DIGEST and summary["operation_bytes"] > 0
+    assert "input" not in summary
+    detail = approvals.operation_detail(session_id, pending["approval_id"])
+    assert json.loads(detail["operation"]) == EDIT_INPUT and detail["operation_sha256"] == EDIT_DIGEST
     runner = ScriptedDevTurn.instances[-1]
     assert runner.answers == []
-    approvals.decide(session_id, pending["approval_id"], "accept")
-    assert runner.answers == [("req-1", {"decision": "accept"})]
+    with pytest.raises(DevServiceError) as missing:
+        approvals.decide(session_id, pending["approval_id"], "accept")
+    assert missing.value.code == "OPERATION_MISMATCH"
+    with pytest.raises(DevServiceError):
+        approvals.decide(session_id, pending["approval_id"], "accept", operation_sha256="f" * 64)
+    assert runner.answers == [] and _pending(session_id) is not None, "a mismatch leaves the request pending"
+    approvals.decide(session_id, pending["approval_id"], "accept", operation_sha256=EDIT_DIGEST)
+    assert runner.answers == [("req-1", {"decision": "accept", "operation_sha256": EDIT_DIGEST})]
     assert _wait_until(lambda: _status(turn_id) == "COMPLETED")
     assert dev_sessions.get_turn(turn_id)["response_text"] == "decision=accept"
     assert approvals.list_for_session(session_id)[0]["status"] == "APPROVED"
+    with pytest.raises(DevServiceError) as gone:
+        approvals.operation_detail(session_id, pending["approval_id"])
+    assert gone.value.code == "OPERATION_UNAVAILABLE"
+
+
+def test_claude_tool_input_is_never_persisted_or_listed(isolated_registry, claude_dev):
+    content = {"file_path": "notes.txt", "content": SECRET_CONTENT}
+    session_id, _turn_id, pending = _start_pending(isolated_registry, ("Write", content))
+    from nexus.registry.database import get_connection
+
+    with get_connection() as connection:
+        stored = [dict(row) for row in connection.execute("SELECT * FROM dev_approvals")]
+        dump = json.dumps(stored) + json.dumps(approvals.list_for_session(session_id))
+    assert SECRET_CONTENT not in dump and "AWS_SECRET" not in dump
+    assert pending["summary"]["operation_sha256"] == claude_native.operation_digest("Write", content)
+    assert "sha256" in dump
+    approvals.decide(session_id, pending["approval_id"], "decline")
+    with get_connection() as connection:
+        assert SECRET_CONTENT not in json.dumps([dict(row) for row in connection.execute("SELECT * FROM dev_approvals")])
+
+
+def test_legacy_rows_with_a_stored_input_are_scrubbed(isolated_registry, claude_dev):
+    from nexus.registry.database import get_connection, initialize_database
+
+    session = _claude_session(isolated_registry)
+    with get_connection() as connection:
+        connection.execute(
+            "INSERT INTO dev_approvals (id, dev_session_id, turn_id, kind, summary_json, status, created_at) "
+            "VALUES ('APPROVAL-OLD1', ?, 'T', 'command', ?, 'APPROVED', 'x')",
+            (session["session_id"], json.dumps({"kind": "command", "tool": "Bash", "input": SECRET_CONTENT})))
+    assert "input" not in approvals.list_for_session(session["session_id"])[0]["summary"]
+    initialize_database()
+    with get_connection() as connection:
+        assert SECRET_CONTENT not in connection.execute("SELECT summary_json FROM dev_approvals").fetchone()[0]
+
+
+def test_a_claude_command_never_reaches_a_human(isolated_registry, claude_dev):
+    session = _claude_session(isolated_registry)
+    ScriptedDevTurn.request = ("Bash", BASH_INPUT)
+    turn = executor.run_dev_turn(session["session_id"], "run the tests")
+    assert _wait_until(lambda: _status(turn["turn_id"]) == "COMPLETED")
+    assert dev_sessions.get_turn(turn["turn_id"])["response_text"] == "denied before asking"
+    assert approvals.list_for_session(session["session_id"]) == []
+
+
+def test_a_decline_needs_no_operation_digest(isolated_registry, claude_dev):
+    session_id, _turn_id, pending = _start_pending(isolated_registry)
+    approvals.decide(session_id, pending["approval_id"], "decline")
+    assert ScriptedDevTurn.instances[-1].answers == [("req-1", {"decision": "decline"})]
 
 
 def test_a_claude_file_edit_is_a_file_change_approval(isolated_registry, claude_dev):
-    session_id, _turn_id, pending = _start_pending(
-        isolated_registry, ("Edit", {"file_path": "calc.py", "old_string": "a - b", "new_string": "a + b"}))
+    session_id, _turn_id, pending = _start_pending(isolated_registry)
     assert pending["kind"] == "file_change" and pending["summary"]["grantRoot"] == "calc.py"
-    assert json.loads(pending["summary"]["input"])["new_string"] == "a + b"
     approvals.decide(session_id, pending["approval_id"], "decline")
     assert ScriptedDevTurn.instances[-1].answers == [("req-1", {"decision": "decline"})]
 
@@ -455,6 +602,19 @@ def test_an_expired_claude_approval_is_declined(isolated_registry, claude_dev):
     assert ScriptedDevTurn.instances[-1].answers == [("req-1", {"decision": "decline"})]
     assert _wait_until(lambda: _status(turn_id) == "COMPLETED")
     assert approvals.list_for_session(session_id)[0]["status"] == "EXPIRED"
+    with pytest.raises(DevServiceError) as late:
+        approvals.decide(session_id, pending["approval_id"], "accept", operation_sha256=EDIT_DIGEST)
+    assert late.value.code == "APPROVAL_NOT_PENDING"
+
+
+def test_a_restart_leaves_no_approvable_operation(isolated_registry, claude_dev):
+    session_id, _turn_id, pending = _start_pending(isolated_registry)
+    approvals._pending.clear()  # Nexus restarted: the in-memory operation is gone
+    assert approvals.list_for_session(session_id)[0]["status"] == "EXPIRED"
+    with pytest.raises(DevServiceError):
+        approvals.operation_detail(session_id, pending["approval_id"])
+    with pytest.raises(DevServiceError):
+        approvals.decide(session_id, pending["approval_id"], "accept", operation_sha256=EDIT_DIGEST)
 
 
 def test_claude_mission_validates_against_the_claude_catalog(isolated_registry, claude_dev, monkeypatch):
@@ -493,6 +653,19 @@ class ClaudeDevRoutesTest(unittest.TestCase):
             response = self._client().post("/api/dev/sessions", json={"project_id": "demo", "backend": "claude_native", "requested_model": "sonnet"})
         self.assertEqual(response.status_code, 200)
         mock_create.assert_called_once_with("demo", requested_model="sonnet", backend="claude_native")
+
+    def test_operation_route_is_uncached_and_the_digest_is_forwarded_to_decide(self):
+        client = self._client()
+        detail = {"approval_id": "A", "tool": "Edit", "operation_sha256": "a" * 64, "operation": "{}"}
+        with patch("nexus.dev.approvals.operation_detail", return_value=detail):
+            response = client.get("/api/dev/sessions/DEV-1/approvals/A/operation")
+        self.assertEqual(response.json(), detail)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        with patch("nexus.dev.approvals.decide", return_value={"status": "APPROVED"}) as mock_decide:
+            client.post("/api/dev/sessions/DEV-1/approvals/A", json={"decision": "accept", "operation_sha256": "a" * 64})
+        mock_decide.assert_called_once_with("DEV-1", "A", "accept", operation_sha256="a" * 64)
+        self.assertEqual(client.post("/api/dev/sessions/DEV-1/approvals/A",
+                                     json={"decision": "accept", "operation_sha256": "short"}).status_code, 422)
 
     def test_claude_development_catalog_route(self):
         with patch("nexus.chat.service.list_models", return_value={"models": []}) as mock_list:

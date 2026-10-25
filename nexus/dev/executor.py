@@ -244,24 +244,24 @@ CLAUDE_APPROVAL_INPUT_LIMIT = 20_000
 def _claude_permission_bridge(dev_session_id: str, turn_id: str, worktree_path: str, runner_ref: list, emit=None):
     """Turns a Claude Code permission request into a pending human approval.
 
-    The approval stores the exact tool input; an accept answers with that
-    same input, so a different operation can never be approved.
+    The exact tool input is held in memory only (never persisted or listed);
+    the approval record keeps its digest. The decision must echo that digest
+    and the runner re-checks it before answering with the same input, so a
+    different operation can never be approved. Commands never reach this
+    bridge: Claude Native Development has no shell tool.
     """
     handler = approvals.deferred_handler(dev_session_id, turn_id, runner_ref)
 
     def on_permission(request_id, tool: str, tool_input: dict) -> bool:
+        if tool in claude_native.COMMAND_TOOLS or tool not in claude_native.DEV_TOOLS:
+            return False
         text = json.dumps(tool_input, ensure_ascii=False, indent=1, sort_keys=True)
         if len(text) > CLAUDE_APPROVAL_INPUT_LIMIT:
             return False
-        if tool in claude_native.COMMAND_TOOLS:
-            method = "item/commandExecution/requestApproval"
-            params = {"command": str(tool_input.get("command", "")), "cwd": worktree_path,
-                      "reason": tool_input.get("description") or f"{tool} command"}
-        else:
-            method = "item/fileChange/requestApproval"
-            params = {"grantRoot": str(tool_input.get("file_path") or tool_input.get("notebook_path") or ""),
-                      "reason": f"{tool} in the session worktree"}
-        params.update({"tool": tool, "input": text})
+        method = "item/fileChange/requestApproval"
+        params = {"grantRoot": str(tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path") or ""),
+                  "reason": f"{tool} in the session worktree"}
+        params.update({"tool": tool, "input": text, "operation_sha256": claude_native.operation_digest(tool, tool_input)})
         deferred = handler(method, params, request_id)
         if deferred and emit is not None:
             # Same live signal the Codex path sends, so the cockpit refreshes its panel.

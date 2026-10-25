@@ -20,6 +20,8 @@ never passed.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -35,11 +37,16 @@ from nexus.process_timeout import kill_process_tree
 
 BACKEND_CLAUDE_NATIVE = "claude_native"
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
-# Development (P4.1B): file edits and shell commands, each one gated by a
-# human decision through the SDK-host permission channel.
+# Development (P4.1B): file edits gated by a human decision through the
+# SDK-host permission channel. Shell tools are NOT offered: Bash/PowerShell
+# have no filesystem confinement on Windows (neither the worktree cwd nor a
+# human approval is a sandbox), so arbitrary commands are blocked outright.
+# Tests run through Nexus' operator-owned verification profiles
+# (nexus.dev.test_profiles), never through a command the model composes.
 WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 COMMAND_TOOLS = frozenset({"Bash", "PowerShell"})
-DEV_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write", "Bash", "PowerShell")
+PATH_READ_TOOLS = frozenset({"Read", "Grep", "Glob"})
+DEV_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write")
 MODEL_ALIASES = ("default", "sonnet", "opus", "haiku")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 STATUS_TIMEOUT_SECONDS = 20
@@ -58,6 +65,27 @@ class ClaudeNativeError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def operation_digest(tool: str, tool_input: dict) -> str:
+    """Stable identity of one exact operation (tool + complete input).
+
+    The same digest is stored with the approval, shown to the human, echoed in
+    the decision and re-checked just before the input is released to Claude.
+    """
+    canonical = json.dumps({"tool": tool, "input": tool_input}, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _absolute_like(value: str) -> bool:
+    return value.startswith(("/", "\\", "~")) or bool(re.match(r"^[A-Za-z]:", value))
+
+
+def _sensitive_path(relative: str) -> bool:
+    from nexus.dev.worktree import _sensitive_review_path  # noqa: PLC0415 -- shared credential-path rules
+
+    return _sensitive_review_path(relative)
 
 
 def find_claude() -> str:
@@ -300,8 +328,16 @@ class ClaudeTurn:
         pending = self._pending_inputs.pop(request_id, None)
         if pending is None:
             return
-        _tool, tool_input = pending
-        if (result or {}).get("decision") == "accept":
+        tool, tool_input, digest = pending
+        decision = result or {}
+        if decision.get("decision") == "accept":
+            # Execute only what was presented and approved: the approved digest
+            # must match the exact input held for this request.
+            approved = decision.get("operation_sha256")
+            if not isinstance(approved, str) or not hmac.compare_digest(approved, digest) \
+                    or operation_digest(tool, tool_input) != digest:
+                self._deny(request_id, "Denied by Nexus: the approval does not match the requested operation.")
+                return
             self._answer(request_id, {"behavior": "allow", "updatedInput": tool_input})
         else:
             self._answer(request_id, {"behavior": "deny", "message": "Declined by the Nexus operator."})
@@ -385,13 +421,38 @@ class ClaudeTurn:
     def _deny(self, request_id, message: str) -> None:
         self._answer(request_id, {"behavior": "deny", "message": message})
 
-    def _outside_worktree(self, tool_input: dict) -> bool:
+    def _unsafe_path(self, tool: str, tool_input: dict) -> str | None:
+        """Why a tool's target is refused, or None when it stays inside the worktree.
+
+        Fails closed: anything unresolvable, remote/device/stream-style, inside
+        ``.git`` or credential-like is refused before a human is asked.
+        """
+        if tool == "Glob":
+            pattern = tool_input.get("pattern")
+            if not isinstance(pattern, str) or _absolute_like(pattern) or ".." in re.split(r"[\\/]", pattern):
+                return "glob patterns must be relative to the session worktree"
         target = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
-        if not isinstance(target, str) or not target:
-            return True
-        root = os.path.realpath(self.cwd)
-        resolved = os.path.realpath(os.path.join(root, target))
-        return os.path.normcase(os.path.commonpath([root, resolved])) != os.path.normcase(root)
+        if target is None and tool in {"Grep", "Glob"}:
+            return None  # searches default to the worktree
+        if not isinstance(target, str) or not target or "\0" in target:
+            return "a worktree path is required"
+        normalized = target.replace("\\", "/")
+        if normalized.startswith("//") or ":" in normalized[2:]:
+            return "network, device and stream paths are not allowed"
+        try:
+            root = os.path.realpath(self.cwd)
+            resolved = os.path.realpath(os.path.join(root, target))
+            inside = os.path.normcase(os.path.commonpath([root, resolved])) == os.path.normcase(root)
+        except (ValueError, OSError):
+            return "paths outside the session worktree are not allowed"
+        if not inside:
+            return "paths outside the session worktree are not allowed"
+        relative = os.path.relpath(resolved, root).replace("\\", "/")
+        if ".git" in {part.lower() for part in relative.split("/")}:
+            return "the Git metadata of the worktree is off limits"
+        if _sensitive_path(relative):
+            return "credential and secret files are off limits"
+        return None
 
     def _on_control_request(self, request_id, request: dict) -> None:
         if request.get("subtype") != "can_use_tool":
@@ -400,13 +461,18 @@ class ClaudeTurn:
             return
         tool = request.get("tool_name")
         tool_input = request.get("input") if isinstance(request.get("input"), dict) else {}
+        if tool in COMMAND_TOOLS:
+            self._deny(request_id, "Denied by Nexus: arbitrary commands are not available in Claude Native "
+                                   "Development; run tests through a Nexus verification profile.")
+            return
         if not self.development or tool not in DEV_TOOLS:
             self._deny(request_id, "Denied by Nexus: tool not allowed in this session.")
             return
-        if tool in WRITE_TOOLS and self._outside_worktree(tool_input):
-            self._deny(request_id, "Denied by Nexus: writes are confined to the session worktree.")
+        reason = self._unsafe_path(tool, tool_input)
+        if reason:
+            self._deny(request_id, f"Denied by Nexus: {reason}; access is confined to the session worktree.")
             return
-        self._pending_inputs[request_id] = (tool, tool_input)
+        self._pending_inputs[request_id] = (tool, tool_input, operation_digest(tool, tool_input))
         accepted = False
         if self._on_permission is not None:
             try:
@@ -528,12 +594,19 @@ class ClaudeTurn:
             if isinstance(raw, list):
                 raw = "\n".join(part.get("text", "") for part in raw if isinstance(part, dict))
             text = str(raw or "")[:TOOL_TEXT_LIMIT]
+            if self._tool_is_sensitive(block.get("tool_use_id")):
+                text = "<content withheld: sensitive path>"
             item = self._tool_item(block.get("tool_use_id"), "failed" if block.get("is_error") else "completed")
             if item["type"] == "commandExecution":
                 item["aggregatedOutput"] = text
             else:
                 item["contentItems"] = [{"type": "inputText", "text": text}]
             self._emit({"method": "item/completed", "params": {"item": item}})
+
+    def _tool_is_sensitive(self, tool_use_id) -> bool:
+        tool_input = self._tool_inputs.get(tool_use_id, {})
+        target = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
+        return isinstance(target, str) and bool(target) and _sensitive_path(target.replace("\\", "/").lstrip("/"))
 
     def _tool_item(self, tool_use_id, status: str) -> dict:
         """Command and file tools use the item shapes the cockpit already renders."""

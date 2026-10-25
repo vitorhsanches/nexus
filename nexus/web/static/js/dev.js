@@ -976,19 +976,37 @@
         (summary.reason ? " · reason: " + summary.reason : "")
       );
       row.appendChild(text);
-      if (summary.input) {
-        // The exact operation that an approval allows -- nothing else can run.
+      var shownHash = null;
+      var buttons = [];
+      if (summary.operation_sha256 && approval.status === "PENDING") {
+        // Claude Native: the exact operation is fetched live (never stored) and
+        // the decision is bound to the digest of what was shown.
         var exact = document.createElement("pre");
         exact.className = "dev-approval-input";
-        exact.textContent = redacted((summary.tool ? summary.tool + " " : "") + summary.input);
+        exact.textContent = "Loading the exact operation...";
         row.appendChild(exact);
+        request("/dev/sessions/" + encodeURIComponent(state.session.session_id) + "/approvals/" +
+          encodeURIComponent(approval.approval_id) + "/operation", { cache: "no-store" }).then(function (detail) {
+          shownHash = detail.operation_sha256;
+          exact.textContent = redacted((detail.tool ? detail.tool + " " : "") + detail.operation);
+          buttons.forEach(function (button) { if (button.dataset.decision === "accept") button.disabled = false; });
+        }).catch(function () {
+          exact.textContent = "The exact operation is no longer available; it cannot be approved.";
+        });
+      } else if (summary.operation_sha256) {
+        var meta = document.createElement("pre");
+        meta.className = "dev-approval-input";
+        meta.textContent = (summary.tool || "") + " · " + (summary.operation_bytes || 0) + " bytes · sha256 " + summary.operation_sha256.slice(0, 16);
+        row.appendChild(meta);
       }
       if (approval.status === "PENDING") {
         [["accept", "Approve once"], ["decline", "Decline"]].forEach(function (pair) {
           var button = document.createElement("button");
           button.type = "button"; button.className = "chat-secondary-button";
-          button.textContent = pair[1];
-          button.addEventListener("click", function () { decideApproval(approval.approval_id, pair[0]); });
+          button.textContent = pair[1]; button.dataset.decision = pair[0];
+          if (pair[0] === "accept" && summary.operation_sha256) button.disabled = true;
+          button.addEventListener("click", function () { decideApproval(approval.approval_id, pair[0], shownHash); });
+          buttons.push(button);
           row.appendChild(button);
         });
       }
@@ -996,10 +1014,10 @@
     });
   }
 
-  function decideApproval(approvalId, decision) {
+  function decideApproval(approvalId, decision, operationSha256) {
     if (!state.session) return;
     request("/dev/sessions/" + encodeURIComponent(state.session.session_id) + "/approvals/" + encodeURIComponent(approvalId), {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision: decision }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(operationSha256 ? { decision: decision, operation_sha256: operationSha256 } : { decision: decision }),
     }).then(function () {
       logActivityEvent((decision === "accept" ? "Approved" : "Declined") + " " + approvalId);
       return loadApprovals();

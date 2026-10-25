@@ -727,6 +727,8 @@ class DevSessionCreateRequest(BaseModel):
 class DevApprovalDecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     decision: Literal["accept", "decline"]
+    # Claude Native: digest of the operation the human was shown (required to accept).
+    operation_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class DevTurnCreateRequest(BaseModel):
@@ -987,7 +989,24 @@ def decide_dev_approval(session_id: str, approval_id: str, request: DevApprovalD
     from nexus.dev.service import DevServiceError
 
     try:
+        if request.operation_sha256 is not None:
+            return approvals.decide(session_id, approval_id, request.decision, operation_sha256=request.operation_sha256)
         return approvals.decide(session_id, approval_id, request.decision)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.get("/dev/sessions/{session_id}/approvals/{approval_id}/operation")
+def get_dev_approval_operation(session_id: str, approval_id: str):
+    """The exact operation of one pending Claude approval, for the human deciding.
+    Memory-only, never cached, gone once the request is decided or expired."""
+    from fastapi.responses import JSONResponse  # noqa: PLC0415
+
+    from nexus.dev import approvals
+    from nexus.dev.service import DevServiceError
+
+    try:
+        return JSONResponse(approvals.operation_detail(session_id, approval_id), headers={"Cache-Control": "no-store"})
     except DevServiceError as error:
         raise _dev_error_response(error) from error
 

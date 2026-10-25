@@ -172,6 +172,8 @@ function setup(options = {}) {
     if (parsed.pathname.endsWith("/interrupt") && method === "POST") return response({ status: "INTERRUPT_REQUESTED" });
     const approvalsMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals$/);
     if (approvalsMatch && method === "GET") return response({ approvals: backend.approvals || [] });
+    const operationMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals\/([^/]+)\/operation$/);
+    if (operationMatch && method === "GET") return response(backend.operation || { detail: { message: "gone" } }, backend.operation ? 200 : 409);
     const decideMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals\/([^/]+)$/);
     if (decideMatch && method === "POST") {
       const decision = JSON.parse(opts.body).decision;
@@ -880,12 +882,20 @@ test("Claude Native can be chosen for Development and its approvals show the exa
   const body = ui.calls.filter((call) => call.method === "POST" && call.path === "/api/dev/sessions").pop().body;
   assert.deepEqual(body, { project_id: "demo", backend: "claude_native", requested_model: "default" });
 
-  ui.backend.approvals = [{ approval_id: "APPROVAL-C", dev_session_id: "DEV-1", turn_id: "T", kind: "command", status: "PENDING",
-    summary: { tool: "Bash", command: "python -m pytest -q", reason: "Run the tests", input: "{\n \"command\": \"python -m pytest -q\"\n}" } }];
+  const digest = "ab".repeat(32);
+  ui.backend.approvals = [{ approval_id: "APPROVAL-C", dev_session_id: "DEV-1", turn_id: "T", kind: "file_change", status: "PENDING",
+    summary: { tool: "Edit", grantRoot: "calc.py", reason: "Edit in the session worktree", operation_sha256: digest, operation_bytes: 60 } }];
+  ui.backend.operation = { approval_id: "APPROVAL-C", tool: "Edit", operation_sha256: digest, operation: "{\n \"new_string\": \"a + b\"\n}" };
   ui.elements["dev-session-list"].children[0].dispatch("click");
   await flush();
   const row = ui.elements["dev-approvals"].children[0];
   const exact = row.children.find((child) => child.className === "dev-approval-input");
   assert.ok(exact, "the exact operation is displayed");
-  assert.match(exact.textContent, /^Bash \{\n "command": "python -m pytest -q"\n\}$/);
+  assert.match(exact.textContent, /^Edit \{\n "new_string": "a \+ b"\n\}$/);
+  assert.ok(!JSON.stringify(ui.backend.approvals).includes("new_string"), "the listed approval carries no tool input");
+  const approve = row.children.find((child) => child.textContent === "Approve once");
+  approve.dispatch("click");
+  await flush();
+  const decision = ui.calls.filter((call) => call.method === "POST" && /\/approvals\//.test(call.path)).pop();
+  assert.deepEqual(decision.body, { decision: "accept", operation_sha256: digest }, "the decision is bound to the shown operation");
 });
