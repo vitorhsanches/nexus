@@ -1275,3 +1275,30 @@ test("switching the backend selector reloads that backend's catalog and creates 
   const body = ui.calls.find((call) => call.method === "POST" && call.path === "/api/chat/sessions").body;
   assert.equal(body.backend, "omniroute");
 });
+
+test("Claude Native can be chosen for a new conversation and keeps its own backend", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  assert.match(nexusTemplateSource, /<option value="claude_native">Claude Native \(Claude Code CLI, read-only\)<\/option>/);
+  ui.backend.models = { backend: "claude_native", models: [{ id: "default", name: "Claude Code default", selectable: true, availability: "claude-native-alias", cost_status: "known", supported_efforts: ["low", "high"], is_default: true }], default_model: "default", catalog_error: null, account: { authenticated: true, type: "claude.ai", version: "2.1.288" } };
+  const selector = ui.elements["chat-backend-select"];
+  selector.value = "claude_native"; selector.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(ui.calls.some((call) => call.path.startsWith("/api/chat/models?backend=claude_native&refresh=true")));
+  assert.match(ui.elements["chat-model-select"].children[0].textContent, /Claude Code default · default · resolved by Claude Code/);
+  ui.elements["chat-project-select"].value = "demo"; ui.elements["chat-project-select"].dispatch("change");
+  ui.elements["chat-new-conversation"].dispatch("click");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  const body = ui.calls.find((call) => call.method === "POST" && call.path === "/api/chat/sessions").body;
+  assert.equal(body.backend, "claude_native");
+  assert.equal(body.model, "default");
+});
+
+test("a missing Claude login is shown as a clear catalog error", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  ui.backend.models = { backend: "claude_native", models: [], default_model: null, catalog_error: "Claude Code is not signed in. Run 'claude auth login' for this Windows user, then refresh.", account: { authenticated: false } };
+  const selector = ui.elements["chat-backend-select"];
+  selector.value = "claude_native"; selector.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ui.elements["chat-model-error"].hidden, false);
+  assert.match(ui.elements["chat-model-error"].textContent, /claude auth login/);
+});

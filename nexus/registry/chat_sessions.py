@@ -85,6 +85,19 @@ def update_session_thread(
         )
 
 
+def update_claude_session(session_id: str, *, claude_session_id: str, model: str | None) -> None:
+    """Record the Claude Code conversation a Claude Native session resumes."""
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE chat_sessions
+            SET claude_session_id = ?, model = COALESCE(?, model), provider = 'anthropic', updated_at = ?
+            WHERE id = ?
+            """,
+            (claude_session_id, model, _now(), session_id),
+        )
+
+
 def update_session_status(session_id: str, status: str) -> None:
     with get_connection() as connection:
         connection.execute(

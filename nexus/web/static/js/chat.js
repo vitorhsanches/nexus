@@ -399,6 +399,10 @@
         populateEffortSelect();
         var modelError = $("chat-model-error");
         if (modelError) { modelError.hidden = !models.catalog_error; modelError.textContent = models.catalog_error || ""; }
+        state.backendAccount = models.account || null;
+        if (backend === "claude_native" && models.account && models.account.authenticated) {
+          showStatus("Claude Code " + (models.account.version || "") + " · signed in (" + (models.account.type || "local login") + ") · read-only", "connected");
+        }
         return models;
     });
   }
@@ -418,7 +422,8 @@
     visible.forEach(function (model) {
       var option = document.createElement("option"); option.value = model.id;
       option.textContent = (state.favoriteModels.has(model.id) ? "★ " : "") + model.name + " · " + model.id +
-        (model.availability === "codex-native" ? (model.is_default ? " · Codex default" : "") : " · cost unknown · activation unverified");
+        (model.availability === "codex-native" ? (model.is_default ? " · Codex default" : "") :
+          model.availability === "claude-native-alias" ? " · resolved by Claude Code" : " · cost unknown · activation unverified");
       if (model.reason) option.title = model.reason;
       select.appendChild(option);
     });
