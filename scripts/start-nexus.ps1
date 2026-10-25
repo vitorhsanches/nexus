@@ -70,28 +70,30 @@ function Get-PortOwner([int]$Port) {
     return $null
 }
 
-# Same discovery rules as the Nexus Claude adapter: the real claude.exe, never a
-# .cmd/.ps1 shim (running a shim would route arguments through cmd.exe).
+# Only the native claude.exe counts: never a .cmd/.bat/.ps1 shim, another
+# extension, or a differently named binary. A PATH shim is resolved to the
+# native executable it launches, as the npm install lays it out.
+function Test-NativeClaudeExecutable([string]$Path) {
+    return ($Path -and
+        ([System.IO.Path]::GetFileName($Path) -ieq "claude.exe") -and
+        (Test-Path -LiteralPath $Path -PathType Leaf))
+}
+
 function Find-ClaudeCli {
     $candidates = @()
     if ($env:NEXUS_CLAUDE_PATH) { $candidates += $env:NEXUS_CLAUDE_PATH }
     $found = Get-Command "claude" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($found -and $found.Source) {
-        $extension = [System.IO.Path]::GetExtension($found.Source).ToLowerInvariant()
-        if ($extension -in @(".cmd", ".bat", ".ps1", "")) {
-            $candidates += (Join-Path (Split-Path -Parent $found.Source) "node_modules\@anthropic-ai\claude-code\bin\claude.exe")
-        } else {
+        if ([System.IO.Path]::GetFileName($found.Source) -ieq "claude.exe") {
             $candidates += $found.Source
+        } else {
+            $candidates += (Join-Path (Split-Path -Parent $found.Source) "node_modules\@anthropic-ai\claude-code\bin\claude.exe")
         }
     }
     $profileRoot = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
     if ($profileRoot) { $candidates += (Join-Path $profileRoot ".local\bin\claude.exe") }
     foreach ($candidate in $candidates) {
-        if (-not $candidate) { continue }
-        $extension = [System.IO.Path]::GetExtension($candidate).ToLowerInvariant()
-        if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and $extension -notin @(".cmd", ".bat", ".ps1")) {
-            return $candidate
-        }
+        if (Test-NativeClaudeExecutable $candidate) { return $candidate }
     }
     return $null
 }

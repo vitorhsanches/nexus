@@ -58,8 +58,12 @@ native-first default: OmniRoute is neither checked nor started, and the
 - **Codex CLI** is looked up where Nexus launches it
   (`%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe`); a `codex` that is only on
   PATH is not enough.
-- **Claude Code CLI** is the native `claude.exe` (`NEXUS_CLAUDE_PATH`, the npm
-  install, or `~/.local/bin/claude.exe`); a `.cmd` shim alone is not used.
+- **Claude Code CLI** must be the native `claude.exe` (matched by file name,
+  case-insensitively): `NEXUS_CLAUDE_PATH`, the npm install (a `claude.cmd` shim
+  on PATH is resolved to the `claude.exe` it launches), or
+  `~/.local/bin/claude.exe`. Shims, scripts and other names or extensions
+  (`.cmd`, `.bat`, `.ps1`, `.com`, `claude-2.exe`, ...) are never accepted, so
+  `NEXUS_CLAUDE_PATH` must point at a file named `claude.exe`.
 - A missing CLI only prints a `[WARN]` and the summary shows `NOT FOUND`;
   startup is never blocked, even if neither is installed. Sign-in is not
   checked by the launcher; Nexus verifies each login when you pick a backend.

@@ -133,6 +133,77 @@ class StartNexusLauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Claude Native  NOT FOUND", result.stdout)
 
+    def _claude_status(self, prepare):
+        with tempfile.TemporaryDirectory() as repo:
+            env = _launcher_env(repo, install_codex=True)
+            prepare(Path(repo), env)
+            result = _run_launcher("-RepoRoot", repo, "-PreflightOnly", "-NoBrowser", env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+    def test_only_the_native_claude_exe_is_accepted_from_nexus_claude_path(self):
+        for name in ("claude.cmd", "claude.bat", "claude.ps1", "claude.com", "claude.vbs", "claude.exe.txt",
+                     "claude-2.exe", "notclaude.exe", "claude"):
+            with self.subTest(name=name):
+                def prepare(repo, env, name=name):
+                    candidate = repo / "tools" / name
+                    candidate.parent.mkdir()
+                    candidate.write_bytes(b"")
+                    env["NEXUS_CLAUDE_PATH"] = str(candidate)
+
+                stdout = self._claude_status(prepare)
+                self.assertIn("Claude Native  NOT FOUND", stdout)
+                self.assertNotIn("Claude Code CLI available", stdout)
+
+    def test_a_directory_named_claude_exe_is_not_an_executable(self):
+        def prepare(repo, env):
+            directory = repo / "tools" / "claude.exe"
+            directory.mkdir(parents=True)
+            env["NEXUS_CLAUDE_PATH"] = str(directory)
+
+        self.assertIn("Claude Native  NOT FOUND", self._claude_status(prepare))
+
+    def test_a_missing_nexus_claude_path_does_not_fall_back_to_a_misnamed_binary(self):
+        def prepare(repo, env):
+            env["NEXUS_CLAUDE_PATH"] = str(repo / "tools" / "claude.exe")  # does not exist
+            (repo / "home" / ".local" / "bin").mkdir(parents=True)
+            (repo / "home" / ".local" / "bin" / "claude-wrapper.exe").write_bytes(b"")
+
+        self.assertIn("Claude Native  NOT FOUND", self._claude_status(prepare))
+
+    def test_claude_exe_is_accepted_case_insensitively_and_from_the_user_install(self):
+        def explicit(repo, env):
+            candidate = repo / "tools" / "CLAUDE.EXE"
+            candidate.parent.mkdir()
+            candidate.write_bytes(b"")
+            env["NEXUS_CLAUDE_PATH"] = str(candidate)
+
+        def user_install(repo, env):
+            binary = repo / "home" / ".local" / "bin"
+            binary.mkdir(parents=True)
+            (binary / "claude.exe").write_bytes(b"")
+
+        self.assertIn("Claude Native  AVAILABLE", self._claude_status(explicit))
+        self.assertIn("Claude Native  AVAILABLE", self._claude_status(user_install))
+
+    def test_an_npm_claude_shim_resolves_to_its_native_exe_only(self):
+        def with_native(repo, env):
+            commands = repo / "commands"
+            (commands / "claude.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
+            native = commands / "node_modules" / "@anthropic-ai" / "claude-code" / "bin"
+            native.mkdir(parents=True)
+            (native / "claude.exe").write_bytes(b"")
+
+        def with_wrong_name(repo, env):
+            commands = repo / "commands"
+            (commands / "claude.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
+            native = commands / "node_modules" / "@anthropic-ai" / "claude-code" / "bin"
+            native.mkdir(parents=True)
+            (native / "cli.js").write_bytes(b"")
+
+        self.assertIn("Claude Native  AVAILABLE", self._claude_status(with_native))
+        self.assertIn("Claude Native  NOT FOUND", self._claude_status(with_wrong_name))
+
     def test_codex_only_on_path_is_not_reported_as_available(self):
         with tempfile.TemporaryDirectory() as repo:
             env = _launcher_env(repo, install_codex=False)
