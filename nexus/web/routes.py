@@ -426,7 +426,7 @@ class ChatSessionCreateRequest(BaseModel):
     model: str | None = Field(default=None, min_length=1, max_length=128)
     effort: str | None = Field(default=None, min_length=1, max_length=32)
     allow_unknown_cost: bool = False
-    backend: Literal["omniroute", "codex_native"] = "omniroute"
+    backend: Literal["omniroute", "codex_native", "claude_native"] = "omniroute"
 
 
 class ChatTurnCreateRequest(BaseModel):
@@ -451,8 +451,8 @@ def create_chat_session(request: ChatSessionCreateRequest):
     from nexus.chat.service import ChatError, create_session  # noqa: PLC0415
 
     try:
-        if request.backend == "codex_native":
-            return create_session(request.project_id, request.model, request.effort, backend="codex_native")
+        if request.backend in {"codex_native", "claude_native"}:
+            return create_session(request.project_id, request.model, request.effort, backend=request.backend)
         if request.model is None and request.effort is None and not request.allow_unknown_cost:
             return create_session(request.project_id)
         return create_session(request.project_id, request.model, request.effort, request.allow_unknown_cost)
@@ -468,9 +468,9 @@ def list_chat_sessions(project_id: str | None = None):
 
 
 @router.get("/chat/models")
-def list_chat_models(backend: Literal["omniroute", "codex_native"] = "omniroute", refresh: bool = False):
+def list_chat_models(backend: Literal["omniroute", "codex_native", "claude_native"] = "omniroute", refresh: bool = False):
     from nexus.chat.service import list_models  # noqa: PLC0415
-    if backend == "codex_native":
+    if backend in {"codex_native", "claude_native"}:
         return list_models(refresh=refresh, backend=backend)
     return list_models()
 

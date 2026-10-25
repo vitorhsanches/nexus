@@ -232,6 +232,9 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_effort TEXT")
         if "backend" not in chat_session_columns:
             connection.execute("ALTER TABLE chat_sessions ADD COLUMN backend TEXT NOT NULL DEFAULT 'omniroute'")
+        if "claude_session_id" not in chat_session_columns:
+            # Claude Code's own conversation id (Claude Native backend only).
+            connection.execute("ALTER TABLE chat_sessions ADD COLUMN claude_session_id TEXT")
 
         # Development Mode (F1.2): per-project authorization flag. Disabled
         # by default for every project -- new AND pre-existing rows alike,
