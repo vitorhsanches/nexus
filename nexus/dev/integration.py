@@ -190,10 +190,12 @@ def _validate_review(review: dict, *, require_clean_target: bool = True) -> tupl
                 else:
                     paths.append(candidate)
     if paths:
-        attrs = _git(["check-attr", "-z", "filter", "working-tree-encoding", "ident", "--", *paths], cwd=project_path).stdout
-        atoms = attrs.split("\0")
-        for index in range(0, len(atoms) - 2, 3):
-            if atoms[index + 2] not in {"unspecified", "unset"}:
+        # Candidate blobs are cleaned with the worktree's attributes, so check
+        # both sides: no custom filter driver may run during integration.
+        for attr_root in (project_path, str(worktree)):
+            attrs = _git(["check-attr", "-z", "filter", "working-tree-encoding", "ident", "--", *paths], cwd=attr_root).stdout
+            atoms = attrs.split("\0")
+            if any(atoms[index + 2] not in {"unspecified", "unset"} for index in range(0, len(atoms) - 2, 3)):
                 issues.append({"code": "CUSTOM_CHECKOUT_FILTER", "message": "A changed path uses a Git checkout filter/encoding; integration is blocked."})
                 break
         # An ignored file can be invisible to ordinary status but still block
@@ -263,7 +265,16 @@ def _candidate_commit(session: dict, project_path: str, worktree: Path, review: 
             digest = hashlib.sha256(content).hexdigest()
             if digest != entry.get("content_sha256"):
                 _error("SNAPSHOT_STALE", f"Candidate content changed while preparing integration: {relative}")
-            blob = _git(["hash-object", "-w", "--stdin", "--no-filters"], cwd=project_path, input_bytes=content).stdout.decode("ascii").strip()
+            if mode == "120000":
+                blob_args = ["hash-object", "-w", "--stdin", "--no-filters"]
+            else:
+                # Store the blob exactly as `git add` would in the worktree the
+                # human reviewed: its `git diff` applied core.autocrlf and
+                # .gitattributes EOL conversion, so raw CRLF working-tree bytes
+                # must be cleaned the same way. Filter drivers are blocked in
+                # preflight, so only built-in text/eol conversion can apply.
+                blob_args = ["hash-object", "-w", "--stdin", f"--path={relative}"]
+            blob = _git(blob_args, cwd=str(worktree), input_bytes=content).stdout.decode("ascii").strip()
             records.extend(f"{mode} {blob}\t".encode("ascii") + os.fsencode(relative) + b"\0")
         if records:
             _git(["update-index", "-z", "--index-info"], cwd=project_path, env=env, input_bytes=bytes(records))
