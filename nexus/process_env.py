@@ -128,6 +128,21 @@ def native_catalog_home() -> str:
     return os.path.join(base, "native-catalog")
 
 
+def _configures_a_provider(config_path: str) -> bool:
+    """True when a CODEX_HOME's config selects a model provider (e.g. OmniRoute).
+
+    Codex itself appends state such as per-project ``trust_level`` entries to
+    a native home's config; that is not a foreign backend and is tolerated.
+    An unreadable config is treated as foreign.
+    """
+    try:
+        with open(config_path, "rb") as config_file:
+            data = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError):
+        return True
+    return "model_provider" in data or "model_providers" in data
+
+
 def _share_native_auth(source_auth: str, destination_auth: str) -> None:
     """Make the session's auth.json the *same file* as the user's local login.
 
@@ -199,12 +214,10 @@ def _native_codex_env(
             worker_home = os.path.join(nexus_base, "workers", uuid.uuid4().hex)
         os.makedirs(worker_home, exist_ok=True)
         existing_config = os.path.join(worker_home, "config.toml")
-        if os.path.isfile(existing_config):
-            with open(existing_config, "r", encoding="utf-8") as config_file:
-                if config_file.read() != _NATIVE_CONFIG:
-                    raise RuntimeError(
-                        "This CODEX_HOME belongs to another backend; refusing to reuse it for Codex Native."
-                    )
+        if os.path.isfile(existing_config) and _configures_a_provider(existing_config):
+            raise RuntimeError(
+                "This CODEX_HOME belongs to another backend; refusing to reuse it for Codex Native."
+            )
         shutil.copy2(os.path.join(template_dir, "config.toml"), existing_config)
         shutil.copytree(
             os.path.join(template_dir, "rules"), os.path.join(worker_home, "rules"), dirs_exist_ok=True
