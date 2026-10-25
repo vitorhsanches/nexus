@@ -122,6 +122,18 @@ def test_create_rejects_a_project_path_that_is_not_a_git_repository(tmp_path):
         create_dev_worktree(str(not_a_repo), "session-x")
 
 
+def test_create_rejects_a_project_subdirectory_inside_another_git_repository(tmp_path):
+    project = _project(tmp_path)
+    nested_project = project / "nested"
+    nested_project.mkdir()
+
+    with pytest.raises(InvalidProjectError, match="must be the Git repository root"):
+        create_dev_worktree(str(nested_project), "session-nested")
+
+    assert not (nested_project / ".git").exists()
+    assert not (Path(os.environ["NEXUS_DEV_WORKTREE_ROOT"]) / "session-nested").exists()
+
+
 def test_create_rejects_a_project_path_that_does_not_exist(tmp_path):
     with pytest.raises(InvalidProjectError):
         create_dev_worktree(str(tmp_path / "does_not_exist"), "session-x")
