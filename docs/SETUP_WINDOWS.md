@@ -5,10 +5,14 @@
 - Windows PowerShell 5.1 or PowerShell 7.
 - Python 3.10 or newer.
 - Node.js for the frontend checks.
-- Codex CLI available to Nexus for Codex App-Server and worker execution.
-- OmniRoute installed and configured locally when model-backed features are needed.
+- At least one native model backend, signed in locally (both are optional and
+  independent; Nexus starts without either):
+  - Codex CLI, for Codex Native.
+  - Claude Code CLI (`claude.exe`), for Claude Native.
+- OmniRoute is optional. Install and configure it only if you want the
+  OmniRoute backend; it is not needed for a default start.
 
-Nexus does not include Codex or OmniRoute credentials. Sign in and configure
+Nexus does not include Codex, Claude or OmniRoute credentials. Sign in and configure
 those tools separately on each computer; do not copy authentication files from
 another machine.
 
@@ -46,10 +50,38 @@ From the repository root:
 
     .\scripts\start-nexus.ps1
 
-The launcher expects .venv to exist, checks the local OmniRoute service, then
-starts the Nexus Control Center. Codex CLI/App-Server calls are launched by
-Nexus as needed. Start or configure OmniRoute locally before using model-backed
-features.
+The launcher expects .venv to exist, checks that Nexus imports, reports which
+native backends it can find, then starts the Nexus Control Center. This is the
+native-first default: OmniRoute is neither checked nor started, and the
+`~/.codex-omniroute-worker` profile is not required.
+
+- **Codex CLI** is looked up where Nexus launches it
+  (`%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe`); a `codex` that is only on
+  PATH is not enough.
+- **Claude Code CLI** is the native `claude.exe` (`NEXUS_CLAUDE_PATH`, the npm
+  install, or `~/.local/bin/claude.exe`); a `.cmd` shim alone is not used.
+- A missing CLI only prints a `[WARN]` and the summary shows `NOT FOUND`;
+  startup is never blocked, even if neither is installed. Sign-in is not
+  checked by the launcher; Nexus verifies each login when you pick a backend.
+- The launcher only reports availability. It never starts external services on
+  its own and never chooses or switches a backend: you pick Codex Native,
+  Claude Native or OmniRoute per Development session.
+
+To use OmniRoute, opt in explicitly:
+
+    .\scripts\start-nexus.ps1 -EnableOmniRoute
+
+With `-EnableOmniRoute` the launcher requires Codex and the dedicated
+`~/.codex-omniroute-worker/config.toml` profile (or `NEXUS_OMNIROUTE_CODEX_HOME`),
+checks the OmniRoute service on `-OmniRoutePort` (default 20128) and starts it
+in the background with `-OmniRouteCommand` (default `omniroute`) when it is
+offline. Startup stops with a clear message if any of these is missing.
+
+To check your machine without starting anything, add `-PreflightOnly`; it runs
+every check, prints the summary, and does not start OmniRoute, the Control
+Center or the browser:
+
+    .\scripts\start-nexus.ps1 -PreflightOnly
 
 The SQLite database and runtime logs are created locally under Nexus storage
 or the Windows local application data directory. They are not required for a
@@ -88,17 +120,19 @@ executables, malformed arguments, and profiles not bound to the selected
 project. Mission text and model output can select a profile ID but cannot
 supply or extend its command.
 
-The launcher now checks Python imports, Codex CLI, the dedicated
-`~/.codex-omniroute-worker/config.toml` profile, and OmniRoute readiness.
-Start an operational Development server with an explicit per-process opt in:
+Start an operational Development server with an explicit per-process opt in
+(independent of `-EnableOmniRoute`, and still subject to the per-project
+authorization):
 
     .\scripts\start-nexus.ps1 -EnableDevelopment
 
 Omitting `-EnableDevelopment` keeps write-capable execution disabled unless
 the operator already set `NEXUS_DEV_EXECUTION_ENABLED=1` in that process
-environment. Model selection in Development Mode is limited to routes that are
-both advertised live by OmniRoute and approved in Nexus for coding. Free and
-low-cost routes are listed first; Nexus never substitutes a different route.
+environment. The Git integration gate (`NEXUS_DEV_INTEGRATION_ENABLED`) is
+never set by the launcher. For OmniRoute sessions, model selection is limited to
+routes that are both advertised live by OmniRoute and approved in Nexus for
+coding. Free and low-cost routes are listed first; Nexus never substitutes a
+different route or backend.
 
 ## Agent workspace (P1)
 

@@ -1,3 +1,16 @@
+<#
+.SYNOPSIS
+Starts the Nexus Control Center.
+
+.DESCRIPTION
+Native-first: by default Nexus starts without OmniRoute, using the local Codex
+and Claude Code logins. OmniRoute is opt-in with -EnableOmniRoute. The launcher
+never starts an external service you did not ask for and never selects a model
+backend for you; Codex/Claude availability is only reported.
+
+-PreflightOnly runs every check and prints the summary without starting
+OmniRoute or the Control Center.
+#>
 [CmdletBinding()]
 param(
     [string]$RepoRoot,
@@ -6,12 +19,15 @@ param(
     [int]$NexusPort = 8000,
     [int]$TimeoutSeconds = 90,
     [switch]$EnableDevelopment,
+    [switch]$EnableOmniRoute,
+    [switch]$PreflightOnly,
     [switch]$NoBrowser
 )
 
 $ErrorActionPreference = "Stop"
 
 function Write-Ok([string]$Message) { Write-Host "[OK] $Message" -ForegroundColor Green }
+function Write-Warn([string]$Message) { Write-Host "[WARN] $Message" -ForegroundColor Yellow }
 function Write-Info([string]$Message) { Write-Host "     $Message" -ForegroundColor DarkGray }
 
 function Stop-Launch([string]$Reason, [string[]]$Details) {
@@ -54,6 +70,32 @@ function Get-PortOwner([int]$Port) {
     return $null
 }
 
+# Same discovery rules as the Nexus Claude adapter: the real claude.exe, never a
+# .cmd/.ps1 shim (running a shim would route arguments through cmd.exe).
+function Find-ClaudeCli {
+    $candidates = @()
+    if ($env:NEXUS_CLAUDE_PATH) { $candidates += $env:NEXUS_CLAUDE_PATH }
+    $found = Get-Command "claude" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found -and $found.Source) {
+        $extension = [System.IO.Path]::GetExtension($found.Source).ToLowerInvariant()
+        if ($extension -in @(".cmd", ".bat", ".ps1", "")) {
+            $candidates += (Join-Path (Split-Path -Parent $found.Source) "node_modules\@anthropic-ai\claude-code\bin\claude.exe")
+        } else {
+            $candidates += $found.Source
+        }
+    }
+    $profileRoot = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
+    if ($profileRoot) { $candidates += (Join-Path $profileRoot ".local\bin\claude.exe") }
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) { continue }
+        $extension = [System.IO.Path]::GetExtension($candidate).ToLowerInvariant()
+        if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and $extension -notin @(".cmd", ".bat", ".ps1")) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
 function Wait-Until([scriptblock]$Ready, [int]$Seconds) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
@@ -83,6 +125,7 @@ if ($importExit -ne 0) {
     Stop-Launch "Nexus failed to import with the project environment:" @($python)
 }
 
+# ---- Native backends (informational unless OmniRoute is enabled) ------------
 # Use the same discovery Nexus uses at runtime (nexus.dispatchers.manager._find_codex),
 # so the pre-check never passes on a PATH-only Codex that Nexus cannot launch.
 Push-Location $root
@@ -94,28 +137,51 @@ try {
 } finally {
     Pop-Location
 }
-if ($codexExit -ne 0 -or -not $codexPath) {
+$codexAvailable = ($codexExit -eq 0 -and [bool]$codexPath)
+if ($codexAvailable) {
+    Write-Ok "Codex CLI available"
+    Write-Info "$codexPath"
+} elseif ($EnableOmniRoute) {
+    # The OmniRoute backend runs through Codex App-Server workers.
     Stop-Launch "Codex CLI was not found where Nexus launches it." @(
         "Expected: %LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe",
-        "Install Codex before starting model-backed Development missions."
+        "Install Codex before using OmniRoute-backed Development missions."
     )
-}
-Write-Ok "Codex CLI available"
-Write-Info "$codexPath"
-
-$omniProfileRoot = if ($env:NEXUS_OMNIROUTE_CODEX_HOME) {
-    $env:NEXUS_OMNIROUTE_CODEX_HOME
 } else {
-    Join-Path $env:USERPROFILE ".codex-omniroute-worker"
+    Write-Warn "Codex CLI was not found where Nexus launches it; Codex Native is unavailable."
+    Write-Info "Expected: %LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe"
 }
-$omniProfileConfig = Join-Path $omniProfileRoot "config.toml"
-if (-not (Test-Path -LiteralPath $omniProfileConfig)) {
-    Stop-Launch "The dedicated Codex OmniRoute profile is missing." @(
-        $omniProfileConfig,
-        "Create this local profile before starting Nexus; credentials are never stored in the repository."
-    )
+
+$claudePath = Find-ClaudeCli
+$claudeAvailable = [bool]$claudePath
+if ($claudeAvailable) {
+    Write-Ok "Claude Code CLI available"
+    Write-Info "$claudePath"
+} else {
+    Write-Warn "Claude Code CLI (claude.exe) was not found; Claude Native is unavailable."
+    Write-Info "Install Claude Code or set NEXUS_CLAUDE_PATH to claude.exe."
 }
-Write-Ok "Codex OmniRoute profile available"
+if (-not $codexAvailable -and -not $claudeAvailable) {
+    Write-Warn "No native backend is available. Nexus will still start; install Codex or Claude Code, or use -EnableOmniRoute."
+}
+Write-Info "Sign-in is not checked here; Nexus verifies each login when you pick a backend."
+
+# ---- OmniRoute profile (only when OmniRoute is explicitly enabled) -----------
+if ($EnableOmniRoute) {
+    $omniProfileRoot = if ($env:NEXUS_OMNIROUTE_CODEX_HOME) {
+        $env:NEXUS_OMNIROUTE_CODEX_HOME
+    } else {
+        Join-Path $env:USERPROFILE ".codex-omniroute-worker"
+    }
+    $omniProfileConfig = Join-Path $omniProfileRoot "config.toml"
+    if (-not (Test-Path -LiteralPath $omniProfileConfig)) {
+        Stop-Launch "The dedicated Codex OmniRoute profile is missing." @(
+            $omniProfileConfig,
+            "Create this local profile before using -EnableOmniRoute; credentials are never stored in the repository."
+        )
+    }
+    Write-Ok "Codex OmniRoute profile available"
+}
 
 if ($EnableDevelopment) {
     $env:NEXUS_DEV_EXECUTION_ENABLED = "1"
@@ -126,28 +192,43 @@ if ($EnableDevelopment) {
     Write-Info "Development execution remains disabled. Use -EnableDevelopment to opt in for this process."
 }
 
-# ---- Step 2: OmniRoute -------------------------------------------------------
-if (Test-OmniRouteOnline) {
-    Write-Ok "OmniRoute online"
+# ---- Step 2: OmniRoute (opt-in) -----------------------------------------------
+$omniState = "DISABLED (native-first; use -EnableOmniRoute)"
+if ($EnableOmniRoute) {
+    if (Test-OmniRouteOnline) {
+        Write-Ok "OmniRoute online"
+        $omniState = "ONLINE"
+    } else {
+        $omniCommand = Get-Command $OmniRouteCommand -ErrorAction SilentlyContinue
+        if (-not $omniCommand) {
+            Stop-Launch "OmniRoute is not running and the '$OmniRouteCommand' command is not available." @(
+                "Install or fix the OmniRoute command, or start Nexus without -EnableOmniRoute."
+            )
+        }
+        if ($PreflightOnly) {
+            Write-Info "OmniRoute is offline; a normal start would launch it in the background"
+            $omniState = "OFFLINE (would be started)"
+        } else {
+            Write-Info "OmniRoute not responding on port $OmniRoutePort; starting it in the background"
+            & $omniCommand.Source serve --daemon --no-open | Out-Null
+            if (-not (Wait-Until { Test-OmniRouteOnline } $TimeoutSeconds)) {
+                Stop-Launch "OmniRoute did not become ready on port $OmniRoutePort within $TimeoutSeconds seconds." @(
+                    "Nexus was not started."
+                )
+            }
+            Write-Ok "OmniRoute online"
+            $omniState = "ONLINE"
+        }
+    }
 } else {
-    $omniCommand = Get-Command $OmniRouteCommand -ErrorAction SilentlyContinue
-    if (-not $omniCommand) {
-        Stop-Launch "OmniRoute is not running and the '$OmniRouteCommand' command is not available." @(
-            "Install or fix the OmniRoute command, then run nexus again."
-        )
-    }
-    Write-Info "OmniRoute not responding on port $OmniRoutePort; starting it in the background"
-    & $omniCommand.Source serve --daemon --no-open | Out-Null
-    if (-not (Wait-Until { Test-OmniRouteOnline } $TimeoutSeconds)) {
-        Stop-Launch "OmniRoute did not become ready on port $OmniRoutePort within $TimeoutSeconds seconds." @(
-            "Nexus was not started."
-        )
-    }
-    Write-Ok "OmniRoute online"
+    Write-Info "OmniRoute is not enabled; it is neither checked nor started."
 }
 
 # ---- Step 3: Control Center --------------------------------------------------
-if (Test-NexusOnline) {
+$controlCenterState = "ONLINE"
+if ($PreflightOnly) {
+    $controlCenterState = if (Test-NexusOnline) { "ONLINE" } else { "NOT STARTED (-PreflightOnly)" }
+} elseif (Test-NexusOnline) {
     Write-Ok "Nexus already running"
 } else {
     $owner = Get-PortOwner $NexusPort
@@ -177,11 +258,14 @@ Write-Host ""
 Write-Host "========================================"
 Write-Host " NEXUS"
 Write-Host "========================================"
-Write-Host " OmniRoute      ONLINE"
-Write-Host " Control Center ONLINE"
+Write-Host " OmniRoute      $omniState"
+Write-Host " Codex Native   $(if ($codexAvailable) { 'AVAILABLE' } else { 'NOT FOUND' })"
+Write-Host " Claude Native  $(if ($claudeAvailable) { 'AVAILABLE' } else { 'NOT FOUND' })"
+Write-Host " Development    $(if ($env:NEXUS_DEV_EXECUTION_ENABLED -eq '1') { 'EXECUTION ENABLED' } else { 'execution disabled' })"
+Write-Host " Control Center $controlCenterState"
 Write-Host ""
 Write-Host " $url"
 Write-Host "========================================"
 
 # ---- Step 5: browser ---------------------------------------------------------
-if (-not $NoBrowser) { Start-Process $url | Out-Null }
+if (-not $NoBrowser -and -not $PreflightOnly) { Start-Process $url | Out-Null }
