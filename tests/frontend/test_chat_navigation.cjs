@@ -58,7 +58,7 @@ function setup(options = {}) {
     "chat-composer-help", "chat-send-button", "chat-stop-button", "chat-new-conversation", "chat-session-groups",
     "chat-route-detail", "chat-session-state-disconnected", "chat-session-state-loading", "chat-session-state-empty",
     "chat-session-state-error", "view-mode-badge", "ws-chat", "top-project", "chat-load-older",
-    "chat-model-select", "chat-model-error",
+    "chat-model-select", "chat-model-error", "chat-backend-select",
     "chat-model-search", "chat-model-filter", "chat-model-result-count", "chat-effort-select", "chat-unknown-cost-confirm", "chat-model-favorite",
     "chat-activity-status", "chat-activity-model", "chat-activity-elapsed", "chat-activity-events",
     "chat-session-model-note",
@@ -1245,4 +1245,33 @@ test("frontend uses real API endpoints and never persists chat in browser storag
   assert.match(chatSource, /\/interrupt\?turn_id=/);
   assert.match(chatSource, /\/chat\/sessions\/.*\/history/);
   assert.doesNotMatch(chatSource, /localStorage|sessionStorage|innerHTML\s*=/);
+});
+
+test("Codex Native is the default backend: models and the new session both request it explicitly", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  assert.ok(ui.calls.some((call) => call.path.startsWith("/api/chat/models?backend=codex_native")), "native catalog is requested first");
+  assert.ok(!ui.calls.some((call) => call.path.startsWith("/api/chat/models?backend=omniroute")));
+  assert.match(nexusTemplateSource, /<option value="codex_native">Codex Native \(local login, no OmniRoute\)<\/option>/);
+  ui.elements["chat-project-select"].value = "demo"; ui.elements["chat-project-select"].dispatch("change");
+  ui.elements["chat-model-select"].value = "cx/gpt-5.6-sol"; ui.elements["chat-model-select"].dispatch("change");
+  ui.elements["chat-unknown-cost-confirm"].checked = true;
+  ui.elements["chat-new-conversation"].dispatch("click");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  const body = ui.calls.find((call) => call.method === "POST" && call.path === "/api/chat/sessions").body;
+  assert.equal(body.backend, "codex_native");
+});
+
+test("switching the backend selector reloads that backend's catalog and creates sessions for it", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  const selector = ui.elements["chat-backend-select"];
+  selector.value = "omniroute"; selector.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(ui.calls.some((call) => call.path.startsWith("/api/chat/models?backend=omniroute&refresh=true")));
+  ui.elements["chat-project-select"].value = "demo"; ui.elements["chat-project-select"].dispatch("change");
+  ui.elements["chat-model-select"].value = "cx/gpt-5.6-sol"; ui.elements["chat-model-select"].dispatch("change");
+  ui.elements["chat-unknown-cost-confirm"].checked = true;
+  ui.elements["chat-new-conversation"].dispatch("click");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  const body = ui.calls.find((call) => call.method === "POST" && call.path === "/api/chat/sessions").body;
+  assert.equal(body.backend, "omniroute");
 });

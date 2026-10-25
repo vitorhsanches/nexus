@@ -361,22 +361,7 @@
       populateProjects(payload && payload.projects);
       return loadSessions();
     });
-    var modelsRequest = request("/chat/models").then(function (models) {
-        var select = $("chat-model-select");
-        if (select) {
-          select.replaceChildren();
-          state.modelOptions = (models.models || []).filter(function (model) { return model.selectable === true && typeof model.id === "string"; });
-          state.defaultModel = models.default_model;
-          state.favoriteModels = new Set();
-          state.selectedNewSessionModel = state.modelOptions.some(function (item) { return item.id === models.default_model; }) ? models.default_model : null;
-        }
-        state.modelsLoaded = Boolean(state.modelOptions.length);
-        populateModelSelect();
-        populateEffortSelect();
-        var modelError = $("chat-model-error");
-        if (modelError) { modelError.hidden = !models.catalog_error; modelError.textContent = models.catalog_error || ""; }
-        return models;
-    });
+    var modelsRequest = loadModels();
     return Promise.allSettled([projectsRequest, modelsRequest]).then(function (results) {
       if (results[0].status === "rejected") {
         var error = results[0].reason;
@@ -395,6 +380,29 @@
     });
   }
 
+  function loadModels() {
+    var backend = state.newSessionBackend || "codex_native";
+    return request("/chat/models?backend=" + encodeURIComponent(backend) + "&refresh=" + (state.forceModelRefresh ? "true" : "false")).then(function (models) {
+        state.forceModelRefresh = false;
+        state.modelsBackend = backend;
+        var select = $("chat-model-select");
+        if (select) {
+          select.replaceChildren();
+          state.modelOptions = (models.models || []).filter(function (model) { return model.selectable === true && typeof model.id === "string"; });
+          state.defaultModel = models.default_model;
+          state.favoriteModels = new Set();
+          state.selectedNewSessionModel = state.modelOptions.some(function (item) { return item.id === models.default_model; }) ? models.default_model : null;
+          state.selectedNewSessionEffort = null;
+        }
+        state.modelsLoaded = Boolean(state.modelOptions.length);
+        populateModelSelect();
+        populateEffortSelect();
+        var modelError = $("chat-model-error");
+        if (modelError) { modelError.hidden = !models.catalog_error; modelError.textContent = models.catalog_error || ""; }
+        return models;
+    });
+  }
+
   function populateModelSelect() {
     var select = $("chat-model-select"); if (!select) return;
     var search = $("chat-model-search"); var query = search ? search.value.trim().toLowerCase() : "";
@@ -409,7 +417,8 @@
     select.replaceChildren();
     visible.forEach(function (model) {
       var option = document.createElement("option"); option.value = model.id;
-      option.textContent = (state.favoriteModels.has(model.id) ? "★ " : "") + model.name + " · " + model.id + " · cost unknown · activation unverified";
+      option.textContent = (state.favoriteModels.has(model.id) ? "★ " : "") + model.name + " · " + model.id +
+        (model.availability === "codex-native" ? (model.is_default ? " · Codex default" : "") : " · cost unknown · activation unverified");
       if (model.reason) option.title = model.reason;
       select.appendChild(option);
     });
@@ -872,7 +881,7 @@
     if (modelError) { modelError.hidden = true; modelError.textContent = ""; }
     state.sending = true; updateNewButton(); setComposerState();
     showStatus("Creating a session for the selected project…", "loading");
-    request("/chat/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, model: selectedModel, effort: selectedEffort, allow_unknown_cost: Boolean(needsCostConsent && costConsent && costConsent.checked) }) })
+    request("/chat/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, backend: state.modelsBackend || "codex_native", model: selectedModel, effort: selectedEffort, allow_unknown_cost: Boolean(needsCostConsent && costConsent && costConsent.checked) }) })
       .then(function (session) {
         if (!session || !session.session_id || session.project_id !== projectId ||
             session.requested_model !== selectedModel || (session.requested_effort || null) !== selectedEffort) {
@@ -1323,6 +1332,13 @@
   if (composer) composer.addEventListener("submit", function (event) { event.preventDefault(); sendMessage(); });
   var projectSelect = $("chat-project-select");
   if (projectSelect) projectSelect.addEventListener("change", function () { chooseProject(projectSelect.value); });
+  var backendSelect = $("chat-backend-select"); if (backendSelect) backendSelect.addEventListener("change", function () {
+    state.newSessionBackend = backendSelect.value; state.modelsLoaded = false; state.forceModelRefresh = true;
+    populateModelSelect(); setComposerState();
+    loadModels().catch(function () {
+      var node = $("chat-model-error"); if (node) { node.hidden = false; node.textContent = "Model choices unavailable for this backend."; }
+    });
+  });
   var modelSelect = $("chat-model-select"); if (modelSelect) modelSelect.addEventListener("change", function () {
     state.selectedNewSessionModel = modelSelect.value || null;
     state.selectedNewSessionEffort = null; populateEffortSelect(); updateFavoriteButton(); setComposerState();

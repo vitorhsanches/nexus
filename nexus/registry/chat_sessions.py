@@ -28,15 +28,21 @@ def _now() -> str:
 # -- sessions ----------------------------------------------------------
 
 
-def create_session(project_id: str, workspace_path: str, requested_model: str | None = None, requested_effort: str | None = None) -> str:
+def create_session(
+    project_id: str,
+    workspace_path: str,
+    requested_model: str | None = None,
+    requested_effort: str | None = None,
+    backend: str = "omniroute",
+) -> str:
     session_id = f"CHAT-{uuid4().hex[:8].upper()}"
     with get_connection() as connection:
         connection.execute(
             """
-            INSERT INTO chat_sessions (id, project_id, workspace_path, requested_model, requested_effort, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'CREATED', ?, ?)
+            INSERT INTO chat_sessions (id, project_id, workspace_path, requested_model, requested_effort, backend, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
             """,
-            (session_id, project_id, workspace_path, requested_model, requested_effort, _now(), _now()),
+            (session_id, project_id, workspace_path, requested_model, requested_effort, backend, _now(), _now()),
         )
     return session_id
 

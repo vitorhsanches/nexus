@@ -230,6 +230,8 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_model TEXT")
         if "requested_effort" not in chat_session_columns:
             connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_effort TEXT")
+        if "backend" not in chat_session_columns:
+            connection.execute("ALTER TABLE chat_sessions ADD COLUMN backend TEXT NOT NULL DEFAULT 'omniroute'")
 
         # Development Mode (F1.2): per-project authorization flag. Disabled
         # by default for every project -- new AND pre-existing rows alike,
