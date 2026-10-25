@@ -60,18 +60,20 @@ def timeout_seconds() -> int:
     return min(max(value, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS)
 
 
-def _text(value) -> str | None:
+def _text(value, limit: int = SUMMARY_TEXT_LIMIT) -> str | None:
     if isinstance(value, list):
         value = " ".join(str(part) for part in value)
     if not isinstance(value, str) or not value:
         return None
-    return value[:SUMMARY_TEXT_LIMIT]
+    return value[:limit]
 
 
 def _summary(kind: str, params: dict) -> dict:
     summary = {"kind": kind}
-    for key in ("command", "cwd", "reason", "grantRoot", "itemId"):
-        text = _text(params.get(key))
+    # "tool"/"input" carry the exact operation (Claude Native) the human approves.
+    for key in ("command", "cwd", "reason", "grantRoot", "itemId", "tool", "input"):
+        # The exact input is bounded by its producer (never truncated here).
+        text = _text(params.get(key), 20_000 if key == "input" else SUMMARY_TEXT_LIMIT)
         if text is not None:
             summary[key] = text
     return summary

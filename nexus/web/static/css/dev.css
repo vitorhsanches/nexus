@@ -181,3 +181,5 @@ body[data-view="dev"] .topbar-chip:nth-child(-n+2) { display: none; }
 .dev-approval-approved { color: #2e7d32; }
 .dev-approval-declined, .dev-approval-expired, .dev-approval-cancelled { color: var(--text-dim); }
 .dev-approvals-note { font-size: 11px; color: var(--text-dim); margin: 0 0 6px; }
+
+.dev-approval-input { width: 100%; max-height: 240px; overflow: auto; margin: 4px 0; white-space: pre-wrap; font: 11px/1.4 var(--mono); }

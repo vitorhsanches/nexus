@@ -487,3 +487,22 @@ class ClaudeNativeRoutesTest(unittest.TestCase):
         with patch("nexus.chat.service.list_models", return_value={"models": []}) as mock_list:
             self._client().get("/api/chat/models?backend=claude_native")
         mock_list.assert_called_once_with(refresh=False, backend="claude_native")
+
+
+def test_catalog_lists_the_models_the_cli_reports(claude_service, monkeypatch):
+    monkeypatch.setattr(claude_native, "discover_models", lambda: [
+        {"id": "default", "name": "Default (recommended)", "efforts": ["low", "high"]},
+        {"id": "claude-opus-4-8", "name": "Opus 4.8", "efforts": ["max"]}])
+    result = service.list_models(backend="claude_native")
+    assert [(m["id"], m["availability"], m["supported_efforts"]) for m in result["models"]] == [
+        ("default", "claude-native", ["low", "high"]), ("claude-opus-4-8", "claude-native", ["max"])]
+
+
+def test_a_discovered_model_can_be_used_and_an_unknown_one_is_refused(isolated_registry, claude_service, monkeypatch):
+    _register_project(isolated_registry)
+    monkeypatch.setattr(claude_native, "discover_models", lambda: [{"id": "claude-opus-4-8", "name": "Opus 4.8", "efforts": ["max"]}])
+    session = service.create_session("demo", "claude-opus-4-8", "max", backend="claude_native")
+    assert session["requested_model"] == "claude-opus-4-8"
+    with pytest.raises(service.ChatError) as excinfo:
+        service.create_session("demo", "sonnet", backend="claude_native")
+    assert excinfo.value.code == "MODEL_NOT_ALLOWED"

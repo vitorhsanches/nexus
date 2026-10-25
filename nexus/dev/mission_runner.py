@@ -121,9 +121,13 @@ def start_mission(
         raise DevServiceError("INVALID_ALLOWED_MODELS", "allowed_models contains an invalid route identifier.", http_status=400)
     if not selected_model:
         raise DevServiceError("MODEL_REQUIRED", "An explicit selected model is required.", http_status=400)
-    if executor.session_backend(session) == executor.BACKEND_CODEX_NATIVE:
-        # Codex Native: the local Codex account's catalog, never OmniRoute's.
-        executor.validate_native_choice(selected_model, effort)
+    backend = executor.session_backend(session)
+    if backend in {executor.BACKEND_CODEX_NATIVE, executor.BACKEND_CLAUDE_NATIVE}:
+        # Native backends: the local account's own catalog, never OmniRoute's.
+        if backend == executor.BACKEND_CODEX_NATIVE:
+            executor.validate_native_choice(selected_model, effort)
+        else:
+            executor.validate_claude_choice(selected_model, effort)
         if selected_model not in allowed_models:
             raise DevServiceError("MODEL_NOT_CONFIRMED", "The selected model was not explicitly confirmed by the caller.", http_status=400)
         normalized_allowed = [selected_model]

@@ -863,3 +863,29 @@ test("command executions stream with their exit code and output", async () => {
 function nexusTemplate() {
   return require("node:fs").readFileSync(require("node:path").join(__dirname, "../../nexus/web/templates/nexus.html"), "utf8");
 }
+
+test("Claude Native can be chosen for Development and its approvals show the exact operation", async () => {
+  const ui = setup({ executionEnabled: true });
+  assert.match(nexusTemplate(), /<option value="claude_native">Claude Native \(Claude Code CLI, approvals required\)<\/option>/);
+  await ui.window.NexusDev.enter();
+  await flush();
+  ui.backend.models = { backend: "claude_native", models: [{ id: "default", name: "Default (recommended)", selectable: true, availability: "claude-native", supported_efforts: ["low"] }], default_model: "default", catalog_error: null };
+  ui.elements["dev-backend-select"].value = "claude_native"; ui.elements["dev-backend-select"].dispatch("change");
+  await flush();
+  assert.ok(ui.calls.some((call) => call.path === "/api/dev/models?backend=claude_native"));
+  ui.elements["dev-project-select"].value = "demo"; ui.elements["dev-project-select"].dispatch("change");
+  await flush();
+  ui.elements["dev-create-session"].dispatch("click");
+  await flush();
+  const body = ui.calls.filter((call) => call.method === "POST" && call.path === "/api/dev/sessions").pop().body;
+  assert.deepEqual(body, { project_id: "demo", backend: "claude_native", requested_model: "default" });
+
+  ui.backend.approvals = [{ approval_id: "APPROVAL-C", dev_session_id: "DEV-1", turn_id: "T", kind: "command", status: "PENDING",
+    summary: { tool: "Bash", command: "python -m pytest -q", reason: "Run the tests", input: "{\n \"command\": \"python -m pytest -q\"\n}" } }];
+  ui.elements["dev-session-list"].children[0].dispatch("click");
+  await flush();
+  const row = ui.elements["dev-approvals"].children[0];
+  const exact = row.children.find((child) => child.className === "dev-approval-input");
+  assert.ok(exact, "the exact operation is displayed");
+  assert.match(exact.textContent, /^Bash \{\n "command": "python -m pytest -q"\n\}$/);
+});

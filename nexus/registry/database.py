@@ -482,6 +482,9 @@ def initialize_database() -> None:
         dev_session_columns = {row[1] for row in connection.execute("PRAGMA table_info(dev_sessions)")}
         if "backend" not in dev_session_columns:
             connection.execute("ALTER TABLE dev_sessions ADD COLUMN backend TEXT NOT NULL DEFAULT 'omniroute'")
+        if "claude_session_id" not in dev_session_columns:
+            # Claude Code's own conversation id (Claude Native Development only).
+            connection.execute("ALTER TABLE dev_sessions ADD COLUMN claude_session_id TEXT")
         # Human decisions on Codex approval requests (P4.0B). The live request
         # only exists while its App-Server process runs; this is the audit
         # trail, and a PENDING row without a live request is expired on read.

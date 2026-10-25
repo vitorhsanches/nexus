@@ -257,18 +257,27 @@ def _claude_catalog() -> dict:
         error = "Claude Code is not signed in. Run 'claude auth login' for this Windows user, then refresh."
     models = []
     if status["installed"] and status["logged_in"]:
-        for alias in claude_native.MODEL_ALIASES:
+        try:
+            # The CLI's own initialize response: the account's real model list.
+            offered = [(row["id"], row["name"], row["efforts"], "claude-native")
+                       for row in claude_native.discover_models()]
+        except claude_native.ClaudeNativeError:
+            offered = []
+        if not offered:
+            offered = [(alias, "Claude Code default" if alias == "default" else f"Claude {alias.title()} (alias)",
+                        list(claude_native.EFFORTS), "claude-native-alias") for alias in claude_native.MODEL_ALIASES]
+        for model_id, name, efforts, availability in offered:
             models.append({
-                "id": alias,
-                "name": "Claude Code default" if alias == "default" else f"Claude {alias.title()} (alias)",
+                "id": model_id,
+                "name": name,
                 "provider": "anthropic",
                 "selectable": True,
-                "availability": "claude-native-alias",
-                "reason": "Resolved by the Claude Code CLI at run time; the model actually used is recorded per turn.",
+                "availability": availability,
+                "reason": "Offered by the Claude Code CLI for the signed-in account; the model used is recorded per turn.",
                 "cost_status": "known",
-                "supported_efforts": list(claude_native.EFFORTS),
+                "supported_efforts": efforts,
                 "default_effort": None,
-                "is_default": alias == "default",
+                "is_default": model_id == "default",
                 "appserver_compatible": False,
             })
     return {"backend": BACKEND_CLAUDE_NATIVE, "models": models, "default_model": "default" if models else None,
@@ -489,19 +498,25 @@ def _create_native_session(project_id: str, model: str | None, effort: str | Non
     return _session_dict(chat_sessions.get_session(session_id))
 
 
+def validate_claude_choice(model: str, effort: str | None) -> None:
+    """The model/effort must be offered by the signed-in Claude Code account."""
+    catalog = _claude_catalog()
+    if not catalog["account"]["installed"]:
+        raise ChatError("CLAUDE_NOT_FOUND", catalog["catalog_error"] or "Claude Code CLI was not found.", http_status=503)
+    if not catalog["account"]["authenticated"]:
+        raise ChatError("CLAUDE_NOT_SIGNED_IN", "Claude Code is not signed in. Run 'claude auth login' first.", http_status=409)
+    selected = next((item for item in catalog["models"] if item["id"] == model), None)
+    if selected is None:
+        raise ChatError("MODEL_NOT_ALLOWED", "The selected model is not offered by the local Claude Code account.", http_status=422)
+    if effort is not None and effort not in selected["supported_efforts"]:
+        raise ChatError("EFFORT_NOT_SUPPORTED", "The selected effort is not supported by this Claude model.", http_status=422)
+
+
 def _create_claude_session(project_id: str, model: str | None, effort: str | None) -> dict:
     """Claude Native: the local Claude Code login; no OmniRoute or Codex involved."""
     workspace_path = _validate_project(project_id)
     model = model or "default"
-    if model not in claude_native.MODEL_ALIASES:
-        raise ChatError("MODEL_NOT_ALLOWED", "Choose a Claude Code model alias (default, sonnet, opus or haiku).", http_status=422)
-    if effort is not None and effort not in claude_native.EFFORTS:
-        raise ChatError("EFFORT_NOT_SUPPORTED", "The selected effort is not supported by Claude Code.", http_status=422)
-    status = claude_native.cli_status()
-    if not status["installed"]:
-        raise ChatError("CLAUDE_NOT_FOUND", status["error"] or "Claude Code CLI was not found.", http_status=503)
-    if not status["logged_in"]:
-        raise ChatError("CLAUDE_NOT_SIGNED_IN", "Claude Code is not signed in. Run 'claude auth login' first.", http_status=409)
+    validate_claude_choice(model, effort)
     session_id = chat_sessions.create_session(project_id, workspace_path, model, effort, BACKEND_CLAUDE_NATIVE)
     return _session_dict(chat_sessions.get_session(session_id))
 
@@ -1041,7 +1056,7 @@ def _run_claude_turn(session_id, turn_id, text, active, session_row, workspace_p
         workspace_path,
         session_id=conversation_id,
         resume=bool(stored),
-        model=model if model in claude_native.MODEL_ALIASES else None,
+        model=model,
         effort=session_row["requested_effort"] if "requested_effort" in session_row.keys() else None,
         on_event=lambda event: _on_event(active, event),
         on_session=on_session,

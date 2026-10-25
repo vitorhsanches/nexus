@@ -386,9 +386,9 @@
     var button = $("dev-create-session"); if (button) button.disabled = true;
     showStatus("Creating a Development session…", "loading");
     var body = { project_id: projectId };
-    if (state.newSessionBackend === "codex_native") {
-      body.backend = "codex_native";
-      if (state.modelsBackend === "codex_native" && state.selectedModel) body.requested_model = state.selectedModel;
+    if (state.newSessionBackend === "codex_native" || state.newSessionBackend === "claude_native") {
+      body.backend = state.newSessionBackend;
+      if (state.modelsBackend === state.newSessionBackend && state.selectedModel) body.requested_model = state.selectedModel;
     }
     request("/dev/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       .then(function (session) {
@@ -549,7 +549,7 @@
     var authorized = Boolean(project && project.enabled && (project.dev_enabled === true || project.dev_enabled === 1));
     var rows = [
       ["Session", state.session.session_id],
-      ["Backend", state.session.backend === "codex_native" ? "Codex Native" : "OmniRoute"],
+      ["Backend", state.session.backend === "codex_native" ? "Codex Native" : state.session.backend === "claude_native" ? "Claude Native" : "OmniRoute"],
       ["Status", state.session.status],
       ["Project authorization", authorized ? "Authorized (dev_enabled)" : "NOT authorized — revoked or disabled"],
       ["Branch", state.session.branch],
@@ -976,6 +976,13 @@
         (summary.reason ? " · reason: " + summary.reason : "")
       );
       row.appendChild(text);
+      if (summary.input) {
+        // The exact operation that an approval allows -- nothing else can run.
+        var exact = document.createElement("pre");
+        exact.className = "dev-approval-input";
+        exact.textContent = redacted((summary.tool ? summary.tool + " " : "") + summary.input);
+        row.appendChild(exact);
+      }
       if (approval.status === "PENDING") {
         [["accept", "Approve once"], ["decline", "Decline"]].forEach(function (pair) {
           var button = document.createElement("button");
@@ -1185,6 +1192,8 @@
         logActivityEvent(
           item.type + (item.command ? ": " + item.command : "") +
           (finished && typeof item.exitCode === "number" ? " → exit " + item.exitCode : "") +
+          (finished && typeof item.exitCode !== "number" && item.status ? " → " + item.status : "") +
+          (/item\/completed$/.test(type) && item.type === "fileChange" && item.path ? " " + item.path + " → " + (item.status || "done") : "") +
           (output ? "\n" + output.slice(-600) : "")
         );
       }
@@ -1241,7 +1250,7 @@
     var projectSelect = $("dev-project-select"); if (projectSelect) projectSelect.addEventListener("change", function () { chooseProject(projectSelect.value); });
     var createButton = $("dev-create-session"); if (createButton) createButton.addEventListener("click", createSession);
     var backendSelect = $("dev-backend-select"); if (backendSelect) backendSelect.addEventListener("change", function () {
-      state.newSessionBackend = backendSelect.value === "omniroute" ? "omniroute" : "codex_native";
+      state.newSessionBackend = ["omniroute", "claude_native"].indexOf(backendSelect.value) >= 0 ? backendSelect.value : "codex_native";
       loadModels(state.newSessionBackend).catch(function (error) { showStatus("Could not load models: " + error.message, "error"); });
     });
     var refreshReview = $("dev-review-refresh"); if (refreshReview) refreshReview.addEventListener("click", loadReview);

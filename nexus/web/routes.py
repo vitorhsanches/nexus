@@ -721,7 +721,7 @@ async def stream_chat_events(
 class DevSessionCreateRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
     requested_model: str | None = Field(default=None, min_length=1, max_length=128)
-    backend: Literal["omniroute", "codex_native"] = "omniroute"
+    backend: Literal["omniroute", "codex_native", "claude_native"] = "omniroute"
 
 
 class DevApprovalDecisionRequest(BaseModel):
@@ -819,8 +819,8 @@ def create_dev_session(request: DevSessionCreateRequest):
     from nexus.dev.service import DevServiceError, create_dev_session as _create_dev_session  # noqa: PLC0415
 
     try:
-        if request.backend == "codex_native":
-            return _create_dev_session(request.project_id, requested_model=request.requested_model, backend="codex_native")
+        if request.backend in {"codex_native", "claude_native"}:
+            return _create_dev_session(request.project_id, requested_model=request.requested_model, backend=request.backend)
         return _create_dev_session(request.project_id, requested_model=request.requested_model)
     except DevServiceError as error:
         raise _dev_error_response(error) from error
@@ -954,14 +954,14 @@ def list_dev_integrations(session_id: str):
 
 
 @router.get("/dev/models")
-def list_dev_models_route(refresh: bool = False, backend: Literal["omniroute", "codex_native"] = "omniroute"):
+def list_dev_models_route(refresh: bool = False, backend: Literal["omniroute", "codex_native", "claude_native"] = "omniroute"):
     """Return the models a Development session may use for the given backend:
     live OmniRoute routes approved for coding, or the local Codex account's
     own catalog for Codex Native."""
-    if backend == "codex_native":
+    if backend in {"codex_native", "claude_native"}:
         from nexus.chat.service import list_models
 
-        return list_models(refresh=refresh, backend="codex_native")
+        return list_models(refresh=refresh, backend=backend)
     from nexus.dev.models import list_dev_models
 
     return list_dev_models(refresh=refresh)
