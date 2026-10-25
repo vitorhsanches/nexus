@@ -107,6 +107,19 @@ def routing_status():
     return get_routing_status()
 
 
+@router.get("/runtime/status")
+def runtime_status():
+    """Return local native-agent availability without contacting OmniRoute.
+
+    The Overview uses this inexpensive capability snapshot.  The separate
+    ``/routing/status`` endpoint remains available for an explicit routing
+    inspection and is the only path that collects OmniRoute telemetry.
+    """
+    from nexus.web.native_runtime import get_native_runtime_status  # noqa: PLC0415
+
+    return get_native_runtime_status()
+
+
 @router.get("/missions")
 def missions():
     """Return all missions with their per-column board breakdown."""

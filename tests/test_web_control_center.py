@@ -18,6 +18,7 @@ from nexus.routing.telemetry import (
     ServerHealth,
 )
 from nexus.web.app import app
+from nexus.web.native_runtime import get_native_runtime_status
 from nexus.web.routing_status import get_routing_status
 
 
@@ -110,6 +111,35 @@ def test_routing_status_endpoint_is_read_only_projection():
     assert response.json() == expected
 
 
+def test_native_runtime_status_is_local_and_does_not_query_omniroute():
+    result = get_native_runtime_status(
+        codex_probe=lambda: {"id": "codex_native", "status": "READY"},
+        claude_probe=lambda: {"id": "claude_native", "status": "AUTH_REQUIRED"},
+    )
+    assert result["native_first"] is True
+    assert result["native_ready"] is True
+    assert result["omniroute"] == {
+        "status": "NOT_QUERIED",
+        "reason": "OmniRoute telemetry is only collected after opening Models & Routing.",
+    }
+
+
+def test_native_runtime_endpoint_uses_only_the_native_probe():
+    expected = {
+        "default_runtime": "native",
+        "native_first": True,
+        "native_ready": True,
+        "runtimes": {"codex_native": {"status": "READY"}},
+        "omniroute": {"status": "NOT_QUERIED"},
+    }
+    with patch("nexus.web.native_runtime.get_native_runtime_status", return_value=expected) as probe, \
+            patch("nexus.web.routing_status.OmniRouteTelemetryClient", side_effect=AssertionError("telemetry queried")):
+        response = TestClient(app).get("/api/runtime/status")
+    assert response.status_code == 200
+    assert response.json() == expected
+    probe.assert_called_once_with()
+
+
 def test_control_center_assets_and_required_panels_are_present():
     web_dir = Path(__file__).resolve().parents[1] / "nexus" / "web"
     html = (web_dir / "templates" / "nexus.html").read_text(encoding="utf-8")
@@ -127,6 +157,8 @@ def test_control_center_assets_and_required_panels_are_present():
     ):
         assert panel_id in html
     assert "/api/routing/status" in script
+    assert "/api/runtime/status" in script
+    assert "NOT QUERIED" in html
     assert "runtimeDisabled" in script
     assert "state.availability.programs ? activePrograms" in script
     assert "state.availability.agents ? runningTasks" in script

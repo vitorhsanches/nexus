@@ -132,6 +132,17 @@ test("Overview polling makes real requests while the Overview view is active", a
   ui.window.NexusControlCenter.refresh();
   await settle();
   assert.ok(ui.calls.some((url) => url === "/api/programs"));
+  assert.ok(ui.calls.some((url) => url === "/api/runtime/status"));
+  assert.ok(!ui.calls.some((url) => url === "/api/routing/status"), "Overview must not query OmniRoute telemetry");
+});
+
+test("opening Models & Routing is the explicit action that queries OmniRoute telemetry", async () => {
+  const ui = await setupSettled({ initialView: "overview" });
+  const routingNav = ui.nav.find((item) => item.getAttribute("data-target") === "overview-dashboard");
+  routingNav.setAttribute("data-target", "overview-routing");
+  routingNav.dispatch("click");
+  await drain(ui);
+  assert.ok(ui.calls.includes("/api/routing/status"));
 });
 
 test("Overview polling is suspended (zero requests) while Development Mode is active", async () => {
