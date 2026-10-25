@@ -399,6 +399,10 @@
         populateEffortSelect();
         var modelError = $("chat-model-error");
         if (modelError) { modelError.hidden = !models.catalog_error; modelError.textContent = models.catalog_error || ""; }
+        state.backendAccount = models.account || null;
+        if (backend === "claude_native" && models.account && models.account.authenticated) {
+          showStatus("Claude Code " + (models.account.version || "") + " · signed in (" + (models.account.type || "local login") + ") · read-only", "connected");
+        }
         return models;
     });
   }
@@ -418,7 +422,8 @@
     visible.forEach(function (model) {
       var option = document.createElement("option"); option.value = model.id;
       option.textContent = (state.favoriteModels.has(model.id) ? "★ " : "") + model.name + " · " + model.id +
-        (model.availability === "codex-native" ? (model.is_default ? " · Codex default" : "") : " · cost unknown · activation unverified");
+        (model.availability === "codex-native" ? (model.is_default ? " · Codex default" : "") :
+          model.availability === "claude-native-alias" ? " · resolved by Claude Code" : " · cost unknown · activation unverified");
       if (model.reason) option.title = model.reason;
       select.appendChild(option);
     });
@@ -437,7 +442,7 @@
     select.replaceChildren();
     var options = model && Array.isArray(model.supported_efforts) ? model.supported_efforts : [];
     var defaultOption = document.createElement("option"); defaultOption.value = "";
-    defaultOption.textContent = "App-Server default (not explicitly confirmed)"; select.appendChild(defaultOption);
+    defaultOption.textContent = state.modelsBackend === "claude_native" ? "Claude Code default effort" : "App-Server default (not explicitly confirmed)"; select.appendChild(defaultOption);
     options.forEach(function (effort) {
       var option = document.createElement("option"); option.value = effort; option.textContent = effort; select.appendChild(option);
     });
@@ -791,7 +796,7 @@
 
   function renderHistory(detail) {
     resetTranscript();
-    if (!detail.codex_thread_id) {
+    if (!detail.codex_thread_id && !detail.claude_session_id) {
       // Never call the history API for a session that has not started a
       // Codex thread yet -- there is nothing to fetch, and "no history" is
       // not the same as "history unavailable".
