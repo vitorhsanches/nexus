@@ -44,6 +44,7 @@ function setup(options = {}) {
     "activity-list", "command-feedback", "command-palette", "nexus-command-input",
     "overview-open-program", "overview-program-meta", "overview-program-name",
     "overview-program-phases", "overview-program-progress", "overview-runtime-badge",
+    "kpi-native-agents", "runtime-native", "runtime-codex-native", "runtime-claude-native", "runtime-omniroute",
     "recovery-list", "routing-count", "routing-policy", "routing-rows", "run-btn",
     "run-disabled-reason", "terminal-clear", "terminal-event-count", "terminal-follow",
     "terminal-output", "terminal-run-id", "view-mode-badge", "top-run", "top-project",
@@ -52,8 +53,9 @@ function setup(options = {}) {
   const navDev = new Element("nav-dev"); navDev.setAttribute("data-target", "dev-view");
   const navChat = new Element("nav-chat"); navChat.setAttribute("data-target", "chat-view");
   const navOverview = new Element("nav-overview"); navOverview.setAttribute("data-target", "overview-dashboard");
+  const navRouting = new Element("nav-routing"); navRouting.setAttribute("data-target", "overview-routing");
   navOverview.classList.add("active");
-  const nav = [navOverview, navChat, navDev];
+  const nav = [navOverview, navRouting, navChat, navDev];
   const body = { dataset: { view: options.initialView || "overview" }, setAttribute(name, value) { if (name === "data-view") this.dataset.view = value; } };
   const document = {
     body,
@@ -63,6 +65,7 @@ function setup(options = {}) {
     querySelector() { return null; },
   };
   const calls = [];
+  const failedUrls = new Set(options.failures || []);
   const inFlight = { current: 0, max: 0 };
   const fetchImpl = (url) => {
     calls.push(url);
@@ -71,7 +74,8 @@ function setup(options = {}) {
     return new Promise((resolve) => {
       setTimeout(() => {
         inFlight.current -= 1;
-        resolve({ ok: true, json: () => Promise.resolve(options.responses && options.responses[url] || {}) });
+        resolve({ ok: !failedUrls.has(url), status: 503,
+          json: () => Promise.resolve(options.responses && options.responses[url] || {}) });
       }, 0);
     });
   };
@@ -88,7 +92,7 @@ function setup(options = {}) {
     setTimeout, clearTimeout,
   };
   vm.runInNewContext(controlCenterSource, context);
-  return { elements, body, nav, window, calls, inFlight, document };
+  return { elements, body, nav, window, calls, inFlight, document, failedUrls };
 }
 
 async function settle() {
@@ -114,11 +118,8 @@ async function drain(ui, maxMs = 2000) {
   }
 }
 
-// setup() itself triggers one unconditional loadOverview()/loadRouting()
-// at module load time (control-center.js's own top-level call, unchanged
-// by F2.4B) -- let that fully settle before a test starts measuring its
-// own, deliberate call, or the two overlap and double-count in-flight
-// requests.
+// setup() triggers an initial loadOverview() at module load time. Let it
+// fully settle before measuring a deliberate call; otherwise requests overlap.
 async function setupSettled(options) {
   const ui = setup(options);
   await drain(ui);
@@ -132,6 +133,94 @@ test("Overview polling makes real requests while the Overview view is active", a
   ui.window.NexusControlCenter.refresh();
   await settle();
   assert.ok(ui.calls.some((url) => url === "/api/programs"));
+  assert.ok(ui.calls.some((url) => url === "/api/runtime/status"));
+  assert.ok(!ui.calls.some((url) => url === "/api/routing/status"), "Overview must not query OmniRoute telemetry");
+});
+
+test("initial Overview and repeated refreshes never request OmniRoute telemetry", async () => {
+  const ui = setup({ initialView: "overview" });
+  await drain(ui);
+  assert.equal(ui.elements["run-btn"].disabled, true, "legacy mission gate must fail closed before routing is queried");
+  assert.match(ui.elements["run-disabled-reason"].textContent, /Open Models & Routing/);
+  ui.window.NexusControlCenter.refresh();
+  await drain(ui);
+  assert.equal(ui.calls.filter((url) => url === "/api/routing/status").length, 0);
+  assert.ok(ui.calls.filter((url) => url === "/api/runtime/status").length >= 2);
+});
+
+test("opening Models & Routing is the explicit action that queries OmniRoute telemetry", async () => {
+  const ui = await setupSettled({ initialView: "overview" });
+  const routingNav = ui.nav.find((item) => item.getAttribute("data-target") === "overview-routing");
+  routingNav.dispatch("click");
+  await drain(ui);
+  assert.ok(ui.calls.includes("/api/routing/status"));
+});
+
+test("failed explicit routing query shows UNAVAILABLE until an explicit successful retry", async () => {
+  const ui = setup({ initialView: "overview", failures: ["/api/routing/status"], responses: {
+    "/api/routing/status": { runtime: { status: "ONLINE", credential_store: "READY", providers: "READY" },
+      summary: { actions_available: true, callable_routes: 1 }, routes: [] },
+  } });
+  await drain(ui);
+  assert.equal(ui.elements["runtime-omniroute"].textContent, "NOT QUERIED");
+  ui.nav.find((item) => item.getAttribute("data-target") === "overview-routing").dispatch("click");
+  await drain(ui);
+  assert.equal(ui.elements["runtime-omniroute"].textContent, "UNAVAILABLE");
+  assert.equal(ui.elements["routing-count"].textContent, "UNAVAILABLE");
+  assert.equal(ui.elements["run-btn"].disabled, true);
+  const queried = ui.calls.filter((url) => url === "/api/routing/status").length;
+  ui.window.NexusControlCenter.refresh();
+  await drain(ui);
+  assert.equal(ui.calls.filter((url) => url === "/api/routing/status").length, queried,
+    "Overview refresh must not retry OmniRoute implicitly");
+  ui.failedUrls.delete("/api/routing/status");
+  ui.window.NexusControlCenter.refreshRouting();
+  await drain(ui);
+  assert.equal(ui.elements["runtime-omniroute"].textContent, "ONLINE");
+  assert.equal(ui.elements["routing-count"].textContent, "1 CALLABLE");
+  assert.equal(ui.elements["run-btn"].disabled, false);
+});
+
+test("explicit routing observation restores the legacy mission gate only for callable routes", async () => {
+  const ui = setup({ initialView: "overview", responses: {
+    "/api/routing/status": { summary: { actions_available: true, callable_routes: 1 }, routes: [] },
+  } });
+  await drain(ui);
+  assert.equal(ui.elements["run-btn"].disabled, true);
+  ui.nav.find((item) => item.getAttribute("data-target") === "overview-routing").dispatch("click");
+  await drain(ui);
+  assert.equal(ui.elements["run-btn"].disabled, false);
+  assert.equal(ui.elements["run-btn"].dataset.runtimeDisabled, "false");
+});
+
+test("routing command queries OmniRoute while the Overview command does not", async () => {
+  const ui = await setupSettled({ initialView: "overview" });
+  ui.elements["nexus-command-input"].value = "overview";
+  ui.elements["command-palette"].dispatch("submit", { preventDefault() {} });
+  await drain(ui);
+  assert.ok(!ui.calls.includes("/api/routing/status"));
+  ui.elements["nexus-command-input"].value = "models";
+  ui.elements["command-palette"].dispatch("submit", { preventDefault() {} });
+  await drain(ui);
+  assert.ok(ui.calls.includes("/api/routing/status"));
+});
+
+test("native KPI counts only confirmed native agents even after OmniRoute routing loads", async () => {
+  const ui = setup({ initialView: "overview", responses: {
+    "/api/runtime/status": { native_status: "UNVERIFIED", native_ready: false, runtimes: {
+      codex_native: { status: "UNVERIFIED" }, claude_native: { status: "NOT_INSTALLED" },
+    } },
+    "/api/routing/status": { runtime: { status: "ONLINE" }, summary: { callable_routes: 4, actions_available: true },
+      routes: [{ provider: "omniroute", callable: true, model: "legacy", capabilities: [] }] },
+  } });
+  await drain(ui);
+  assert.equal(ui.elements["runtime-codex-native"].textContent, "UNVERIFIED");
+  assert.equal(ui.elements["overview-runtime-badge"].textContent, "NATIVE UNVERIFIED");
+  assert.equal(ui.elements["kpi-native-agents"].textContent, "0");
+  ui.nav.find((item) => item.getAttribute("data-target") === "overview-routing").dispatch("click");
+  await drain(ui);
+  assert.equal(ui.elements["kpi-native-agents"].textContent, "0");
+  assert.equal(ui.elements["runtime-omniroute"].textContent, "ONLINE");
 });
 
 test("Overview polling is suspended (zero requests) while Development Mode is active", async () => {
@@ -155,6 +244,7 @@ test("returning to Overview from the nav bar triggers an immediate refresh, not 
   overviewNav.dispatch("click");
   await settle();
   assert.ok(ui.calls.some((url) => url === "/api/programs"), "switching back to Overview must refresh immediately");
+  assert.ok(!ui.calls.includes("/api/routing/status"), "returning to Overview must not query OmniRoute");
 });
 
 test("checkpoint fetches in loadFeaturedDetails are bounded in concurrency, never one unbounded burst", async () => {
