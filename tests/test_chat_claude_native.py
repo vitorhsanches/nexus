@@ -227,7 +227,8 @@ def test_a_turn_streams_without_duplicating_text_and_reports_tools_and_denials()
     tools = [e["params"]["item"] for e in events if e["params"].get("item", {}).get("type") == "dynamicToolCall"]
     assert tools[0] == {"type": "dynamicToolCall", "id": "tool_1", "tool": "Read", "status": "inProgress",
                         "arguments": '{"file_path": "README.md"}'}
-    assert tools[1]["status"] == "completed" and tools[1]["contentItems"][0]["text"] == "# Nexus"
+    assert tools[1]["status"] == "completed" and tools[1]["tool"] == "Read"
+    assert tools[1]["contentItems"][0]["text"] == "# Nexus"
     assert tools[2]["status"] == "declined" and tools[2]["tool"] == "Bash"
 
 
@@ -415,6 +416,7 @@ def test_turns_stream_persist_and_resume_the_same_conversation(isolated_registry
     assert turn_row["status"] == "COMPLETED" and turn_row["response_text"] == "answer to: Read the README"
     assert turn_row["provider"] == "anthropic" and turn_row["model"] == "claude-sonnet-x"
     conversation = chat_sessions.get_session(sid)["claude_session_id"]
+    assert service.get_session_detail(sid)["claude_session_id"] == conversation, "the cockpit uses it to load history"
     assert ScriptedTurn.instances[0].resume is False and ScriptedTurn.instances[0].session_id == conversation
     assert ScriptedTurn.instances[0].model == "default" and ScriptedTurn.instances[0].cwd.endswith("demo")
 

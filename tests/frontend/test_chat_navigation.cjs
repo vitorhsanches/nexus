@@ -1302,3 +1302,20 @@ test("a missing Claude login is shown as a clear catalog error", async () => {
   assert.equal(ui.elements["chat-model-error"].hidden, false);
   assert.match(ui.elements["chat-model-error"].textContent, /claude auth login/);
 });
+
+test("a reopened Claude Native session renders its persisted history, including the user's messages", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  ui.backend.sessions = [{ session_id: "CHAT-C1", project_id: "demo", status: "ACTIVE", backend: "claude_native", requested_model: "haiku", model: "claude-haiku-x", provider: "anthropic", codex_thread_id: null, claude_session_id: "11111111-2222-4333-8444-555555555555" }];
+  ui.backend.turns.set("CHAT-C1", [{ turn_id: "T1", status: "COMPLETED", response_text: "It is a disposable fixture.", idempotency_key: "k" }]);
+  ui.backend.historyPages.set("CHAT-C1", [{ items: [
+    { turn_id: "T1", item_id: "T1-user", type: "userMessage", text: "Read README.md" },
+    { turn_id: "T1", item_id: "T1-agent", type: "agentMessage", text: "It is a disposable fixture." },
+  ], next_cursor: null, source: "nexus_turns" }]);
+  await ui.window.NexusChat.selectSession("CHAT-C1");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(ui.calls.some((call) => call.path.startsWith("/api/chat/sessions/CHAT-C1/history")), "Claude sessions load their history");
+  const text = ui.elements["chat-transcript"].children.map((node) => node.children.map((child) => child.textContent).join(" ")).join("\n");
+  assert.match(text, /Read README.md/);
+  assert.match(text, /It is a disposable fixture/);
+  assert.doesNotMatch(text, /New conversation/);
+});

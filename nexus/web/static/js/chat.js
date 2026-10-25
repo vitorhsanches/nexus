@@ -442,7 +442,7 @@
     select.replaceChildren();
     var options = model && Array.isArray(model.supported_efforts) ? model.supported_efforts : [];
     var defaultOption = document.createElement("option"); defaultOption.value = "";
-    defaultOption.textContent = "App-Server default (not explicitly confirmed)"; select.appendChild(defaultOption);
+    defaultOption.textContent = state.modelsBackend === "claude_native" ? "Claude Code default effort" : "App-Server default (not explicitly confirmed)"; select.appendChild(defaultOption);
     options.forEach(function (effort) {
       var option = document.createElement("option"); option.value = effort; option.textContent = effort; select.appendChild(option);
     });
@@ -796,7 +796,7 @@
 
   function renderHistory(detail) {
     resetTranscript();
-    if (!detail.codex_thread_id) {
+    if (!detail.codex_thread_id && !detail.claude_session_id) {
       // Never call the history API for a session that has not started a
       // Codex thread yet -- there is nothing to fetch, and "no history" is
       // not the same as "history unavailable".

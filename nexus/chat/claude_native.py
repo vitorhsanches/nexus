@@ -197,6 +197,7 @@ class ClaudeTurn:
         self.active_model: str | None = None
         self.session_confirmed = False
         self._stderr: list[str] = []
+        self._tool_names: dict[str, str] = {}
 
     # -- public ---------------------------------------------------------
 
@@ -344,6 +345,8 @@ class ClaudeTurn:
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 texts.append(block["text"])
             elif block.get("type") == "tool_use":
+                if isinstance(block.get("id"), str) and isinstance(block.get("name"), str):
+                    self._tool_names[block["id"]] = block["name"]
                 arguments = json.dumps(block.get("input") or {}, ensure_ascii=False)[:TOOL_TEXT_LIMIT]
                 self._emit({"method": "item/started", "params": {"item": {
                     "type": "dynamicToolCall", "id": block.get("id"), "tool": block.get("name"),
@@ -365,6 +368,7 @@ class ClaudeTurn:
             text = str(raw or "")[:TOOL_TEXT_LIMIT]
             self._emit({"method": "item/completed", "params": {"item": {
                 "type": "dynamicToolCall", "id": block.get("tool_use_id"),
+                "tool": self._tool_names.get(block.get("tool_use_id")),
                 "status": "failed" if block.get("is_error") else "completed",
                 "contentItems": [{"type": "inputText", "text": text}]}}})
 

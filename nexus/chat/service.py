@@ -367,6 +367,7 @@ def _session_dict(row) -> dict:
         "project_id": row["project_id"],
         "workspace_path": row["workspace_path"],
         "codex_thread_id": row["codex_thread_id"],
+        "claude_session_id": row["claude_session_id"] if "claude_session_id" in row.keys() else None,
         "model": row["model"],
         "requested_model": row["requested_model"] if "requested_model" in row.keys() else None,
         "requested_effort": row["requested_effort"] if "requested_effort" in row.keys() else None,
