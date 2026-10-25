@@ -172,9 +172,11 @@ def _world(tmp_path, **api_options):
 
 
 def _args(source, **overrides):
-    values = dict(confirm_agent_call=True, base_url="http://127.0.0.1:8000", http_timeout=1, project_id="fixture",
-                  fixture=source, model="gpt-test", prompt="Fix add", turn_timeout=5, poll_interval=0, test_timeout=15,
-                  backend="codex_native")
+    values = {
+        "confirm_agent_call": True, "base_url": "http://127.0.0.1:8000", "http_timeout": 1, "project_id": "fixture",
+        "fixture": source, "model": "gpt-test", "prompt": "Fix add", "turn_timeout": 5, "poll_interval": 0,
+        "test_timeout": 15, "backend": "codex_native",
+    }
     values.update(overrides)
     return SimpleNamespace(**values)
 
