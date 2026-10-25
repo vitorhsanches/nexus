@@ -1275,3 +1275,47 @@ test("switching the backend selector reloads that backend's catalog and creates 
   const body = ui.calls.find((call) => call.method === "POST" && call.path === "/api/chat/sessions").body;
   assert.equal(body.backend, "omniroute");
 });
+
+test("Claude Native can be chosen for a new conversation and keeps its own backend", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  assert.match(nexusTemplateSource, /<option value="claude_native">Claude Native \(Claude Code CLI, read-only\)<\/option>/);
+  ui.backend.models = { backend: "claude_native", models: [{ id: "default", name: "Claude Code default", selectable: true, availability: "claude-native-alias", cost_status: "known", supported_efforts: ["low", "high"], is_default: true }], default_model: "default", catalog_error: null, account: { authenticated: true, type: "claude.ai", version: "2.1.288" } };
+  const selector = ui.elements["chat-backend-select"];
+  selector.value = "claude_native"; selector.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(ui.calls.some((call) => call.path.startsWith("/api/chat/models?backend=claude_native&refresh=true")));
+  assert.match(ui.elements["chat-model-select"].children[0].textContent, /Claude Code default · default · resolved by Claude Code/);
+  ui.elements["chat-project-select"].value = "demo"; ui.elements["chat-project-select"].dispatch("change");
+  ui.elements["chat-new-conversation"].dispatch("click");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  const body = ui.calls.find((call) => call.method === "POST" && call.path === "/api/chat/sessions").body;
+  assert.equal(body.backend, "claude_native");
+  assert.equal(body.model, "default");
+});
+
+test("a missing Claude login is shown as a clear catalog error", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  ui.backend.models = { backend: "claude_native", models: [], default_model: null, catalog_error: "Claude Code is not signed in. Run 'claude auth login' for this Windows user, then refresh.", account: { authenticated: false } };
+  const selector = ui.elements["chat-backend-select"];
+  selector.value = "claude_native"; selector.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ui.elements["chat-model-error"].hidden, false);
+  assert.match(ui.elements["chat-model-error"].textContent, /claude auth login/);
+});
+
+test("a reopened Claude Native session renders its persisted history, including the user's messages", async () => {
+  const ui = setup(); await ui.window.NexusChat.ready;
+  ui.backend.sessions = [{ session_id: "CHAT-C1", project_id: "demo", status: "ACTIVE", backend: "claude_native", requested_model: "haiku", model: "claude-haiku-x", provider: "anthropic", codex_thread_id: null, claude_session_id: "11111111-2222-4333-8444-555555555555" }];
+  ui.backend.turns.set("CHAT-C1", [{ turn_id: "T1", status: "COMPLETED", response_text: "It is a disposable fixture.", idempotency_key: "k" }]);
+  ui.backend.historyPages.set("CHAT-C1", [{ items: [
+    { turn_id: "T1", item_id: "T1-user", type: "userMessage", text: "Read README.md" },
+    { turn_id: "T1", item_id: "T1-agent", type: "agentMessage", text: "It is a disposable fixture." },
+  ], next_cursor: null, source: "nexus_turns" }]);
+  await ui.window.NexusChat.selectSession("CHAT-C1");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(ui.calls.some((call) => call.path.startsWith("/api/chat/sessions/CHAT-C1/history")), "Claude sessions load their history");
+  const text = ui.elements["chat-transcript"].children.map((node) => node.children.map((child) => child.textContent).join(" ")).join("\n");
+  assert.match(text, /Read README.md/);
+  assert.match(text, /It is a disposable fixture/);
+  assert.doesNotMatch(text, /New conversation/);
+});

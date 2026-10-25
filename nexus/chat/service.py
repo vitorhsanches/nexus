@@ -35,6 +35,8 @@ from nexus.chat.appserver_client import (
     AppServerClient,
     AppServerError,
 )
+from nexus.chat import claude_native
+from nexus.chat.claude_native import BACKEND_CLAUDE_NATIVE
 from nexus.failure_contract import sanitize_error_text
 from nexus.registry import chat_sessions
 from nexus.registry.projects import get_project
@@ -244,7 +246,38 @@ def _native_model_catalog(*, refresh: bool = False) -> tuple[list[dict], dict]:
         return [dict(item) for item in rows], dict(account)
 
 
+def _claude_catalog() -> dict:
+    """Claude Code exposes no model listing in headless mode: offer its
+    documented aliases (resolved by the CLI itself) plus the CLI default."""
+    status = claude_native.cli_status()
+    account = {"authenticated": status["logged_in"], "type": status["auth_method"], "plan": status["subscription"],
+               "version": status["version"], "installed": status["installed"]}
+    error = status["error"]
+    if error is None and not status["logged_in"]:
+        error = "Claude Code is not signed in. Run 'claude auth login' for this Windows user, then refresh."
+    models = []
+    if status["installed"] and status["logged_in"]:
+        for alias in claude_native.MODEL_ALIASES:
+            models.append({
+                "id": alias,
+                "name": "Claude Code default" if alias == "default" else f"Claude {alias.title()} (alias)",
+                "provider": "anthropic",
+                "selectable": True,
+                "availability": "claude-native-alias",
+                "reason": "Resolved by the Claude Code CLI at run time; the model actually used is recorded per turn.",
+                "cost_status": "known",
+                "supported_efforts": list(claude_native.EFFORTS),
+                "default_effort": None,
+                "is_default": alias == "default",
+                "appserver_compatible": False,
+            })
+    return {"backend": BACKEND_CLAUDE_NATIVE, "models": models, "default_model": "default" if models else None,
+            "catalog_error": error, "account": account}
+
+
 def list_models(*, refresh: bool = False, backend: str = BACKEND_OMNIROUTE) -> dict:
+    if backend == BACKEND_CLAUDE_NATIVE:
+        return _claude_catalog()
     if backend == BACKEND_CODEX_NATIVE:
         try:
             models, account = _native_model_catalog(refresh=refresh)
@@ -334,6 +367,7 @@ def _session_dict(row) -> dict:
         "project_id": row["project_id"],
         "workspace_path": row["workspace_path"],
         "codex_thread_id": row["codex_thread_id"],
+        "claude_session_id": row["claude_session_id"] if "claude_session_id" in row.keys() else None,
         "model": row["model"],
         "requested_model": row["requested_model"] if "requested_model" in row.keys() else None,
         "requested_effort": row["requested_effort"] if "requested_effort" in row.keys() else None,
@@ -352,7 +386,7 @@ def _row_backend(row) -> str:
     a different backend than the one it was created for.
     """
     backend = row["backend"] if "backend" in row.keys() and row["backend"] else BACKEND_OMNIROUTE
-    if backend not in {BACKEND_OMNIROUTE, BACKEND_CODEX_NATIVE}:
+    if backend not in {BACKEND_OMNIROUTE, BACKEND_CODEX_NATIVE, BACKEND_CLAUDE_NATIVE}:
         raise ChatError("UNSUPPORTED_BACKEND", f"Session has an unsupported backend: {backend!r}", http_status=409)
     return backend
 
@@ -412,6 +446,8 @@ def create_session(
 ) -> dict:
     if backend == BACKEND_CODEX_NATIVE:
         return _create_native_session(project_id, model, effort)
+    if backend == BACKEND_CLAUDE_NATIVE:
+        return _create_claude_session(project_id, model, effort)
     if backend != BACKEND_OMNIROUTE:
         raise ChatError("UNSUPPORTED_BACKEND", f"Unsupported Chat backend: {backend!r}", http_status=422)
     _require_chat_provider(model)
@@ -453,8 +489,25 @@ def _create_native_session(project_id: str, model: str | None, effort: str | Non
     return _session_dict(chat_sessions.get_session(session_id))
 
 
+def _create_claude_session(project_id: str, model: str | None, effort: str | None) -> dict:
+    """Claude Native: the local Claude Code login; no OmniRoute or Codex involved."""
+    workspace_path = _validate_project(project_id)
+    model = model or "default"
+    if model not in claude_native.MODEL_ALIASES:
+        raise ChatError("MODEL_NOT_ALLOWED", "Choose a Claude Code model alias (default, sonnet, opus or haiku).", http_status=422)
+    if effort is not None and effort not in claude_native.EFFORTS:
+        raise ChatError("EFFORT_NOT_SUPPORTED", "The selected effort is not supported by Claude Code.", http_status=422)
+    status = claude_native.cli_status()
+    if not status["installed"]:
+        raise ChatError("CLAUDE_NOT_FOUND", status["error"] or "Claude Code CLI was not found.", http_status=503)
+    if not status["logged_in"]:
+        raise ChatError("CLAUDE_NOT_SIGNED_IN", "Claude Code is not signed in. Run 'claude auth login' first.", http_status=409)
+    session_id = chat_sessions.create_session(project_id, workspace_path, model, effort, BACKEND_CLAUDE_NATIVE)
+    return _session_dict(chat_sessions.get_session(session_id))
+
+
 def _require_chat_provider(model: str, backend: str = BACKEND_OMNIROUTE) -> None:
-    if backend == BACKEND_CODEX_NATIVE:
+    if backend in {BACKEND_CODEX_NATIVE, BACKEND_CLAUDE_NATIVE}:
         return
     from nexus.dev.service import DevServiceError
     from nexus.workspace.omniroute_oauth import require_connected_route
@@ -673,6 +726,9 @@ def get_history(
     if turn_id is not None and (not isinstance(turn_id, str) or not turn_id or len(turn_id) > 128):
         raise ChatError("INVALID_HISTORY_TURN", "History turn_id is invalid.", http_status=422)
 
+    if _row_backend(session_row) == BACKEND_CLAUDE_NATIVE:
+        return _claude_history(session_id, turn_id, limit)
+
     codex_thread_id = session_row["codex_thread_id"]
     if not codex_thread_id:
         if chat_sessions.list_turns(session_id, limit=1):
@@ -741,6 +797,29 @@ def get_history(
             client.stop()
         except Exception:
             pass
+
+
+def _claude_history(session_id: str, turn_id: str | None, limit: int) -> dict:
+    """Claude Native history from Nexus's own durable turn records.
+
+    Claude Code keeps the full conversation for ``--resume``; Nexus reads only
+    its own persisted prompts and final answers, never the CLI's private files.
+    """
+    rows = list(reversed(chat_sessions.list_turns(session_id, limit=limit)))
+    if turn_id is not None:
+        rows = [row for row in rows if row["id"] == turn_id]
+        if not rows:
+            raise ChatError("TURN_NOT_FOUND", "Turn not found in this session.", http_status=404)
+    items, turns = [], []
+    for row in rows:
+        items.append({"turn_id": row["id"], "item_id": row["id"] + "-user", "type": "userMessage", "text": row["request_text"]})
+        if row["response_text"]:
+            items.append({"turn_id": row["id"], "item_id": row["id"] + "-agent", "type": "agentMessage", "text": row["response_text"]})
+        turn = {"turn_id": row["id"], "status": row["status"].lower()}
+        if row["error_message"]:
+            turn["error"] = row["error_message"]
+        turns.append(turn)
+    return {"session_id": session_id, "items": items, "turns": turns, "next_cursor": None, "source": "nexus_turns"}
 
 
 def list_sessions(project_id: str | None = None) -> list[dict]:
@@ -852,6 +931,9 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
         session_row = _get_session_row(session_id)
         workspace_path = _validated_session_workspace(session_row)
         backend = _row_backend(session_row)
+        if backend == BACKEND_CLAUDE_NATIVE:
+            _run_claude_turn(session_id, turn_id, text, active, session_row, workspace_path, turn_timeout_seconds)
+            return
         _require_chat_provider(session_row["requested_model"] or "", backend)
         client = AppServerClient(
             workspace_path,
@@ -942,6 +1024,44 @@ def _run_turn(session_id: str, turn_id: str, text: str, active: _ActiveTurn) -> 
         _mark_active_done(active)
         with _active_lock:
             _active_turns.pop(turn_id, None)
+
+
+def _run_claude_turn(session_id, turn_id, text, active, session_row, workspace_path, timeout_seconds) -> None:
+    """One read-only Claude Code turn. Never falls back to Codex or OmniRoute:
+    every failure is recorded on this turn and reported as-is."""
+    stored = session_row["claude_session_id"] if "claude_session_id" in session_row.keys() else None
+    conversation_id = stored or str(uuid.uuid4())
+
+    def on_session(confirmed_id: str, model: str | None) -> None:
+        chat_sessions.update_claude_session(session_id, claude_session_id=confirmed_id, model=model)
+        active.codex_turn_id = turn_id
+
+    model = session_row["requested_model"]
+    runner = claude_native.ClaudeTurn(
+        workspace_path,
+        session_id=conversation_id,
+        resume=bool(stored),
+        model=model if model in claude_native.MODEL_ALIASES else None,
+        effort=session_row["requested_effort"] if "requested_effort" in session_row.keys() else None,
+        on_event=lambda event: _on_event(active, event),
+        on_session=on_session,
+    )
+    active.client = runner
+    active.thread_id = conversation_id
+    try:
+        response_text = runner.run(text, timeout_seconds=timeout_seconds)
+    except claude_native.ClaudeNativeError as error:
+        cancelled = runner.interrupted or active.interrupted.is_set()
+        chat_sessions.update_turn_status(
+            turn_id, "CANCELLED" if cancelled else "FAILED",
+            error_code="TURN_INTERRUPTED" if cancelled else error.code,
+            error_message=str(error),
+        )
+        chat_sessions.update_session_status(session_id, "ACTIVE" if cancelled else "ERROR")
+        return
+    chat_sessions.update_turn_status(turn_id, "COMPLETED", response_text=response_text,
+                                     model=runner.active_model, provider="anthropic")
+    chat_sessions.update_session_status(session_id, "ACTIVE")
 
 
 def interrupt_turn(session_id: str, turn_id: str | None = None) -> dict:
