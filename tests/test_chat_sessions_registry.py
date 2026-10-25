@@ -271,3 +271,31 @@ def test_session_requires_an_existing_project_row(isolated_registry):
 
     with pytest.raises(sqlite3.IntegrityError):
         chat_sessions.create_session("does-not-exist", str(isolated_registry))
+
+
+def test_backend_defaults_to_omniroute_and_native_is_persisted(isolated_registry):
+    workspace_path = _register_project(isolated_registry)
+    legacy = chat_sessions.create_session("demo", workspace_path)
+    native = chat_sessions.create_session("demo", workspace_path, None, None, "codex_native")
+    assert chat_sessions.get_session(legacy)["backend"] == "omniroute"
+    assert chat_sessions.get_session(native)["backend"] == "codex_native"
+    assert chat_sessions.get_session(native)["requested_model"] is None
+
+
+def test_old_chat_sessions_table_migrates_existing_rows_to_the_omniroute_backend(isolated_registry):
+    with sqlite3.connect(database.DATABASE_PATH) as connection:
+        connection.execute("DROP TABLE chat_turns")
+        connection.execute("DROP TABLE chat_sessions")
+        connection.execute(
+            """CREATE TABLE chat_sessions (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_path TEXT NOT NULL,
+                codex_thread_id TEXT, codex_home TEXT, model TEXT, provider TEXT,
+                status TEXT NOT NULL DEFAULT 'CREATED', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO chat_sessions (id, project_id, workspace_path, status, created_at, updated_at) VALUES ('OLD', 'demo', '/old', 'ACTIVE', 'a', 'b')"
+        )
+    database.initialize_database()
+    database.initialize_database()
+    assert chat_sessions.get_session("OLD")["backend"] == "omniroute"
