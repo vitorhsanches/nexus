@@ -26,7 +26,10 @@
   const agentTemplate = grid.querySelector('[data-pane="agent-a"]').cloneNode(true);
   grid.querySelector('[data-pane="agent-a"]').remove();
   grid.querySelector('[data-pane="agent-b"]').remove();
+  // Panes owned by the cockpit itself (not per-agent): never created or removed from agent data.
+  const systemPanes = ['maestro', 'native', 'review'];
   const knownAgents = new Map();
+  const projectListeners = new Set();
   const closedAgents = new Set();
   const pending = new Set();
   const streams = new Map();
@@ -73,7 +76,7 @@
   };
 
   panes().forEach(pane => {
-    pane.dataset.title = ({ maestro: 'Maestro', review: 'Revisão' })[pane.dataset.pane];
+    pane.dataset.title = ({ maestro: 'Maestro', native: 'Codex Native', review: 'Revisão' })[pane.dataset.pane];
   });
   const paneTitle = pane => pane.dataset.title;
 
@@ -310,7 +313,7 @@
   };
 
   const addCloseControl = pane => {
-    if (pane.dataset.pane === 'maestro' || pane.dataset.pane === 'review') return;
+    if (systemPanes.includes(pane.dataset.pane)) return;
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'pane-tool close';
@@ -657,7 +660,7 @@
       option.value = model.id;
       costAuthModel.append(option);
     });
-    if (costAuthModel.children.some(option => option.value === selected)) costAuthModel.value = selected;
+    if ([...costAuthModel.children].some(option => option.value === selected)) costAuthModel.value = selected;
     costAuthCreate.disabled = !projectId || !costAuthModel.value || !document.getElementById('cost-auth-confirm').checked || pending.has('cost-auth');
     if (!projectId) {
       costAuthList.textContent = 'Selecione um projeto autorizado para consultar autorizações.';
@@ -1590,7 +1593,7 @@
       const agents = (workspace.panes || []).slice().sort((a, b) => (a.layout?.position || 0) - (b.layout?.position || 0));
       knownAgents.clear();
       agents.forEach(agent => knownAgents.set(agent.pane_id, agent));
-      panes().filter(pane => !['maestro', 'review'].includes(pane.dataset.pane) && !knownAgents.has(pane.dataset.pane)).forEach(pane => pane.remove());
+      panes().filter(pane => !systemPanes.includes(pane.dataset.pane) && !knownAgents.has(pane.dataset.pane)).forEach(pane => pane.remove());
       if (!panes().some(pane => pane.classList.contains('selected'))) selectPane(grid.querySelector('[data-pane="maestro"]'));
       const histories = await Promise.all(agents.map(agent => api(`/api/workspace/panes/${encodeURIComponent(agent.pane_id)}/history`).catch(() => null)));
       if (generation !== refreshGeneration || request !== refreshRequest) return;
@@ -1632,10 +1635,13 @@
     testProfilesError = '';
     workspaceState = null;
     maestroState = null;
-    panes().filter(pane => !['maestro', 'review'].includes(pane.dataset.pane)).forEach(pane => pane.remove());
+    panes().filter(pane => !systemPanes.includes(pane.dataset.pane)).forEach(pane => pane.remove());
     renderProjects();
     syncUI();
     selectPane(grid.querySelector('[data-pane="maestro"]'));
+    projectListeners.forEach(listener => {
+      try { listener(projectId); } catch (error) { notify(`Falha no painel do projeto: ${error.message}`); }
+    });
     if (projectId) {
       const selectedProject = projectId;
       api(`/api/dev/test-profiles?project_id=${encodeURIComponent(selectedProject)}`)
@@ -1659,6 +1665,12 @@
   document.getElementById('project-toggle').addEventListener('click', () => {
     const nav = document.getElementById('project-nav');
     nav.hidden = !nav.hidden;
+  });
+  // Small surface for add-on panes (cockpit-native.js): the selected project and a toast.
+  window.NexusCockpit = Object.freeze({
+    projectId: () => projectId,
+    notify,
+    onProject: listener => { projectListeners.add(listener); if (projectId) listener(projectId); },
   });
   syncUI();
   void refreshModelCatalog();

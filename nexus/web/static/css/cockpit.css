@@ -271,3 +271,26 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .settings-advanced>summary{cursor:pointer;color:var(--accent);font:11px 'Cascadia Code',Consolas,monospace}
 .settings-advanced .model-catalog{margin:12px 0 0}
 @media(prefers-reduced-motion:reduce){.ai-settings{animation:none}}
+
+/* Codex Native Development pane: same tokens and terminal type as the other panes. */
+.native-body{display:grid;align-content:start;gap:8px;padding:0 0 34px;color:var(--text);font:10px/1.55 'Cascadia Code',Consolas,monospace}
+.native-body .cockpit-conversation,.native-body .cockpit-event,.native-body .cockpit-message,.native-body .cockpit-response{font:inherit}
+.native-body .cockpit-message p,.native-body .cockpit-response p{margin:3px 0}
+.native-body>*:not(.terminal-kicker){margin-left:12px;margin-right:12px}
+.native-note{margin:0;color:var(--text-muted);font:10px/1.5 'Cascadia Code',Consolas,monospace;overflow-wrap:anywhere}
+.native-note.is-error{color:var(--warning)}
+.native-block,.native-section{display:grid;gap:5px}
+.native-block label,.native-section label{color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace;letter-spacing:.06em;text-transform:uppercase}
+.native-section{border:1px solid var(--border-soft);background:var(--surface);padding:6px 8px}
+.native-section>summary{cursor:pointer;color:var(--accent);font:11px 'Cascadia Code',Consolas,monospace}
+.native-section>summary b{color:var(--accent-strong)}
+.native-actions{display:flex;flex-wrap:wrap;gap:6px}
+.native-text{white-space:pre-wrap;overflow-wrap:anywhere}
+.native-files{display:grid;gap:2px}
+.native-file{text-align:left;padding:3px 6px;border:1px solid transparent;background:transparent;color:var(--text);font:10px 'Cascadia Code',Consolas,monospace;cursor:pointer}
+.native-file.is-selected,.native-file:hover{border-color:var(--accent-border);color:var(--accent)}
+.native-approval{display:grid;gap:4px;padding:6px 0;border-bottom:1px solid var(--border-soft);font:10px/1.5 'Cascadia Code',Consolas,monospace}
+.native-approval.is-pending{border-left:2px solid var(--warning);padding-left:7px}
+.native-approval-detail{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text)}
+.native-link{color:var(--accent);font:10px 'Cascadia Code',Consolas,monospace}
+.native-composer{display:grid;gap:6px}

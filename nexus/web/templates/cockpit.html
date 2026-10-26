@@ -7,6 +7,7 @@
   <title>Nexus — Cockpit</title>
   <link rel="stylesheet" href="/static/css/cockpit.css?v={{ asset_version }}">
   <script src="/static/js/cockpit.js?v={{ asset_version }}" defer></script>
+  <script src="/static/js/cockpit-native.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -96,6 +97,61 @@
           <div class="pane-meta"><span>TIPO <b>Orquestrador</b></span><span>MODELO <b>Não conectado</b></span><span>SESSÃO <b>—</b></span></div>
           <div class="pane-body maestro-body"><div class="terminal-kicker"><span>●</span> NEXUS / MAESTRO <span class="right">CONVERSA</span></div><div class="maestro-copy"><div class="orbit-symbol">✳</div><span class="mini-label">CENTRO DE COORDENAÇÃO</span><h3>Selecione um projeto.</h3><p>O estado do Maestro aparecerá aqui quando um projeto autorizado for selecionado.</p><div class="maestro-chips"><span>Plano</span><span>Handoffs</span><span>Aprovações</span></div></div></div>
           <div class="pane-footer"><span class="foot-path">◇ &nbsp;workspace / maestro</span><span>EVENTOS NEXUS · SEM CLI</span></div>
+        </article>
+
+        <article class="pane native-pane" id="native-pane" data-pane="native" tabindex="0" aria-label="Pane Codex Native">
+          <div class="pane-header"><div class="pane-identity"><span class="pane-icon agent-icon">CX</span><div><strong>Codex Native</strong><span>DESENVOLVIMENTO</span></div></div><div class="pane-tools"><span class="pane-status idle" id="native-status"><i></i> Sem projeto</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Codex Native" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Codex Native" title="Expandir">⤢</button></div></div>
+          <div class="pane-meta"><span>BACKEND <b id="native-meta-backend">codex_native</b></span><span>MODELO <b id="native-meta-model">—</b></span><span>SESSÃO <b id="native-meta-session">—</b></span></div>
+          <div class="pane-body terminal-body native-body">
+            <div class="terminal-kicker"><span>●</span> CODEX NATIVE / WORKTREE ISOLADO <span class="right" id="native-connection">OFFLINE</span></div>
+            <p class="native-note" id="native-gate" role="status">Selecione um projeto autorizado.</p>
+            <div class="native-block">
+              <label for="native-session">Sessões reais do projeto</label>
+              <select class="cockpit-model-select" id="native-session"></select>
+              <p class="native-note" id="native-session-note" role="status"></p>
+            </div>
+            <details class="native-section" id="native-new">
+              <summary>Nova sessão Codex Native</summary>
+              <label for="native-model">Modelo anunciado pelo Codex local</label>
+              <select class="cockpit-model-select" id="native-model"></select>
+              <label for="native-effort">Esforço (opcional)</label>
+              <select class="cockpit-model-select" id="native-effort"></select>
+              <p class="native-note" id="native-model-note" role="status"></p>
+              <button class="cockpit-send" id="native-create" type="button">Criar sessão Codex Native</button>
+            </details>
+            <div class="cockpit-conversation" id="native-log" aria-live="polite"></div>
+            <div class="cockpit-live" id="native-live" hidden></div>
+            <form class="cockpit-composer native-composer" id="native-composer">
+              <textarea class="cockpit-input" id="native-prompt" rows="3" maxlength="100000" placeholder="Tarefa para o Codex neste worktree isolado" aria-label="Tarefa para o Codex Native" disabled></textarea>
+              <label class="cockpit-confirm"><input type="checkbox" id="native-confirm" disabled> <span>Confirmo enviar esta tarefa ao Codex (usa sua conta local e pode gerar custo)</span></label>
+              <div class="native-actions"><button class="cockpit-send" id="native-send" type="submit" disabled>Enviar tarefa</button><button class="cockpit-send" id="native-stop" type="button" hidden>Interromper</button></div>
+              <p class="native-note" id="native-compose-note" role="status"></p>
+              <p class="cockpit-compose-error" id="native-error" role="status"></p>
+            </form>
+            <details class="native-section" id="native-approvals-section" open>
+              <summary>Aprovações humanas <b id="native-approval-count">0</b></summary>
+              <div id="native-approvals"></div>
+              <p class="native-note" id="native-approval-note" role="status"></p>
+            </details>
+            <details class="native-section" id="native-changes-section" open>
+              <summary>Arquivos alterados e diff</summary>
+              <button class="cockpit-send" id="native-refresh" type="button" disabled>Atualizar</button>
+              <div class="native-files" id="native-files"></div>
+              <p class="native-note" id="native-diff-meta"></p>
+              <pre class="cockpit-mission-diff" id="native-diff" hidden></pre>
+            </details>
+            <details class="native-section" id="native-review-section">
+              <summary>Revisão</summary>
+              <p class="native-note">Registra um snapshot do que um humano aprovaria. O cockpit não aplica nem rejeita alterações.</p>
+              <div class="native-actions"><button class="cockpit-send" id="native-review-create" type="button" disabled>Registrar revisão</button><button class="cockpit-send" id="native-review-preflight" type="button" disabled>Verificar preflight</button></div>
+              <p class="native-note" id="native-review" role="status"></p>
+              <p class="native-note" id="native-preflight" role="status"></p>
+              <p class="native-note" id="native-review-note" role="status"></p>
+              <div id="native-history"></div>
+              <a class="native-link" id="native-open-dev" href="/nexus#development">Abrir a interface Development para aplicar ou rejeitar →</a>
+            </details>
+          </div>
+          <div class="pane-footer"><span class="foot-path" id="native-foot">sem worktree ativo</span><span>APROVAÇÃO HUMANA · SEM APPLY AUTOMÁTICO</span></div>
         </article>
 
         <article class="pane" data-pane="agent-a" tabindex="0" aria-label="Pane Agente A" hidden>
