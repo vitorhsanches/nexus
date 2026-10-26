@@ -61,6 +61,12 @@ STDERR_TAIL_LIMIT = 4000
 # OmniRoute. Never relaxed, never made configurable.
 REQUIRED_MODEL_PROVIDER = "omniroute"
 
+# Native mode: Codex uses its own local login and provider. Nothing is routed
+# through OmniRoute, and a thread that reports OmniRoute is refused rather than
+# silently accepted.
+BACKEND_OMNIROUTE = "omniroute"
+BACKEND_CODEX_NATIVE = "codex_native"
+
 # Default approval policy for interactive Chat threads. Deliberately NOT
 # "never" (that is the existing Worker/Manager/Reviewer convention for a
 # reviewed, non-interactive pipeline): a human is directly driving this
@@ -128,9 +134,11 @@ class AppServerClient:
         approval_policy_override: str | None = None,
         client_name: str = "nexus-chat",
         client_version: str = "0.1.0",
+        backend: str = BACKEND_OMNIROUTE,
         request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         on_notification: Callable[[dict], None] | None = None,
         on_server_request: Callable[[str, dict], dict | None] | None = None,
+        on_deferred_server_request: Callable[[str, dict, Any], bool] | None = None,
         process_launcher: Callable[..., subprocess.Popen] | None = None,
     ) -> None:
         """``codex_home``, when given, pins the isolated CODEX_HOME to this
@@ -170,6 +178,9 @@ class AppServerClient:
         itself -- this parameter only adds the command-line flag; it does
         not by itself prove the App-Server honors it.
         """
+        if backend not in {BACKEND_OMNIROUTE, BACKEND_CODEX_NATIVE}:
+            raise AppServerError("UNSUPPORTED_BACKEND", f"Unsupported Chat backend: {backend!r}")
+        self.backend = backend
         self.repo = str(repo)
         self._codex_path = codex_path
         self._sandbox_mode_override = sandbox_mode_override
@@ -182,6 +193,10 @@ class AppServerClient:
         self._on_notification = on_notification
         self._sensitive_values: tuple[str, ...] = ()
         self._on_server_request = on_server_request
+        # Returns True when it takes ownership of answering later through
+        # respond_server_request() (a human decision); the read loop is
+        # never blocked waiting for that answer.
+        self._on_deferred_server_request = on_deferred_server_request
         self._launcher = process_launcher or _default_process_launcher
 
         self._process: subprocess.Popen | None = None
@@ -224,22 +239,24 @@ class AppServerClient:
                 sanitize_error_text(str(error)) or "Codex executable not found.",
             ) from error
 
+        native = self.backend == BACKEND_CODEX_NATIVE
         try:
             env = with_scoped_git_trust(
                 codex_subprocess_env(
-                    profile="omniroute", worker_home=self._codex_home, include_auth=False
+                    profile="native" if native else "omniroute",
+                    worker_home=self._codex_home,
+                    include_auth=native,
                 ),
                 self.repo,
             )
         except (RuntimeError, OSError, ValueError) as error:
             # codex_subprocess_env/with_scoped_git_trust already fail closed
-            # for a missing/invalid OmniRoute provider config or an unsafe
-            # repo path -- propagate as the one error this client exists to
-            # surface explicitly, never retried and never downgraded to a
+            # for a missing/invalid profile or an unsafe repo path --
+            # propagate explicitly, never retried and never downgraded to a
             # silent default-profile fallback.
             raise AppServerError(
-                "OMNIROUTE_PROFILE_UNAVAILABLE",
-                sanitize_error_text(str(error)) or "OmniRoute profile unavailable.",
+                "NATIVE_PROFILE_UNAVAILABLE" if native else "OMNIROUTE_PROFILE_UNAVAILABLE",
+                sanitize_error_text(str(error)) or "Codex profile unavailable.",
             ) from error
 
         # Record whichever CODEX_HOME was actually used (our own
@@ -483,6 +500,7 @@ class AppServerClient:
         *,
         timeout_seconds: int = DEFAULT_TURN_TIMEOUT_SECONDS,
         on_turn_started: Callable[[str], None] | None = None,
+        effort: str | None = None,
     ) -> str:
         """Convenience: start a turn and block for its completion.
 
@@ -496,7 +514,11 @@ class AppServerClient:
         call is still blocking (e.g. from another thread) has no other
         way to learn that id.
         """
-        turn = self.turn_start(thread_id, text)
+        # ``effort`` uses the stable per-turn override of ``turn/start`` (it
+        # also applies to later turns of the thread); no experimental API.
+        turn = self.turn_start(
+            thread_id, text, extra_params={"effort": effort} if effort else None
+        )
         turn_id = (turn.get("turn") or {}).get("id")
         if not turn_id:
             raise AppServerError(
@@ -568,8 +590,19 @@ class AppServerClient:
 
     # -- internals: OmniRoute enforcement --------------------------------
 
+    def account_read(self) -> dict:
+        """Report the local Codex login state (``account/read``), without tokens."""
+        return self._redact_event(self._send_request("account/read", {"refreshToken": False}))
+
     def _omniroute_params(self, extra_params: dict | None) -> dict:
         params = dict(extra_params or {})
+        if self.backend == BACKEND_CODEX_NATIVE:
+            if params.get("modelProvider") is not None:
+                raise AppServerError(
+                    "NATIVE_PROVIDER_OVERRIDE_REJECTED",
+                    "Codex Native uses the local Codex provider; modelProvider cannot be set.",
+                )
+            return params
         requested = params.get("modelProvider")
         if requested is not None and requested != REQUIRED_MODEL_PROVIDER:
             raise AppServerError(
@@ -586,6 +619,13 @@ class AppServerClient:
         provider = thread.get("modelProvider") if isinstance(thread, dict) else None
         if provider is None and isinstance(result, dict):
             provider = result.get("modelProvider")
+        if self.backend == BACKEND_CODEX_NATIVE:
+            if provider == REQUIRED_MODEL_PROVIDER:
+                raise AppServerError(
+                    "NATIVE_ROUTED_THROUGH_OMNIROUTE",
+                    "Codex Native thread reported the OmniRoute provider; refusing it.",
+                )
+            return
         if provider != REQUIRED_MODEL_PROVIDER:
             raise AppServerError(
                 "OMNIROUTE_NOT_ENFORCED",
@@ -798,8 +838,20 @@ class AppServerClient:
             return value
         return value
 
+    def respond_server_request(self, request_id: Any, result: dict) -> None:
+        """Answer a server request previously deferred to a human decision."""
+        self._write_line({"id": request_id, "result": result})
+
     def _handle_server_request(self, method: str, params: dict, request_id: Any) -> None:
         self._deliver_notification({"method": method, "params": params, "id": request_id})
+
+        if self._on_deferred_server_request is not None:
+            try:
+                deferred = self._on_deferred_server_request(method, self._redact_event(params), request_id)
+            except Exception:
+                deferred = False
+            if deferred:
+                return
 
         response_result: dict | None = None
         if self._on_server_request is not None:

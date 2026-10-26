@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,6 +19,12 @@ from nexus.routing.telemetry import (
     ServerHealth,
 )
 from nexus.web.app import app
+from nexus.web.native_runtime import (
+    ClaudeStatusCache,
+    _claude_status,
+    _codex_status,
+    get_native_runtime_status,
+)
 from nexus.web.routing_status import get_routing_status
 
 
@@ -110,6 +117,128 @@ def test_routing_status_endpoint_is_read_only_projection():
     assert response.json() == expected
 
 
+def test_native_runtime_status_is_local_and_does_not_query_omniroute():
+    result = get_native_runtime_status(
+        codex_probe=lambda: {"id": "codex_native", "status": "READY"},
+        claude_probe=lambda: {"id": "claude_native", "status": "AUTH_REQUIRED"},
+    )
+    assert result["native_first"] is True
+    assert result["native_ready"] is True
+    assert result["native_status"] == "READY"
+    assert result["omniroute"] == {
+        "status": "NOT_QUERIED",
+        "reason": "OmniRoute telemetry is only collected after opening Models & Routing.",
+    }
+
+
+def test_codex_auth_file_does_not_prove_valid_login(tmp_path):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("invalid credentials", encoding="utf-8")
+    status = _codex_status(finder=lambda: "codex.exe", auth_path=lambda: auth_file)
+    assert status["status"] == "UNVERIFIED"
+    assert status["authenticated"] is None
+    assert status["source"] == "local-file-check"
+    assert "invalid credentials" not in str(status)
+    aggregate = get_native_runtime_status(
+        codex_probe=lambda: status,
+        claude_probe=lambda: {"status": "NOT_INSTALLED"},
+    )
+    assert aggregate["native_ready"] is False
+    assert aggregate["native_status"] == "UNVERIFIED"
+
+
+def test_missing_codex_cli_never_checks_auth_file():
+    def unavailable():
+        raise FileNotFoundError("codex.exe")
+
+    def unexpected_auth_check():
+        raise AssertionError("auth file read without CLI")
+
+    status = _codex_status(finder=unavailable, auth_path=unexpected_auth_check)
+    assert status["status"] == "NOT_INSTALLED"
+    assert status["authenticated"] is False
+
+
+def test_claude_status_cache_is_nonblocking_and_reuses_short_lived_result():
+    started = threading.Event()
+    release = threading.Event()
+    now = [100.0]
+    calls = []
+
+    def reader():
+        calls.append(1)
+        started.set()
+        assert release.wait(5)
+        return {"installed": True, "logged_in": True, "version": "test", "error": None}
+
+    cache = ClaudeStatusCache(reader=reader, clock=lambda: now[0])
+    assert cache.get()["status"] == "CHECKING"
+    assert started.wait(5)
+    assert cache.get()["status"] == "CHECKING"
+    assert len(calls) == 1
+    worker = cache._worker
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert cache.get()["status"] == "READY"
+    now[0] += 29
+    assert cache.get()["status"] == "READY"
+    assert len(calls) == 1
+    started.clear()
+    release.clear()
+    now[0] += 2
+    assert cache.get()["status"] == "CHECKING"
+    assert started.wait(5)
+    worker = cache._worker
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert len(calls) == 2
+
+
+def test_claude_status_cache_reports_deadline_without_waiting_for_cli():
+    started = threading.Event()
+    release = threading.Event()
+    now = [100.0]
+
+    def reader():
+        started.set()
+        assert release.wait(5)
+        return {"installed": True, "logged_in": True, "error": None}
+
+    cache = ClaudeStatusCache(reader=reader, clock=lambda: now[0])
+    assert cache.get()["status"] == "CHECKING"
+    assert started.wait(5)
+    worker = cache._worker
+    now[0] += 46
+    assert cache.get()["status"] == "UNAVAILABLE"
+    release.set()
+    worker.join(5)
+    assert cache.get()["status"] == "UNAVAILABLE"
+
+
+def test_claude_cli_errors_are_not_reported_as_auth_required():
+    status = _claude_status(lambda: {"installed": True, "logged_in": False,
+                                    "error": "status timed out", "version": None})
+    assert status["status"] == "UNAVAILABLE"
+
+
+def test_native_runtime_endpoint_uses_only_the_native_probe():
+    expected = {
+        "default_runtime": "native",
+        "native_first": True,
+        "native_ready": True,
+        "runtimes": {"codex_native": {"status": "READY"}},
+        "omniroute": {"status": "NOT_QUERIED"},
+    }
+    with patch("nexus.web.native_runtime.get_native_runtime_status", return_value=expected) as probe, \
+            patch("nexus.web.routing_status.OmniRouteTelemetryClient", side_effect=AssertionError("telemetry queried")):
+        response = TestClient(app).get("/api/runtime/status")
+    assert response.status_code == 200
+    assert response.json() == expected
+    probe.assert_called_once_with()
+
+
 def test_control_center_assets_and_required_panels_are_present():
     web_dir = Path(__file__).resolve().parents[1] / "nexus" / "web"
     html = (web_dir / "templates" / "nexus.html").read_text(encoding="utf-8")
@@ -127,6 +256,9 @@ def test_control_center_assets_and_required_panels_are_present():
     ):
         assert panel_id in html
     assert "/api/routing/status" in script
+    assert "/api/runtime/status" in script
+    assert "NOT QUERIED" in html
+    assert "Native Agents Confirmed" in html
     assert "runtimeDisabled" in script
     assert "state.availability.programs ? activePrograms" in script
     assert "state.availability.agents ? runningTasks" in script

@@ -173,3 +173,11 @@ body[data-view="dev"] .topbar-chip:nth-child(-n+2) { display: none; }
 .dev-connection-status-connected { color: #2e7d32; }
 .dev-connection-status-reconnecting { color: #f9a825; background: #3a2f0f; }
 .dev-connection-status-lost { color: #e57373; background: #3a1414; }
+
+#dev-activity-events li { white-space: pre-wrap; overflow-wrap: anywhere; }
+.dev-approvals { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.dev-approvals li { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+.dev-approval-pending { border: 1px solid #b26a00; border-radius: var(--radius); padding: 6px; color: var(--text); }
+.dev-approval-approved { color: #2e7d32; }
+.dev-approval-declined, .dev-approval-expired, .dev-approval-cancelled { color: var(--text-dim); }
+.dev-approvals-note { font-size: 11px; color: var(--text-dim); margin: 0 0 6px; }

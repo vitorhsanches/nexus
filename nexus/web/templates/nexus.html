@@ -114,15 +114,15 @@
           <p>Observe orchestration, routing, recovery, and execution state from one surface.</p>
         </div>
         <div class="overview-statuses" aria-label="Runtime status">
-          <span class="ops-badge neutral" id="overview-runtime-badge">RUNTIME UNKNOWN</span>
+          <span class="ops-badge neutral" id="overview-runtime-badge">NATIVE UNKNOWN</span>
         </div>
       </section>
 
-      <section class="runtime-strip" aria-label="OmniRoute state">
-        <div><span>OmniRoute</span><strong id="runtime-omniroute">UNKNOWN</strong></div>
-        <div><span>Credential Store</span><strong id="runtime-credentials">UNKNOWN</strong></div>
-        <div><span>Providers</span><strong id="runtime-providers">UNKNOWN</strong></div>
-        <div><span>Callable Routes</span><strong id="runtime-routes">—</strong></div>
+      <section class="runtime-strip" aria-label="Native runtime state">
+        <div><span>Native Runtime</span><strong id="runtime-native">UNKNOWN</strong></div>
+        <div><span>Codex Native</span><strong id="runtime-codex-native">UNKNOWN</strong></div>
+        <div><span>Claude Native</span><strong id="runtime-claude-native">UNKNOWN</strong></div>
+        <div><span>OmniRoute telemetry</span><strong id="runtime-omniroute">NOT QUERIED</strong></div>
       </section>
 
       <section class="kpi-grid" aria-label="Operational metrics">
@@ -130,7 +130,7 @@
         <article class="kpi-card"><span>Active Workers</span><strong id="kpi-tasks">—</strong><small>running worker agents</small></article>
         <article class="kpi-card"><span>Waiting Review</span><strong id="kpi-review">—</strong><small>review queue</small></article>
         <article class="kpi-card"><span>Blocked</span><strong id="kpi-blocked">—</strong><small>programs + runs</small></article>
-        <article class="kpi-card"><span>Providers Ready</span><strong id="kpi-providers">—</strong><small>authenticated &amp; observed</small></article>
+        <article class="kpi-card"><span>Native Agents Confirmed</span><strong id="kpi-native-agents">—</strong><small>CLI login verified</small></article>
       </section>
 
       <section class="ops-grid">
@@ -153,7 +153,7 @@
           <div class="routing-table-wrap">
             <table class="routing-table">
               <thead><tr><th>Provider / Model</th><th>Capability</th><th>Health</th><th>Eligible</th></tr></thead>
-              <tbody id="routing-rows"><tr><td colspan="4" class="ops-empty">Loading routing state…</td></tr></tbody>
+              <tbody id="routing-rows"><tr><td colspan="4" class="ops-empty">Open Models &amp; Routing to inspect OmniRoute.</td></tr></tbody>
             </table>
           </div>
         </article>
@@ -332,9 +332,9 @@
               <div class="run-col-title"><span>System</span></div>
               <dl class="sys-list">
                 <div><dt>OmniRoute</dt><dd data-mirror="runtime-omniroute">—</dd></div>
-                <div><dt>Credentials</dt><dd data-mirror="runtime-credentials">—</dd></div>
-                <div><dt>Providers</dt><dd data-mirror="runtime-providers">—</dd></div>
-                <div><dt>Callable routes</dt><dd data-mirror="runtime-routes">—</dd></div>
+                <div><dt>OmniRoute credentials</dt><dd data-mirror="runtime-credentials">—</dd></div>
+                <div><dt>OmniRoute providers</dt><dd data-mirror="runtime-providers">—</dd></div>
+                <div><dt>OmniRoute callable routes</dt><dd data-mirror="runtime-routes">—</dd></div>
                 <div><dt>Workers</dt><dd id="sys-workers">—</dd></div>
                 <div><dt>Reviews</dt><dd id="sys-reviews">—</dd></div>
               </dl>
@@ -430,8 +430,13 @@
 
             <form class="chat-composer" id="chat-composer" aria-label="Message composer">
               <div class="chat-model-picker">
-                <label for="chat-model-search">New session configuration</label>
-                <input id="chat-model-search" type="search" placeholder="Search approved routes" aria-label="Search approved models" disabled>
+                <label for="chat-backend-select">New session configuration</label>
+                <select id="chat-backend-select" aria-label="Chat backend">
+                  <option value="codex_native">Codex Native (local login, no OmniRoute)</option>
+                  <option value="claude_native">Claude Native (Claude Code CLI, read-only)</option>
+                  <option value="omniroute">OmniRoute</option>
+                </select>
+                <input id="chat-model-search" type="search" placeholder="Search models" aria-label="Search approved models" disabled>
                 <select id="chat-model-filter" aria-label="Filter models"><option value="all">All</option><option value="favorites">Favorites</option></select>
                 <span id="chat-model-result-count" aria-live="polite"></span>
                 <select id="chat-model-select" aria-label="Model for new Chat session" disabled></select>
@@ -499,6 +504,12 @@
           <label class="chat-project-picker">Project
             <select id="dev-project-select" aria-label="Development project" disabled>
               <option value="">Loading projects…</option>
+            </select>
+          </label>
+          <label class="chat-project-picker">Backend
+            <select id="dev-backend-select" aria-label="Development backend">
+              <option value="codex_native">Codex Native (local login, no OmniRoute)</option>
+              <option value="omniroute">OmniRoute</option>
             </select>
           </label>
           <button id="dev-create-session" class="chat-secondary-button" type="button" disabled>+ New session</button>
@@ -597,6 +608,11 @@
           <aside class="chat-context-panel" aria-label="Development activity">
             <div class="chat-context-header"><h2>Activity</h2></div>
             <div class="chat-context-body">
+              <section class="chat-context-section">
+                <h3>Approvals</h3>
+                <p class="dev-approvals-note">Codex asks here before sensitive commands or file changes outside its sandbox. Nothing runs until you approve; no answer, an interrupt or a restart declines.</p>
+                <ul id="dev-approvals" class="dev-approvals" aria-live="assertive"></ul>
+              </section>
               <section class="chat-context-section">
                 <h3>Tool activity</h3>
                 <ul id="dev-activity-events" class="chat-activity-events" aria-live="polite"></ul>

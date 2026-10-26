@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import tomllib
 import pytest
 
@@ -207,3 +208,187 @@ def test_omniroute_profile_rejects_source_sandbox_override(tmp_path, monkeypatch
 
     with pytest.raises(RuntimeError, match="must not override|forbidden full access"):
         codex_subprocess_env(profile="omniroute")
+
+
+def _native_user(tmp_path, monkeypatch, *, with_auth=True):
+    user_home = tmp_path / "user"
+    codex_home = user_home / ".codex"
+    codex_home.mkdir(parents=True)
+    (codex_home / "config.toml").write_text(
+        'model_provider = "omniroute"\n[mcp_servers.dangerous]\ncommand = "evil"\n', encoding="utf-8"
+    )
+    if with_auth:
+        (codex_home / "auth.json").write_text('{"tokens":{"access_token":"native-login"}}', encoding="utf-8")
+    monkeypatch.setenv("USERPROFILE", str(user_home))
+    monkeypatch.setenv("NEXUS_CODEX_HOME", str(tmp_path / "isolated"))
+    monkeypatch.delenv("NEXUS_NATIVE_CODEX_AUTH_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    return user_home
+
+
+def test_native_profile_needs_no_omniroute_config_and_copies_only_local_auth(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMNIROUTE_API_KEY", "must-not-leak")
+    monkeypatch.setenv("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128")
+
+    env = codex_subprocess_env(profile="native")
+    home = Path(env["CODEX_HOME"])
+
+    source_auth = tmp_path / "user" / ".codex" / "auth.json"
+    assert (home / "auth.json").read_text(encoding="utf-8") == '{"tokens":{"access_token":"native-login"}}'
+    assert os.path.samefile(home / "auth.json", source_auth), "the login must be shared, not duplicated"
+    assert os.stat(source_auth).st_nlink == 2
+    config = (home / "config.toml").read_text(encoding="utf-8")
+    with (home / "config.toml").open("rb") as stream:
+        parsed = tomllib.load(stream)
+    assert "omniroute" not in config and "mcp_servers" not in config and "evil" not in config
+    assert parsed["cli_auth_credentials_store"] == "file"
+    assert parsed["windows"]["sandbox"] == "unelevated"
+    assert "sandbox_mode" not in parsed and "approval_policy" not in parsed
+    assert 'decision = "forbidden"' in (home / "rules" / "nexus-worker.rules").read_text(encoding="utf-8")
+    assert not any(key.upper().startswith("OMNIROUTE_") for key in env)
+    assert str(home).startswith(str(tmp_path / "isolated"))
+
+
+def test_native_profile_fails_closed_without_a_local_login(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch, with_auth=False)
+    with pytest.raises(RuntimeError, match="codex login"):
+        codex_subprocess_env(profile="native")
+
+
+def test_native_profile_reuses_a_stable_home_and_keeps_one_shared_credential(tmp_path, monkeypatch):
+    user_home = _native_user(tmp_path, monkeypatch)
+    source_auth = user_home / ".codex" / "auth.json"
+    session_home = tmp_path / "session-home"
+    first = codex_subprocess_env(profile="native", worker_home=str(session_home))
+    # Codex refreshing its token writes the file in place: the one credential stays one file.
+    (session_home / "auth.json").write_text('{"refreshed":"by-codex"}', encoding="utf-8")
+    second = codex_subprocess_env(profile="native", worker_home=str(session_home))
+
+    assert first["CODEX_HOME"] == second["CODEX_HOME"] == str(session_home)
+    assert source_auth.read_text(encoding="utf-8") == '{"refreshed":"by-codex"}'
+    assert os.path.samefile(session_home / "auth.json", source_auth)
+
+
+def test_native_profile_does_not_keep_a_credential_alive_after_logout(tmp_path, monkeypatch):
+    user_home = _native_user(tmp_path, monkeypatch)
+    session_home = tmp_path / "session-home"
+    codex_subprocess_env(profile="native", worker_home=str(session_home))
+    (user_home / ".codex" / "auth.json").unlink()
+
+    with pytest.raises(RuntimeError, match="codex login"):
+        codex_subprocess_env(profile="native", worker_home=str(session_home))
+    assert not (session_home / "auth.json").exists(), "a stale link must not outlive 'codex logout'"
+
+
+def test_native_profile_follows_a_new_login_but_refuses_a_diverged_credential(tmp_path, monkeypatch):
+    user_home = _native_user(tmp_path, monkeypatch)
+    source_auth = user_home / ".codex" / "auth.json"
+    session_home = tmp_path / "session-home"
+    codex_subprocess_env(profile="native", worker_home=str(session_home))
+
+    # The user logs in again: a brand-new file replaces the old one.
+    source_auth.unlink()
+    source_auth.write_text('{"new":"login"}', encoding="utf-8")
+    codex_subprocess_env(profile="native", worker_home=str(session_home))
+    assert os.path.samefile(session_home / "auth.json", source_auth)
+
+    # A session-local file that is newer than the login is never silently discarded.
+    (session_home / "auth.json").unlink()
+    (session_home / "auth.json").write_text('{"diverged":"newer"}', encoding="utf-8")
+    os.utime(source_auth, (1, 1))
+    with pytest.raises(RuntimeError, match="diverged"):
+        codex_subprocess_env(profile="native", worker_home=str(session_home))
+
+
+def test_native_profile_refuses_to_copy_credentials_unless_explicitly_allowed(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch)
+
+    def no_links(*_args, **_kwargs):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(os, "link", no_links)
+    with pytest.raises(RuntimeError, match="NEXUS_NATIVE_ALLOW_AUTH_COPY"):
+        codex_subprocess_env(profile="native", worker_home=str(tmp_path / "home-a"))
+
+    monkeypatch.setenv("NEXUS_NATIVE_ALLOW_AUTH_COPY", "1")
+    env = codex_subprocess_env(profile="native", worker_home=str(tmp_path / "home-b"))
+    assert (Path(env["CODEX_HOME"]) / "auth.json").is_file()
+
+
+def test_native_profile_refuses_a_codex_home_that_belongs_to_another_backend(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch)
+    foreign = tmp_path / "omniroute-session-home"
+    foreign.mkdir()
+    foreign_config = 'model_provider = "omniroute"\n'
+    (foreign / "config.toml").write_text(foreign_config, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="another backend"):
+        codex_subprocess_env(profile="native", worker_home=str(foreign))
+    assert (foreign / "config.toml").read_text(encoding="utf-8") == foreign_config
+    assert not (foreign / "auth.json").exists()
+
+
+def test_omniroute_profile_refuses_a_codex_home_holding_a_native_login(tmp_path, monkeypatch):
+    user_home = _native_user(tmp_path, monkeypatch)
+    _write_omniroute_config(user_home / ".codex-omniroute-worker" / "config.toml")
+    native_home = tmp_path / "native-session-home"
+    codex_subprocess_env(profile="native", worker_home=str(native_home))
+    with pytest.raises(RuntimeError, match="auth.json"):
+        codex_subprocess_env(profile="omniroute", worker_home=str(native_home), include_auth=False)
+
+
+def test_native_profile_never_writes_into_the_users_codex_home(tmp_path, monkeypatch):
+    user_home = _native_user(tmp_path, monkeypatch)
+    before = sorted(path.name for path in (user_home / ".codex").iterdir())
+    codex_subprocess_env(profile="native")
+    assert sorted(path.name for path in (user_home / ".codex").iterdir()) == before
+
+
+def test_native_profile_uses_the_users_own_codex_home_when_one_is_set(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch, with_auth=False)
+    custom = tmp_path / "custom-codex-home"
+    custom.mkdir()
+    (custom / "auth.json").write_text('{"tokens":{"access_token":"custom-home-login"}}', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(custom))
+
+    env = codex_subprocess_env(profile="native", worker_home=str(tmp_path / "session-home"))
+
+    assert os.path.samefile(Path(env["CODEX_HOME"]) / "auth.json", custom / "auth.json")
+    assert Path(env["CODEX_HOME"]) != custom, "the session never runs inside the user's own Codex home"
+
+
+def test_native_profile_shares_one_credential_across_many_sessions(tmp_path, monkeypatch):
+    user_home = _native_user(tmp_path, monkeypatch)
+    homes = [tmp_path / f"session-{index}" for index in range(5)]
+    for home in homes:
+        codex_subprocess_env(profile="native", worker_home=str(home))
+    source = user_home / ".codex" / "auth.json"
+    assert all(os.path.samefile(home / "auth.json", source) for home in homes)
+    assert os.stat(source).st_nlink == 1 + len(homes)
+    # One session ending (its name removed) never affects the login or its siblings.
+    (homes[0] / "auth.json").unlink()
+    assert source.is_file() and all(os.path.samefile(home / "auth.json", source) for home in homes[1:])
+
+
+def test_native_profile_accepts_state_codex_itself_adds_to_the_session_config(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch)
+    session_home = tmp_path / "session-home"
+    codex_subprocess_env(profile="native", worker_home=str(session_home))
+    # Observed live: Codex appends project trust to the session's config.toml.
+    with (session_home / "config.toml").open("a", encoding="utf-8") as config:
+        config.write('\n[projects.\'c:\\repo\']\ntrust_level = "trusted"\n')
+
+    env = codex_subprocess_env(profile="native", worker_home=str(session_home))
+
+    assert env["CODEX_HOME"] == str(session_home)
+    with (session_home / "config.toml").open("rb") as stream:
+        assert "model_provider" not in tomllib.load(stream)
+
+
+def test_native_profile_refuses_an_unreadable_session_config(tmp_path, monkeypatch):
+    _native_user(tmp_path, monkeypatch)
+    session_home = tmp_path / "session-home"
+    session_home.mkdir()
+    (session_home / "config.toml").write_text("this is [not toml", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="another backend"):
+        codex_subprocess_env(profile="native", worker_home=str(session_home))

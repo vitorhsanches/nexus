@@ -110,10 +110,14 @@ class FakeAppServerClient:
     resume_models = []
     reasoning_effort = None
     settings_calls = []
+    turn_efforts = []
     instances = []
 
     def __init__(self, repo, *, codex_home=None, on_notification=None, **kwargs):
         self.repo = repo
+        self.backend = kwargs.get("backend", "omniroute")
+        self.client_kwargs = dict(kwargs, on_notification=on_notification)
+        self.client_kwargs.pop("on_notification")
         self.codex_home = codex_home or "fake-codex-home-" + repo[-4:]
         self._on_notification = on_notification
         FakeAppServerClient.instances.append(self)
@@ -172,8 +176,10 @@ class FakeAppServerClient:
             return value.replace("KNOWN-SECRET", "<redacted>")
         return value
 
-    def send_message_and_wait(self, thread_id, text, *, timeout_seconds=None, on_turn_started=None):
+    def send_message_and_wait(self, thread_id, text, *, timeout_seconds=None, on_turn_started=None, effort=None):
         FakeAppServerClient.inference_calls += 1
+        if effort is not None:
+            FakeAppServerClient.turn_efforts.append(effort)
         FakeAppServerClient.turn_timeouts.append(timeout_seconds)
         if on_turn_started:
             on_turn_started("FAKE-CODEX-TURN-1")
@@ -219,6 +225,7 @@ def _patch_client(monkeypatch):
     FakeAppServerClient.resume_models = []
     FakeAppServerClient.reasoning_effort = None
     FakeAppServerClient.settings_calls = []
+    FakeAppServerClient.turn_efforts = []
     FakeAppServerClient.instances = []
     monkeypatch.setattr(service, "AppServerClient", FakeAppServerClient)
     test_catalog = [
@@ -1079,3 +1086,257 @@ def test_history_stale_workspace_and_missing_thread_are_not_empty_success(isolat
         service.get_history(session_id)
     assert stale.value.code == "WORKSPACE_BINDING_CHANGED"
     assert FakeAppServerClient.inference_calls == 0
+
+
+# -- Codex Native backend (P4.0A) -----------------------------------------
+
+
+NATIVE_MODELS = [
+    {"id": "gpt-native", "name": "GPT Native", "provider": "codex", "selectable": True,
+     "availability": "codex-native", "reason": "test", "cost_status": "known",
+     "supported_efforts": ["low", "high"], "default_effort": "low", "is_default": True,
+     "appserver_compatible": True},
+]
+NATIVE_ACCOUNT = {"authenticated": True, "type": "chatgpt", "plan": "plus"}
+
+
+@pytest.fixture
+def native_catalog(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_native_catalog(*, refresh=False):
+        calls["count"] += 1
+        return [dict(item) for item in NATIVE_MODELS], dict(NATIVE_ACCOUNT)
+
+    monkeypatch.setattr(service, "_native_model_catalog", fake_native_catalog)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Codex Native must not touch OmniRoute")
+
+    # Codex Native may not consult OmniRoute in ANY form: model catalog, OAuth
+    # gate/status, management API, CLI probe or telemetry client.
+    monkeypatch.setattr(service, "_model_catalog", forbidden)
+    monkeypatch.setattr("nexus.workspace.omniroute_oauth.require_connected_route", forbidden)
+    monkeypatch.setattr("nexus.workspace.omniroute_oauth.connection_status", forbidden)
+    monkeypatch.setattr("nexus.workspace.omniroute_oauth.filter_connected_routes", forbidden)
+    monkeypatch.setattr("nexus.workspace.omniroute_oauth._management_connections", forbidden)
+    monkeypatch.setattr("nexus.workspace.omniroute_oauth._cli_connections", forbidden)
+    monkeypatch.setattr("nexus.routing.telemetry.OmniRouteTelemetryClient", forbidden)
+    return calls
+
+
+def test_native_session_is_created_without_any_omniroute_dependency(isolated_registry, native_catalog):
+    _register_project(isolated_registry)
+    session = service.create_session("demo", None, backend="codex_native")
+    assert session["backend"] == "codex_native"
+    assert session["requested_model"] is None
+    assert chat_sessions.get_session(session["session_id"])["backend"] == "codex_native"
+    assert native_catalog["count"] == 0
+
+
+def test_native_session_validates_model_and_effort_against_the_local_account(isolated_registry, native_catalog):
+    _register_project(isolated_registry)
+    session = service.create_session("demo", "gpt-native", "high", backend="codex_native")
+    assert (session["requested_model"], session["requested_effort"]) == ("gpt-native", "high")
+    with pytest.raises(service.ChatError) as unknown_model:
+        service.create_session("demo", "cx/not-offered", backend="codex_native")
+    assert unknown_model.value.code == "MODEL_NOT_ALLOWED"
+    with pytest.raises(service.ChatError) as bad_effort:
+        service.create_session("demo", "gpt-native", "ultra", backend="codex_native")
+    assert bad_effort.value.code == "EFFORT_NOT_SUPPORTED"
+    with pytest.raises(service.ChatError) as orphan_effort:
+        service.create_session("demo", None, "high", backend="codex_native")
+    assert orphan_effort.value.code == "EFFORT_REQUIRES_MODEL"
+
+
+def test_native_session_requires_a_signed_in_codex(isolated_registry, monkeypatch):
+    _register_project(isolated_registry)
+    monkeypatch.setattr(service, "_native_model_catalog",
+                        lambda *, refresh=False: ([], {"authenticated": False, "type": None, "plan": None}))
+    with pytest.raises(service.ChatError) as excinfo:
+        service.create_session("demo", "gpt-native", backend="codex_native")
+    assert excinfo.value.code == "CODEX_NOT_SIGNED_IN"
+
+
+def test_native_session_still_validates_the_project_workspace(isolated_registry, native_catalog):
+    with pytest.raises(service.ChatError) as excinfo:
+        service.create_session("missing-project", None, backend="codex_native")
+    assert excinfo.value.code == "PROJECT_NOT_FOUND"
+
+
+def test_unknown_backend_is_rejected(isolated_registry):
+    _register_project(isolated_registry)
+    with pytest.raises(service.ChatError) as excinfo:
+        service.create_session("demo", "cx/gpt-5.6-sol", backend="bogus")
+    assert excinfo.value.code == "UNSUPPORTED_BACKEND"
+
+
+def test_native_turn_streams_persists_and_resumes_without_omniroute(isolated_registry, native_catalog):
+    _register_project(isolated_registry)
+    session = service.create_session("demo", None, backend="codex_native")
+    sid = session["session_id"]
+
+    first = service.send_turn(sid, "remember pineapple")
+    _wait_until(lambda: chat_sessions.get_turn(first["turn_id"])["status"] == "COMPLETED")
+    persisted = chat_sessions.get_session(sid)
+    thread_id = persisted["codex_thread_id"]
+    assert thread_id and persisted["codex_home"]
+    assert FakeAppServerClient.instances and all(
+        instance.backend == "codex_native" for instance in FakeAppServerClient.instances
+    )
+    assert FakeAppServerClient.start_models == [None]
+
+    second = service.send_turn(sid, "what did I ask you to remember?")
+    _wait_until(lambda: chat_sessions.get_turn(second["turn_id"])["status"] == "COMPLETED")
+    assert FakeAppServerClient.instances[-1].resumed_thread_id == thread_id
+    assert chat_sessions.get_session(sid)["codex_thread_id"] == thread_id
+    assert FakeAppServerClient.start_models == [None]
+
+
+def test_native_turn_applies_effort_per_turn_without_the_experimental_settings_api(isolated_registry, native_catalog):
+    _register_project(isolated_registry)
+    session = service.create_session("demo", "gpt-native", "high", backend="codex_native")
+    turn = service.send_turn(session["session_id"], "hello")
+    _wait_until(lambda: chat_sessions.get_turn(turn["turn_id"])["status"] == "COMPLETED")
+    assert FakeAppServerClient.settings_calls == []
+    assert FakeAppServerClient.turn_efforts == ["high"]
+
+
+def test_native_session_keeps_the_read_only_sandbox_and_fail_closed_approvals(isolated_registry, native_catalog):
+    _register_project(isolated_registry)
+    session = service.create_session("demo", None, backend="codex_native")
+    turn = service.send_turn(session["session_id"], "hello")
+    _wait_until(lambda: chat_sessions.get_turn(turn["turn_id"])["status"] == "COMPLETED")
+    kwargs = FakeAppServerClient.instances[-1].thread_start_kwargs
+    assert kwargs["sandbox"] == service.CHAT_SANDBOX == "read-only"
+    assert kwargs["approval_policy"] == service.CHAT_APPROVAL_POLICY == "on-request"
+    assert FakeAppServerClient.instances[-1].client_kwargs["sandbox_mode_override"] == "read-only"
+    assert "on_server_request" not in FakeAppServerClient.instances[-1].client_kwargs
+
+
+def test_native_turn_can_be_interrupted(isolated_registry, native_catalog):
+    _register_project(isolated_registry)
+    session = service.create_session("demo", None, backend="codex_native")
+    sid = session["session_id"]
+    FakeAppServerClient.block_until_interrupted = True
+    turn = service.send_turn(sid, "long task")
+    _wait_for_blocked_client()
+    assert service.interrupt_turn(sid, turn["turn_id"])["status"] == "INTERRUPT_REQUESTED"
+    _wait_until(lambda: chat_sessions.get_turn(turn["turn_id"])["status"] == "CANCELLED")
+
+
+def test_sessions_default_to_the_omniroute_backend_and_keep_the_oauth_gate(isolated_registry, monkeypatch):
+    _register_project(isolated_registry)
+    session = service.create_session("demo")
+    assert session["backend"] == "omniroute"
+    seen = []
+    monkeypatch.setattr("nexus.workspace.omniroute_oauth.require_connected_route", lambda model: seen.append(model))
+    turn = service.send_turn(session["session_id"], "hello")
+    _wait_until(lambda: chat_sessions.get_turn(turn["turn_id"])["status"] == "COMPLETED")
+    assert seen and FakeAppServerClient.instances[-1].backend == "omniroute"
+
+
+def test_list_models_native_reports_catalog_and_account_without_secrets(monkeypatch):
+    monkeypatch.setattr(service, "_native_model_catalog",
+                        lambda *, refresh=False: ([dict(item) for item in NATIVE_MODELS], dict(NATIVE_ACCOUNT)))
+    result = service.list_models(backend="codex_native")
+    assert result["backend"] == "codex_native"
+    assert result["default_model"] == "gpt-native"
+    assert result["account"] == NATIVE_ACCOUNT
+    assert result["catalog_error"] is None
+
+
+def test_list_models_native_explains_a_missing_login(monkeypatch):
+    monkeypatch.setattr(service, "_native_model_catalog",
+                        lambda *, refresh=False: ([], {"authenticated": False, "type": None, "plan": None}))
+    result = service.list_models(backend="codex_native")
+    assert result["models"] == [] and "codex login" in result["catalog_error"]
+
+
+def test_list_models_native_reports_an_unavailable_appserver(monkeypatch):
+    def broken(*, refresh=False):
+        raise AppServerError("CODEX_NOT_FOUND", "Codex executable not found.")
+
+    monkeypatch.setattr(service, "_native_model_catalog", broken)
+    result = service.list_models(backend="codex_native")
+    assert result["models"] == [] and result["account"]["authenticated"] is False
+    assert "Codex" in result["catalog_error"]
+
+
+def test_native_catalog_reads_models_and_account_from_the_local_appserver(monkeypatch):
+    class CatalogClient:
+        def __init__(self, *_args, **kwargs):
+            assert kwargs["backend"] == "codex_native"
+        def start(self): pass
+        def account_read(self):
+            return {"account": {"type": "chatgpt", "planType": "plus", "email": "private@example.com"}}
+        def model_list(self, **_kwargs):
+            return {"data": [
+                {"model": "gpt-b", "displayName": "B", "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
+                 "defaultReasoningEffort": "low"},
+                {"model": "gpt-a", "isDefault": True, "supportedReasoningEfforts": ["low", "high"]},
+                {"model": "hidden-one", "hidden": True},
+            ]}
+        def stop(self): pass
+
+    monkeypatch.setattr(service, "AppServerClient", CatalogClient)
+    monkeypatch.setattr(service, "_native_catalog_cache", None)
+    models, account = service._native_model_catalog(refresh=True)
+    assert [item["id"] for item in models] == ["gpt-a", "gpt-b"]
+    assert models[0]["is_default"] and models[0]["supported_efforts"] == ["low", "high"]
+    assert all(item["availability"] == "codex-native" for item in models)
+    assert account == {"authenticated": True, "type": "chatgpt", "plan": "plus"}
+    assert "email" not in str(account)
+
+
+def test_native_chat_history_uses_a_native_client_and_never_omniroute(isolated_registry, native_catalog):
+    _register_project(isolated_registry)
+    session = service.create_session("demo", None, backend="codex_native")
+    sid = session["session_id"]
+    turn = service.send_turn(sid, "hello")
+    _wait_until(lambda: chat_sessions.get_turn(turn["turn_id"])["status"] == "COMPLETED")
+    FakeAppServerClient.instances.clear()
+    service.get_history(sid)
+    assert FakeAppServerClient.instances and all(i.backend == "codex_native" for i in FakeAppServerClient.instances)
+
+
+def test_omniroute_session_with_a_disconnected_provider_never_falls_back_to_native(isolated_registry, monkeypatch):
+    from nexus.dev.service import DevServiceError
+
+    _register_project(isolated_registry)
+    session = service.create_session("demo")
+
+    def disconnected(_model):
+        raise DevServiceError("AI_PROVIDER_UNAVAILABLE", "Provedor OAuth desconectado.", http_status=409)
+
+    monkeypatch.setattr("nexus.workspace.omniroute_oauth.require_connected_route", disconnected)
+    monkeypatch.setattr(service, "_native_model_catalog", lambda **_: (_ for _ in ()).throw(AssertionError("native used")))
+    FakeAppServerClient.instances.clear()
+    with pytest.raises(service.ChatError) as excinfo:
+        service.send_turn(session["session_id"], "hello")
+    assert excinfo.value.code == "AI_PROVIDER_UNAVAILABLE"
+    assert FakeAppServerClient.instances == [], "no App-Server of any backend may be launched"
+    assert chat_sessions.get_session(session["session_id"])["backend"] == "omniroute"
+
+
+def test_omniroute_session_creation_failure_does_not_create_a_native_session(isolated_registry, monkeypatch):
+    _register_project(isolated_registry)
+    monkeypatch.setattr(service, "_model_catalog", lambda **_: (_ for _ in ()).throw(RuntimeError("OmniRoute down")))
+    with pytest.raises(RuntimeError):
+        service.create_session("demo")
+    assert chat_sessions.list_sessions("demo") == []
+
+
+def test_a_session_with_an_unknown_backend_fails_closed_without_launching_anything(isolated_registry):
+    _register_project(isolated_registry)
+    session = service.create_session("demo")
+    sid = session["session_id"]
+    from nexus.registry.database import get_connection
+    with get_connection() as connection:
+        connection.execute("UPDATE chat_sessions SET backend = 'mystery' WHERE id = ?", (sid,))
+    FakeAppServerClient.instances.clear()
+    with pytest.raises(service.ChatError) as excinfo:
+        service.send_turn(sid, "hello")
+    assert excinfo.value.code == "UNSUPPORTED_BACKEND"
+    assert FakeAppServerClient.instances == []
+    assert service.list_sessions("demo")[0]["backend"] == "mystery", "listing must not crash on a bad row"

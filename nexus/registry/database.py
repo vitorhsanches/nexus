@@ -230,6 +230,11 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_model TEXT")
         if "requested_effort" not in chat_session_columns:
             connection.execute("ALTER TABLE chat_sessions ADD COLUMN requested_effort TEXT")
+        if "backend" not in chat_session_columns:
+            connection.execute("ALTER TABLE chat_sessions ADD COLUMN backend TEXT NOT NULL DEFAULT 'omniroute'")
+        if "claude_session_id" not in chat_session_columns:
+            # Claude Code's own conversation id (Claude Native backend only).
+            connection.execute("ALTER TABLE chat_sessions ADD COLUMN claude_session_id TEXT")
 
         # Development Mode (F1.2): per-project authorization flag. Disabled
         # by default for every project -- new AND pre-existing rows alike,
@@ -474,6 +479,30 @@ def initialize_database() -> None:
         mission_columns = {row[1] for row in connection.execute("PRAGMA table_info(dev_autonomous_missions)")}
         if "requested_effort" not in mission_columns:
             connection.execute("ALTER TABLE dev_autonomous_missions ADD COLUMN requested_effort TEXT")
+        dev_session_columns = {row[1] for row in connection.execute("PRAGMA table_info(dev_sessions)")}
+        if "backend" not in dev_session_columns:
+            connection.execute("ALTER TABLE dev_sessions ADD COLUMN backend TEXT NOT NULL DEFAULT 'omniroute'")
+        # Human decisions on Codex approval requests (P4.0B). The live request
+        # only exists while its App-Server process runs; this is the audit
+        # trail, and a PENDING row without a live request is expired on read.
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS dev_approvals (
+                id TEXT PRIMARY KEY,
+                dev_session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                decided_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (dev_session_id) REFERENCES dev_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_dev_approvals_session
+                ON dev_approvals(dev_session_id, status);
+            """
+        )
 
         # Intelligent Maestro (P2A). A conversation is backed by exactly one
         # read-only Nexus Chat session (the Codex thread holds the content);

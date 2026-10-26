@@ -102,6 +102,135 @@ def _validate_omniroute_config(path: str) -> None:
         raise RuntimeError("OmniRoute Worker destructive-command rules are invalid")
 
 
+# Generated, never copied from the user's ~/.codex/config.toml: that file may
+# carry MCP servers/plugins and a model provider Nexus Chat must not inherit.
+_NATIVE_CONFIG = (
+    'cli_auth_credentials_store = "file"\n'
+    'windows.sandbox = "unelevated"\n'
+    "\n"
+    "[sandbox_workspace_write]\n"
+    "exclude_tmpdir_env_var = true\n"
+    "exclude_slash_tmp = true\n"
+)
+
+
+def native_catalog_home() -> str:
+    """Stable CODEX_HOME for Codex Native catalog/status probes (no session state)."""
+    base = os.environ.get("NEXUS_CODEX_HOME")
+    if not base:
+        local = os.environ.get("LOCALAPPDATA")
+        profile = os.environ.get("USERPROFILE")
+        base = (
+            os.path.join(local, "Nexus", "CodexHome") if local
+            else os.path.join(profile, ".nexus_codex_home") if profile
+            else os.path.join(tempfile.gettempdir(), "Nexus", "CodexHome")
+        )
+    return os.path.join(base, "native-catalog")
+
+
+def _configures_a_provider(config_path: str) -> bool:
+    """True when a CODEX_HOME's config selects a model provider (e.g. OmniRoute).
+
+    Codex itself appends state such as per-project ``trust_level`` entries to
+    a native home's config; that is not a foreign backend and is tolerated.
+    An unreadable config is treated as foreign.
+    """
+    try:
+        with open(config_path, "rb") as config_file:
+            data = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError):
+        return True
+    return "model_provider" in data or "model_providers" in data
+
+
+def _share_native_auth(source_auth: str, destination_auth: str) -> None:
+    """Make the session's auth.json the *same file* as the user's local login.
+
+    A copy would duplicate the secret and let the two copies drift apart; a
+    refreshed refresh-token in one copy invalidates the other. A hardlink keeps
+    exactly one credential on disk. It is re-checked on every launch so a
+    ``codex logout`` or a new login is never masked by a stale link.
+    """
+    if os.path.lexists(destination_auth):
+        try:
+            if os.path.samefile(source_auth, destination_auth):
+                return
+        except OSError:
+            pass
+        if os.path.getmtime(destination_auth) > os.path.getmtime(source_auth):
+            raise RuntimeError(
+                "Native Codex session credential diverged from the local login; "
+                "refusing to pick one. Run 'codex login' and start a new session."
+            )
+        os.unlink(destination_auth)
+    try:
+        os.link(source_auth, destination_auth)
+    except OSError as exc:
+        if os.environ.get("NEXUS_NATIVE_ALLOW_AUTH_COPY") != "1":
+            raise RuntimeError(
+                "Could not share the local Codex login with the session (it must be on the same "
+                "NTFS volume and below the 1023-hardlink limit). Set NEXUS_NATIVE_ALLOW_AUTH_COPY=1 "
+                "to allow a private copy."
+            ) from exc
+        shutil.copy2(source_auth, destination_auth)
+
+
+def _native_codex_env(
+    env: dict[str, str], nexus_base: str, userprofile: str | None, worker_home: str | None
+) -> dict[str, str]:
+    """Environment for Codex with its own local (ChatGPT/API-key) login.
+
+    No OmniRoute profile is read or required. The app-server gets a private,
+    caller-owned CODEX_HOME (so ``thread/resume`` works after a restart and
+    never contends with the interactive Codex state database). Only the
+    local ``auth.json`` is linked in (never duplicated) from the user's Codex home.
+    """
+    # The user's own Codex login lives in their CODEX_HOME when they set one.
+    source_home = (
+        env.get("NEXUS_NATIVE_CODEX_AUTH_HOME")
+        or env.get("CODEX_HOME")
+        or os.path.join(userprofile or "", ".codex")
+    )
+    source_auth = os.path.join(source_home, "auth.json")
+    if not userprofile or not os.path.isfile(source_auth):
+        if worker_home and os.path.lexists(os.path.join(worker_home, "auth.json")):
+            os.unlink(os.path.join(worker_home, "auth.json"))
+        raise RuntimeError(
+            "Codex native login not found. Run 'codex login' for the current Windows user first."
+        )
+
+    scoped = {key: value for key, value in env.items() if not key.upper().startswith("OMNIROUTE_")}
+    template_dir = os.path.join(nexus_base, "_template_native")
+    try:
+        os.makedirs(os.path.join(template_dir, "rules"), exist_ok=True)
+        with open(os.path.join(template_dir, "config.toml"), "w", encoding="utf-8") as config_file:
+            config_file.write(_NATIVE_CONFIG)
+        with open(
+            os.path.join(template_dir, "rules", "nexus-worker.rules"), "w", encoding="utf-8"
+        ) as rules_file:
+            rules_file.write(_WORKER_RULES)
+
+        if worker_home is None:
+            worker_home = os.path.join(nexus_base, "workers", uuid.uuid4().hex)
+        os.makedirs(worker_home, exist_ok=True)
+        existing_config = os.path.join(worker_home, "config.toml")
+        if os.path.isfile(existing_config) and _configures_a_provider(existing_config):
+            raise RuntimeError(
+                "This CODEX_HOME belongs to another backend; refusing to reuse it for Codex Native."
+            )
+        shutil.copy2(os.path.join(template_dir, "config.toml"), existing_config)
+        shutil.copytree(
+            os.path.join(template_dir, "rules"), os.path.join(worker_home, "rules"), dirs_exist_ok=True
+        )
+        _share_native_auth(source_auth, os.path.join(worker_home, "auth.json"))
+        scoped["CODEX_HOME"] = worker_home
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not create isolated native Codex home under {nexus_base!r}"
+        ) from exc
+    return scoped
+
+
 def codex_subprocess_env(
     profile: str = "default", *, worker_home: str | None = None, include_auth: bool = True
 ) -> dict[str, str]:
@@ -173,8 +302,10 @@ def codex_subprocess_env(
         else:
             nexus_base = os.path.join(tempfile.gettempdir(), "Nexus", "CodexHome")
 
-    if profile not in {"default", "omniroute"}:
+    if profile not in {"default", "omniroute", "native"}:
         raise ValueError(f"Unsupported Codex subprocess profile: {profile!r}")
+    if profile == "native":
+        return _native_codex_env(env, nexus_base, userprofile, worker_home)
 
     template_name = (
         "_template_omniroute_noauth"

@@ -965,3 +965,176 @@ def test_sandbox_and_approval_policy_overrides_combine_in_order():
         "-c", 'sandbox_mode="workspace-write"',
         "-c", 'approval_policy="on-request"',
     ]
+
+
+# -- Codex Native backend (P4.0A) -----------------------------------------
+
+
+def test_native_backend_omits_model_provider_and_does_not_require_omniroute():
+    client, captured = _make_client(
+        {"initialize": [_ok(1, {})],
+         "thread/start": [_ok(2, _thread_result(provider="openai", model="gpt-x"))]},
+        backend="codex_native",
+    )
+    client.start()
+    result = client.thread_start(model="gpt-x")
+    assert "modelProvider" not in captured["server"].sent[1]["params"]
+    assert result["thread"]["modelProvider"] == "openai"
+
+
+def test_native_backend_launches_the_native_profile_with_local_auth(monkeypatch):
+    import nexus.chat.appserver_client as mod
+
+    seen = {}
+
+    def fake_env(profile, worker_home=None, include_auth=True):
+        seen.update(profile=profile, include_auth=include_auth, worker_home=worker_home)
+        return {"CODEX_HOME": worker_home or "native-home"}
+
+    monkeypatch.setattr(mod, "codex_subprocess_env", fake_env)
+    client, _captured = _make_client({"initialize": [_ok(1, {})]}, backend="codex_native", codex_home="session-home")
+    client.start()
+    assert seen == {"profile": "native", "include_auth": True, "worker_home": "session-home"}
+    assert client.codex_home == "session-home"
+
+
+def test_omniroute_backend_still_launches_the_authless_omniroute_profile(monkeypatch):
+    import nexus.chat.appserver_client as mod
+
+    seen = {}
+
+    def fake_env(profile, worker_home=None, include_auth=True):
+        seen.update(profile=profile, include_auth=include_auth)
+        return {"CODEX_HOME": "h"}
+
+    monkeypatch.setattr(mod, "codex_subprocess_env", fake_env)
+    client, _captured = _make_client({"initialize": [_ok(1, {})]})
+    client.start()
+    assert seen == {"profile": "omniroute", "include_auth": False}
+
+
+def test_native_backend_rejects_a_caller_supplied_model_provider():
+    client, captured = _make_client({"initialize": [_ok(1, {})]}, backend="codex_native")
+    client.start()
+    with pytest.raises(AppServerError) as excinfo:
+        client.thread_start(extra_params={"modelProvider": "omniroute"})
+    assert excinfo.value.code == "NATIVE_PROVIDER_OVERRIDE_REJECTED"
+    assert [request["method"] for request in captured["server"].sent] == ["initialize"]
+
+
+def test_native_backend_refuses_a_thread_that_reports_omniroute():
+    client, _captured = _make_client(
+        {"initialize": [_ok(1, {})], "thread/start": [_ok(2, _thread_result(provider="omniroute"))]},
+        backend="codex_native",
+    )
+    client.start()
+    with pytest.raises(AppServerError) as excinfo:
+        client.thread_start()
+    assert excinfo.value.code == "NATIVE_ROUTED_THROUGH_OMNIROUTE"
+
+
+def test_native_profile_failure_is_reported_as_native_profile_unavailable(monkeypatch):
+    import nexus.chat.appserver_client as mod
+
+    def failing_env(profile, worker_home=None, include_auth=True):
+        raise RuntimeError("Codex native login not found.")
+
+    monkeypatch.setattr(mod, "codex_subprocess_env", failing_env)
+    client, _captured = _make_client({}, backend="codex_native")
+    with pytest.raises(AppServerError) as excinfo:
+        client.start()
+    assert excinfo.value.code == "NATIVE_PROFILE_UNAVAILABLE"
+
+
+def test_unknown_backend_is_rejected_at_construction():
+    with pytest.raises(AppServerError) as excinfo:
+        AppServerClient(r"C:\fake\repo", backend="something-else")
+    assert excinfo.value.code == "UNSUPPORTED_BACKEND"
+
+
+def test_turn_effort_uses_the_stable_turn_start_override():
+    client, captured = _make_client(
+        {
+            "initialize": [_ok(1, {})],
+            "turn/start": [
+                _ok(2, {"turn": {"id": "TURN-1"}}),
+                _notification("turn/completed", {"turn": {"id": "TURN-1", "status": "completed"}}),
+            ],
+        },
+        backend="codex_native",
+    )
+    client.start()
+    client.send_message_and_wait("THREAD-1", "hello", timeout_seconds=1, effort="high")
+    params = captured["server"].sent[1]["params"]
+    assert captured["server"].sent[1]["method"] == "turn/start"
+    assert params["effort"] == "high"
+    assert "thread/settings/update" not in [request["method"] for request in captured["server"].sent]
+
+
+def test_turn_without_effort_sends_no_effort_override():
+    client, captured = _make_client(
+        {
+            "initialize": [_ok(1, {})],
+            "turn/start": [
+                _ok(2, {"turn": {"id": "TURN-1"}}),
+                _notification("turn/completed", {"turn": {"id": "TURN-1", "status": "completed"}}),
+            ],
+        },
+    )
+    client.start()
+    client.send_message_and_wait("THREAD-1", "hello", timeout_seconds=1)
+    assert "effort" not in captured["server"].sent[1]["params"]
+
+
+def test_account_read_never_requests_a_token_refresh_and_redacts_secrets():
+    client, captured = _make_client(
+        {"initialize": [_ok(1, {})],
+         "account/read": [_ok(2, {"account": {"type": "chatgpt", "planType": "plus", "accessToken": "secret-token-value"},
+                                  "requiresOpenaiAuth": True})]},
+        backend="codex_native",
+    )
+    client.start()
+    result = client.account_read()
+    assert captured["server"].sent[1]["params"] == {"refreshToken": False}
+    assert result["account"]["type"] == "chatgpt"
+    assert result["account"]["accessToken"] == "<redacted>"
+
+
+# -- deferred human decisions (P4.0B) --------------------------------------------
+
+
+def _approval_request(request_id=9):
+    return json.dumps({"id": request_id, "method": "item/commandExecution/requestApproval",
+                       "params": {"command": "python -m pytest -q", "itemId": "i", "threadId": "t", "turnId": "u", "startedAtMs": 1}})
+
+
+def test_a_deferred_request_is_not_answered_until_the_human_decides():
+    seen = []
+    client, captured = _make_client(
+        {"initialize": [_ok(1, {}), _approval_request()]},
+        backend="codex_native",
+        on_deferred_server_request=lambda method, params, request_id: seen.append((method, params, request_id)) or True,
+    )
+    client.start()
+    deadline = time.time() + 2
+    while not seen and time.time() < deadline:
+        time.sleep(0.01)
+    assert seen and seen[0][0] == "item/commandExecution/requestApproval" and seen[0][2] == 9
+    assert not [m for m in captured["server"].sent if m.get("id") == 9], "no answer may be sent on its own"
+
+    client.respond_server_request(9, {"decision": "accept"})
+    assert {"id": 9, "result": {"decision": "accept"}} in captured["server"].sent
+
+
+def test_a_failing_or_declining_deferred_handler_falls_back_to_the_fail_closed_denial():
+    for handler in (lambda *_args: False, lambda *_args: (_ for _ in ()).throw(RuntimeError("boom"))):
+        client, captured = _make_client(
+            {"initialize": [_ok(1, {}), _approval_request()]}, backend="codex_native", on_deferred_server_request=handler,
+        )
+        client.start()
+        deadline = time.time() + 2
+        while not [m for m in captured["server"].sent if m.get("id") == 9] and time.time() < deadline:
+            time.sleep(0.01)
+        reply = [m for m in captured["server"].sent if m.get("id") == 9][0]
+        assert reply["result"]["decision"] != "accept"
+        assert "accept" not in json.dumps(reply["result"])

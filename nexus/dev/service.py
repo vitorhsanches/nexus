@@ -70,6 +70,7 @@ def _session_dict(row) -> dict:
         "branch": row["branch"],
         "base_sha": row["base_sha"],
         "requested_model": row["requested_model"],
+        "backend": row["backend"] if "backend" in row.keys() and row["backend"] else "omniroute",
         "status": row["status"],
         "error_code": row["error_code"],
         "error_message": row["error_message"],
@@ -78,7 +79,7 @@ def _session_dict(row) -> dict:
     }
 
 
-def create_dev_session(project_id: str, *, requested_model: str | None = None) -> dict:
+def create_dev_session(project_id: str, *, requested_model: str | None = None, backend: str = "omniroute") -> dict:
     """Create and persist one new development session with its own worktree.
 
     The session row is reserved (status=CREATING, owner_host/pid recorded)
@@ -91,11 +92,17 @@ def create_dev_session(project_id: str, *, requested_model: str | None = None) -
     authorized cleanup.
     """
     workspace_path = validate_dev_project(project_id)
+    if backend not in {"omniroute", "codex_native"}:
+        raise DevServiceError("UNSUPPORTED_BACKEND", f"Unsupported Development backend: {backend!r}", http_status=422)
+    if backend == "codex_native":
+        from nexus.dev.executor import validate_native_choice
+
+        validate_native_choice(requested_model, None)
 
     session_id = dev_sessions.new_session_id()
     branch = branch_name_for_session(session_id)
     try:
-        dev_sessions.reserve_session(session_id, project_id, branch, requested_model=requested_model)
+        dev_sessions.reserve_session(session_id, project_id, branch, requested_model=requested_model, backend=backend)
     except dev_sessions.DevSessionBranchBusyError as error:
         raise DevServiceError("SESSION_BRANCH_BUSY", str(error), http_status=409) from error
 

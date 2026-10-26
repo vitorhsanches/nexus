@@ -121,7 +121,21 @@ def start_mission(
         raise DevServiceError("INVALID_ALLOWED_MODELS", "allowed_models contains an invalid route identifier.", http_status=400)
     if not selected_model:
         raise DevServiceError("MODEL_REQUIRED", "An explicit selected model is required.", http_status=400)
+    if executor.session_backend(session) == executor.BACKEND_CODEX_NATIVE:
+        # Codex Native: the local Codex account's catalog, never OmniRoute's.
+        executor.validate_native_choice(selected_model, effort)
+        if selected_model not in allowed_models:
+            raise DevServiceError("MODEL_NOT_CONFIRMED", "The selected model was not explicitly confirmed by the caller.", http_status=400)
+        normalized_allowed = [selected_model]
+    else:
+        normalized_allowed = _validate_omniroute_mission_choice(selected_model, effort, allowed_models)
+    if not MIN_MISSION_TIMEOUT_SECONDS <= timeout_seconds <= MAX_MISSION_TIMEOUT_SECONDS:
+        raise DevServiceError("INVALID_TIMEOUT", "timeout_seconds is outside the allowed range.", http_status=400)
+    return _create_and_launch(dev_session_id, session, description, selected_model, effort, normalized_allowed,
+                              test_profile, timeout_seconds)
 
+
+def _validate_omniroute_mission_choice(selected_model: str, effort: str | None, allowed_models: list[str]) -> list[str]:
     from nexus.dev.models import list_dev_models
 
     model_catalog = list_dev_models()
@@ -139,8 +153,11 @@ def start_mission(
     if effort is not None and (effort not in selected_row.get("supported_efforts", []) or (
         selected_model.startswith(("cc/", "cx/")) and effort not in selected_row.get("confirmed_efforts", []))):
         raise DevServiceError("EFFORT_NOT_SUPPORTED", "Esforço não confirmado para a rota exata da missão.", http_status=422)
-    if not MIN_MISSION_TIMEOUT_SECONDS <= timeout_seconds <= MAX_MISSION_TIMEOUT_SECONDS:
-        raise DevServiceError("INVALID_TIMEOUT", "timeout_seconds is outside the allowed range.", http_status=400)
+    return normalized_allowed
+
+
+def _create_and_launch(dev_session_id, session, description, selected_model, effort, normalized_allowed,
+                       test_profile, timeout_seconds) -> dict:
     try:
         mission_id = dev_missions.create_mission(
             dev_session_id,

@@ -1,6 +1,7 @@
 ﻿"""JSON API routes for the Nexus Local Mission Board UI V1."""
 
 import asyncio
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -104,6 +105,19 @@ def routing_status():
     from nexus.web.routing_status import get_routing_status  # noqa: PLC0415
 
     return get_routing_status()
+
+
+@router.get("/runtime/status")
+def runtime_status():
+    """Return local native-agent availability without contacting OmniRoute.
+
+    The Overview uses this inexpensive capability snapshot.  The separate
+    ``/routing/status`` endpoint remains available for an explicit routing
+    inspection and is the only path that collects OmniRoute telemetry.
+    """
+    from nexus.web.native_runtime import get_native_runtime_status  # noqa: PLC0415
+
+    return get_native_runtime_status()
 
 
 @router.get("/missions")
@@ -425,6 +439,7 @@ class ChatSessionCreateRequest(BaseModel):
     model: str | None = Field(default=None, min_length=1, max_length=128)
     effort: str | None = Field(default=None, min_length=1, max_length=32)
     allow_unknown_cost: bool = False
+    backend: Literal["omniroute", "codex_native", "claude_native"] = "omniroute"
 
 
 class ChatTurnCreateRequest(BaseModel):
@@ -449,6 +464,8 @@ def create_chat_session(request: ChatSessionCreateRequest):
     from nexus.chat.service import ChatError, create_session  # noqa: PLC0415
 
     try:
+        if request.backend in {"codex_native", "claude_native"}:
+            return create_session(request.project_id, request.model, request.effort, backend=request.backend)
         if request.model is None and request.effort is None and not request.allow_unknown_cost:
             return create_session(request.project_id)
         return create_session(request.project_id, request.model, request.effort, request.allow_unknown_cost)
@@ -464,8 +481,10 @@ def list_chat_sessions(project_id: str | None = None):
 
 
 @router.get("/chat/models")
-def list_chat_models():
+def list_chat_models(backend: Literal["omniroute", "codex_native", "claude_native"] = "omniroute", refresh: bool = False):
     from nexus.chat.service import list_models  # noqa: PLC0415
+    if backend in {"codex_native", "claude_native"}:
+        return list_models(refresh=refresh, backend=backend)
     return list_models()
 
 
@@ -715,6 +734,12 @@ async def stream_chat_events(
 class DevSessionCreateRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
     requested_model: str | None = Field(default=None, min_length=1, max_length=128)
+    backend: Literal["omniroute", "codex_native"] = "omniroute"
+
+
+class DevApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision: Literal["accept", "decline"]
 
 
 class DevTurnCreateRequest(BaseModel):
@@ -807,6 +832,8 @@ def create_dev_session(request: DevSessionCreateRequest):
     from nexus.dev.service import DevServiceError, create_dev_session as _create_dev_session  # noqa: PLC0415
 
     try:
+        if request.backend == "codex_native":
+            return _create_dev_session(request.project_id, requested_model=request.requested_model, backend="codex_native")
         return _create_dev_session(request.project_id, requested_model=request.requested_model)
     except DevServiceError as error:
         raise _dev_error_response(error) from error
@@ -940,11 +967,42 @@ def list_dev_integrations(session_id: str):
 
 
 @router.get("/dev/models")
-def list_dev_models_route(refresh: bool = False):
-    """Return live OmniRoute routes approved for Development coding."""
+def list_dev_models_route(refresh: bool = False, backend: Literal["omniroute", "codex_native"] = "omniroute"):
+    """Return the models a Development session may use for the given backend:
+    live OmniRoute routes approved for coding, or the local Codex account's
+    own catalog for Codex Native."""
+    if backend == "codex_native":
+        from nexus.chat.service import list_models
+
+        return list_models(refresh=refresh, backend="codex_native")
     from nexus.dev.models import list_dev_models
 
     return list_dev_models(refresh=refresh)
+
+
+@router.get("/dev/sessions/{session_id}/approvals")
+def list_dev_approvals(session_id: str):
+    from nexus.dev import approvals
+    from nexus.dev.service import DevServiceError, get_session_detail
+
+    try:
+        get_session_detail(session_id)
+        return {"approvals": approvals.list_for_session(session_id)}
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+@router.post("/dev/sessions/{session_id}/approvals/{approval_id}")
+def decide_dev_approval(session_id: str, approval_id: str, request: DevApprovalDecisionRequest):
+    """A human answer to one pending Codex approval request. Same loopback and
+    same-origin protection as the rest of /api/dev/ (app middleware)."""
+    from nexus.dev import approvals
+    from nexus.dev.service import DevServiceError
+
+    try:
+        return approvals.decide(session_id, approval_id, request.decision)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
 
 
 @router.get("/dev/model-catalog")
