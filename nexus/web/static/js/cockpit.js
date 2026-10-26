@@ -134,11 +134,11 @@
       if (divider.dataset.axis === 'columns') {
         const x = layout.columnPixels.slice(0, index + 1).reduce((a, b) => a + b, 0) + gap * index + gap / 2;
         divider.style.left = `${x}px`;
-        divider.style.bottom = layout.visibleCount === 3 && layout.columns === 2 && layout.rows === 2
-          ? `${layout.rowPixels[1] + gap}px` : '0px';
+        divider.style.bottom = '0px';
       } else {
         const y = layout.rowPixels.slice(0, index + 1).reduce((a, b) => a + b, 0) + gap * index + gap / 2;
         divider.style.top = `${y}px`;
+        divider.style.left = layout.featured ? `${layout.columnPixels[0] + gap}px` : '0px';
       }
     });
   };
@@ -215,7 +215,7 @@
   const updateLayout = () => {
     const all = panes();
     if (mobileLayout()) {
-      all.forEach(pane => { pane.hidden = false; pane.classList.remove('wide-row'); });
+      all.forEach(pane => { pane.hidden = false; pane.classList.remove('featured'); });
       groupControls.hidden = true;
       grid.style.removeProperty('grid-template-columns');
       grid.style.removeProperty('grid-template-rows');
@@ -242,7 +242,8 @@
     const columns = columnOptions.includes(preferredColumns.get(preferenceKey))
       ? preferredColumns.get(preferenceKey) : automaticColumns;
     const rows = Math.ceil(visible.length / columns);
-    all.forEach(pane => pane.classList.toggle('wide-row', visible.length === 3 && columns === 2 && pane === visible[2]));
+    const featured = rows === 2 && ((visible.length === 3 && columns === 2) || (visible.length === 5 && columns === 3));
+    all.forEach(pane => pane.classList.toggle('featured', featured && pane === visible[0]));
     grid.dataset.visible = String(visible.length);
     grid.dataset.columns = String(columns);
     grid.dataset.rows = String(rows);
@@ -264,7 +265,7 @@
     const columnFractions = stored?.columns || Array(columns).fill(1 / columns);
     const rowFractions = stored?.rows || Array(rows).fill(1 / rows);
     layout = {
-      key, columns, rows, visibleCount: visible.length, columnOptions, preferenceKey,
+      key, columns, rows, featured, columnOptions, preferenceKey,
       columnPixels: fitTracks(columnFractions, grid.clientWidth - gap * (columns - 1), minimumWidth),
       rowPixels: fitTracks(rowFractions, grid.clientHeight - gap * (rows - 1), minimumHeight)
     };

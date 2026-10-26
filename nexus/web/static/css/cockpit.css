@@ -363,7 +363,7 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .native-pane .native-details .pane-meta span{font-size:8px}
 .native-pane .cockpit-conversation{min-height:64px}
 .native-pane .cockpit-composer{border-top:1px solid var(--border-soft);padding-top:8px}
-.pane-grid .pane.wide-row{grid-column:1/-1}
+.pane-grid .pane.featured{grid-row:1/-1}
 
 /* Keep the task prompt visible while output scrolls above it. */
 .native-pane .native-body{display:flex;flex-direction:column;min-height:0;overflow:hidden;padding:0}

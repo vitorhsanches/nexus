@@ -232,9 +232,9 @@ test('pane dividers still resize both axes and restore the automatic layout', ()
   const horizontal = app.grid.querySelector('.grid-divider.horizontal');
   assert.ok(vertical);
   assert.ok(horizontal);
-  assert.equal(app.grid.querySelector('[data-pane="review"]').classList.contains('wide-row'), true);
-  assert.match(vertical.style.bottom, /px$/);
-  assert.notEqual(vertical.style.bottom, '0px');
+  assert.equal(app.grid.querySelector('[data-pane="maestro"]').classList.contains('featured'), true);
+  assert.match(horizontal.style.left, /px$/);
+  assert.notEqual(horizontal.style.left, '0px', 'the row divider does not cross the tall pane');
   vertical.dispatch('keydown', vertical, { key: 'ArrowRight' });
   horizontal.dispatch('keydown', horizontal, { key: 'ArrowDown' });
   assert.notEqual(app.grid.style.gridTemplateColumns, columns);
@@ -251,6 +251,18 @@ test('pane dividers still resize both axes and restore the automatic layout', ()
   app.byId['restore-layout'].dispatch('click');
   assert.equal(app.grid.style.gridTemplateColumns, columns);
   assert.equal(app.grid.style.gridTemplateRows, rows);
+});
+
+test('five visible panes form a tall lead pane and a two-by-two companion grid', async () => {
+  const app = harness([agent(1), agent(2)], { withNative: true });
+  await app.settle();
+  assert.equal(app.grid.dataset.visible, '5');
+  assert.equal(app.grid.dataset.columns, '3');
+  assert.equal(app.grid.dataset.rows, '2');
+  assert.equal(app.grid.querySelector('[data-pane="maestro"]').classList.contains('featured'), true);
+  const divider = app.grid.querySelector('.grid-divider.horizontal');
+  assert.ok(divider);
+  assert.notEqual(divider.style.left, '0px');
 });
 
 test('two panes can switch to vertical rows, resize their heights, and fit the viewport', () => {
