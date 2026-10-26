@@ -657,7 +657,7 @@
       option.value = model.id;
       costAuthModel.append(option);
     });
-    if (costAuthModel.children.some(option => option.value === selected)) costAuthModel.value = selected;
+    if (Array.from(costAuthModel.children).some(option => option.value === selected)) costAuthModel.value = selected;
     costAuthCreate.disabled = !projectId || !costAuthModel.value || !document.getElementById('cost-auth-confirm').checked || pending.has('cost-auth');
     if (!projectId) {
       costAuthList.textContent = 'Selecione um projeto autorizado para consultar autorizações.';

@@ -15,10 +15,28 @@ class TextNode {
   cloneNode() { return new TextNode(this.value); }
 }
 
+// DOM HTMLCollection is a live, array-like collection, not an Array. In
+// particular, it has item()/iteration but no Array.prototype.some().
+class HTMLCollection {
+  constructor(element) {
+    this.element = element;
+    return new Proxy(this, {
+      get(target, property, receiver) {
+        if (property === 'length') return target.element._children.length;
+        if (property === Symbol.iterator) return target.element._children[Symbol.iterator].bind(target.element._children);
+        if (typeof property === 'string' && /^\d+$/.test(property)) return target.element._children[Number(property)];
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+  item(index) { return this.element._children[index] || null; }
+}
+
 class Element {
   constructor(tag = 'div', className = '') {
     this.tagName = tag.toUpperCase(); this.className = className; this.id = '';
-    this.children = []; this.parentNode = null; this.dataset = {}; this.attributes = {};
+    this._children = []; this._htmlCollectionChildren = null;
+    this.parentNode = null; this.dataset = {}; this.attributes = {};
     this.listeners = {}; this.hidden = false; this.disabled = false; this.scrollTop = 0;
     this.value = ''; this.checked = false;
     this.style = { removeProperty(name) { delete this[name]; } };
@@ -35,25 +53,27 @@ class Element {
       },
     };
   }
-  get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
-  set textContent(value) { this._text = String(value); this.children = []; }
-  get lastChild() { return this.children.at(-1) || null; }
+  get children() { return this._htmlCollectionChildren || this._children; }
+  useHTMLCollectionChildren() { this._htmlCollectionChildren = new HTMLCollection(this); }
+  get textContent() { return this._text + this._children.map(child => child.textContent).join(''); }
+  set textContent(value) { this._text = String(value); this._children = []; }
+  get lastChild() { return this._children.at(-1) || null; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   removeAttribute(name) { delete this.attributes[name]; }
   append(...nodes) {
     for (const node of nodes) {
       const child = typeof node === 'string' ? new TextNode(node) : node;
-      if (child.parentNode) child.parentNode.children = child.parentNode.children.filter(item => item !== child);
-      child.parentNode = this; this.children.push(child);
+      if (child.parentNode) child.parentNode._children = child.parentNode._children.filter(item => item !== child);
+      child.parentNode = this; this._children.push(child);
     }
   }
-  replaceChildren(...nodes) { this.children.forEach(child => { child.parentNode = null; }); this.children = []; this._text = ''; this.append(...nodes); }
-  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(item => item !== this); this.parentNode = null; }
+  replaceChildren(...nodes) { this._children.forEach(child => { child.parentNode = null; }); this._children = []; this._text = ''; this.append(...nodes); }
+  remove() { if (this.parentNode) this.parentNode._children = this.parentNode._children.filter(item => item !== this); this.parentNode = null; }
   cloneNode(deep) {
     const copy = new Element(this.tagName, this.className);
     copy.id = this.id; copy.dataset = { ...this.dataset }; copy.attributes = { ...this.attributes };
     copy.hidden = this.hidden; copy._text = this._text; copy.value = this.value; copy.checked = this.checked;
-    if (deep) copy.append(...this.children.map(child => child.cloneNode(true)));
+    if (deep) copy.append(...this._children.map(child => child.cloneNode(true)));
     return copy;
   }
   addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
@@ -65,7 +85,7 @@ class Element {
   focus() {}
   scrollIntoView() {}
   matches(selector) {
-    if (selector === ':last-child') return this.parentNode?.children.at(-1) === this;
+    if (selector === ':last-child') return this.parentNode?._children.at(-1) === this;
     const attribute = selector.match(/\[data-pane="([^"]+)"\]/);
     if (attribute && this.dataset.pane !== attribute[1]) return false;
     const withoutAttribute = selector.replace(/\[data-pane="[^"]+"\]/, '');
@@ -74,13 +94,13 @@ class Element {
     const tag = withoutAttribute.split(/[.:[\s]/)[0];
     return !tag || this.tagName === tag.toUpperCase();
   }
-  descendants() { return this.children.filter(child => child instanceof Element).flatMap(child => [child, ...child.descendants()]); }
+  descendants() { return this._children.filter(child => child instanceof Element).flatMap(child => [child, ...child.descendants()]); }
   querySelectorAll(selector) {
-    if (selector.startsWith(':scope > ')) return this.children.filter(child => child instanceof Element && child.matches(selector.slice(9)));
+    if (selector.startsWith(':scope > ')) return this._children.filter(child => child instanceof Element && child.matches(selector.slice(9)));
     if (selector.includes(' > ')) {
       const [parent, child] = selector.split(' > ');
-      return this.querySelectorAll(parent).flatMap(node => node.children.filter(item => item instanceof Element && item.matches(child.replace(':last-child', ''))
-        && (!child.endsWith(':last-child') || node.children.at(-1) === item)));
+      return this.querySelectorAll(parent).flatMap(node => node._children.filter(item => item instanceof Element && item.matches(child.replace(':last-child', ''))
+        && (!child.endsWith(':last-child') || node._children.at(-1) === item)));
     }
     if (selector.includes(' ')) {
       const [parent, child] = selector.split(' ');
@@ -117,11 +137,15 @@ function buildPane(kind) {
   return pane;
 }
 
-function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null } = {}) {
+function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null, htmlCollectionChildren = false } = {}) {
   const rootNode = el('body');
   const ids = [...template.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
   const byId = Object.fromEntries(ids.map(id => [id, el('div')]));
   for (const [id, node] of Object.entries(byId)) { node.id = id; rootNode.append(node); }
+  if (htmlCollectionChildren) {
+    byId['cost-auth-model'].tagName = 'SELECT';
+    byId['cost-auth-model'].useHTMLCollectionChildren();
+  }
   const grid = byId['pane-grid'];
   grid.clientWidth = gridWidth;
   grid.append(buildPane('maestro'), buildPane('agent-a'), buildPane('agent-b'), buildPane('review'));
@@ -325,6 +349,26 @@ test('persistent cost authorization captures bounded consent and can be revoked'
   revoke.dispatch('click');
   await app.settle();
   assert.ok(app.calls.some(call => call.url.includes('/api/workspace/cost-authorizations/AUTH-1?project_id=demo') && call.method === 'DELETE'));
+});
+
+test('cost authorization model selection works with DOM HTMLCollection children', async () => {
+  const app = harness([], { htmlCollectionChildren: true });
+  const select = app.byId['cost-auth-model'];
+  const options = select.children;
+
+  assert.equal(Array.isArray(options), false);
+  assert.equal(typeof options.some, 'undefined');
+  assert.equal(typeof options.item, 'function');
+  await app.settle();
+  assert.equal(options.length, 2);
+  assert.equal(options.item(1).value, 'paid/model');
+
+  select.value = 'paid/model';
+  select.dispatch('change');
+  await app.settle();
+
+  assert.equal(select.value, 'paid/model');
+  assert.equal(Array.from(select.children, option => option.value).includes(select.value), true);
 });
 
 test('AI settings show real executor status and save only with operator token', async () => {
