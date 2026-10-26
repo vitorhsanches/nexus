@@ -126,6 +126,28 @@
       return option;
     }));
     select.value = state.session?.session_id || '';
+    const summary = $('native-session-summary');
+    summary.textContent = !state.projectId ? 'Sessões · selecione um projeto'
+      : state.session ? `Sessão · ${state.session.session_id}`
+        : state.sessionsError ? 'Sessões · indisponíveis'
+          : `Sessões · ${state.sessions.length} disponível(is)`;
+    const list = $('native-session-list');
+    if (!state.projectId || !state.sessions.length) {
+      list.replaceChildren(element('p', 'native-note', !state.projectId
+        ? 'Selecione um projeto autorizado para ver as sessões.'
+        : state.sessionsError ? 'Não foi possível carregar as sessões.' : 'Nenhuma sessão ainda. Abra “+ Nova sessão” para criar uma.'));
+    } else {
+      list.replaceChildren(...state.sessions.map(session => {
+        const button = element('button', `native-session-option${session.session_id === state.session?.session_id ? ' is-selected' : ''}`,
+          `${session.session_id} · ${backendLabel(session)} · ${session.status}`);
+        button.type = 'button';
+        button.addEventListener('click', () => {
+          $('native-session-menu').open = false;
+          void selectSession(session.session_id);
+        });
+        return button;
+      }));
+    }
     const note = state.sessionsError ? { text: `Falha ao listar sessões: ${state.sessionsError}`, error: true } : state.sessionNote;
     setNote('native-session-note', note?.text, note?.error);
   };

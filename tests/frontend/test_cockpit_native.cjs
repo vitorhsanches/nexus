@@ -8,6 +8,7 @@ const { TextNode, el } = require('./fake_dom.cjs');
 const root = path.resolve(__dirname, '../..');
 const script = fs.readFileSync(path.join(root, 'nexus/web/static/js/cockpit-native.js'), 'utf8');
 const template = fs.readFileSync(path.join(root, 'nexus/web/templates/cockpit.html'), 'utf8');
+const stylesheet = fs.readFileSync(path.join(root, 'nexus/web/static/css/cockpit.css'), 'utf8');
 const nativeMarkup = template.slice(template.indexOf('<article class="pane native-pane"'), template.indexOf('</article>', template.indexOf('<article class="pane native-pane"')));
 
 const SECRET = 'sk-abcdefghijklmnopqrstuvwxyz123456';
@@ -157,6 +158,30 @@ test('without a project nothing is requested and every action is disabled', asyn
   assert.equal(app.byId['native-create'].disabled, true);
   assert.equal(app.byId['native-send'].disabled, true);
   assert.equal(app.byId['native-prompt'].disabled, true);
+});
+
+test('session choices expand in the pane and a selection closes the list', async () => {
+  const app = harness();
+  await app.settle();
+  assert.match(app.text('native-session-summary'), /selecione um projeto/);
+  assert.match(app.text('native-session-list'), /Selecione um projeto autorizado/);
+  await app.selectProject();
+  assert.equal(app.byId['native-session-list'].children.length, 2);
+  assert.match(app.text('native-session-summary'), /2 disponível/);
+  app.byId['native-session-menu'].open = true;
+  app.byId['native-session-list'].children[0].dispatch('click');
+  await app.settle();
+  assert.equal(app.byId['native-session-menu'].open, false);
+  assert.equal(app.byId['native-session'].value, 'DEV-NATIVE');
+  assert.match(app.text('native-session-summary'), /DEV-NATIVE/);
+});
+
+test('native disclosures are collapsed by default and their contents are not laid out while closed', () => {
+  for (const id of ['native-new', 'native-approvals-section', 'native-changes-section', 'native-review-section', 'native-details']) {
+    assert.match(nativeMarkup, new RegExp(`<details[^>]*id="${id}"[^>]*>`));
+    assert.doesNotMatch(nativeMarkup.match(new RegExp(`<details[^>]*id="${id}"[^>]*>`))[0], /\sopen(?:\s|>)/);
+  }
+  assert.match(stylesheet, /\.native-pane \.native-section:not\(\[open\]\)>:not\(summary\),\.native-pane \.native-session-menu:not\(\[open\]\)>:not\(summary\)\{display:none\}/);
 });
 
 test('selecting a project loads real sessions, gates and the Codex catalog with GET only', async () => {

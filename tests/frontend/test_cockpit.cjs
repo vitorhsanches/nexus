@@ -232,6 +232,9 @@ test('pane dividers still resize both axes and restore the automatic layout', ()
   const horizontal = app.grid.querySelector('.grid-divider.horizontal');
   assert.ok(vertical);
   assert.ok(horizontal);
+  assert.equal(app.grid.querySelector('[data-pane="review"]').classList.contains('wide-row'), true);
+  assert.match(vertical.style.bottom, /px$/);
+  assert.notEqual(vertical.style.bottom, '0px');
   vertical.dispatch('keydown', vertical, { key: 'ArrowRight' });
   horizontal.dispatch('keydown', horizontal, { key: 'ArrowDown' });
   assert.notEqual(app.grid.style.gridTemplateColumns, columns);
@@ -248,6 +251,28 @@ test('pane dividers still resize both axes and restore the automatic layout', ()
   app.byId['restore-layout'].dispatch('click');
   assert.equal(app.grid.style.gridTemplateColumns, columns);
   assert.equal(app.grid.style.gridTemplateRows, rows);
+});
+
+test('two panes can switch to vertical rows, resize their heights, and fit the viewport', () => {
+  const app = harness([], { gridWidth: 700 });
+  assert.equal(app.grid.dataset.columns, '2');
+  assert.equal(app.grid.dataset.rows, '1');
+  assert.equal(app.byId['toggle-layout'].hidden, false);
+  app.byId['toggle-layout'].dispatch('click');
+  assert.equal(app.grid.dataset.columns, '1');
+  assert.equal(app.grid.dataset.rows, '2');
+  const before = app.grid.style.gridTemplateRows;
+  const divider = app.grid.querySelector('.grid-divider.horizontal');
+  assert.ok(divider);
+  divider.dispatch('keydown', divider, { key: 'ArrowDown' });
+  assert.notEqual(app.grid.style.gridTemplateRows, before);
+  app.resize(700, 400);
+  assert.equal(app.grid.dataset.rows, '1');
+  assert.equal(app.byId['toggle-layout'].hidden, true);
+  app.resize(700, 600);
+  assert.equal(app.grid.dataset.rows, '2');
+  app.byId['restore-layout'].dispatch('click');
+  assert.equal(app.grid.dataset.rows, '1');
 });
 
 test('persistent cost authorization captures bounded consent and can be revoked', async () => {

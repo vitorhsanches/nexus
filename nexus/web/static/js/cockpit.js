@@ -20,6 +20,7 @@
   const costAuthCreate = document.getElementById('cost-auth-create');
   const groupControls = document.getElementById('group-controls');
   const savedLayouts = new Map();
+  const preferredColumns = new Map();
   const gap = 6;
   const minimumWidth = 300;
   const minimumHeight = 210;
@@ -133,6 +134,8 @@
       if (divider.dataset.axis === 'columns') {
         const x = layout.columnPixels.slice(0, index + 1).reduce((a, b) => a + b, 0) + gap * index + gap / 2;
         divider.style.left = `${x}px`;
+        divider.style.bottom = layout.visibleCount === 3 && layout.columns === 2 && layout.rows === 2
+          ? `${layout.rowPixels[1] + gap}px` : '0px';
       } else {
         const y = layout.rowPixels.slice(0, index + 1).reduce((a, b) => a + b, 0) + gap * index + gap / 2;
         divider.style.top = `${y}px`;
@@ -212,12 +215,13 @@
   const updateLayout = () => {
     const all = panes();
     if (mobileLayout()) {
-      all.forEach(pane => { pane.hidden = false; });
+      all.forEach(pane => { pane.hidden = false; pane.classList.remove('wide-row'); });
       groupControls.hidden = true;
       grid.style.removeProperty('grid-template-columns');
       grid.style.removeProperty('grid-template-rows');
       grid.dataset.visible = String(all.length);
       document.getElementById('grid-layout-label').textContent = '▦  Empilhado';
+      document.getElementById('toggle-layout').hidden = true;
       layout = null;
       clearDividers();
       return;
@@ -230,8 +234,15 @@
     const visible = all.slice(groupIndex * groupCapacity, (groupIndex + 1) * groupCapacity);
     const visibleSet = new Set(visible);
     all.forEach(pane => { pane.hidden = !visibleSet.has(pane); });
-    const columns = visible.length === 4 && maxRows === 2 && maxColumns >= 2 ? 2 : Math.min(maxColumns, visible.length);
+    const firstColumnCount = Math.ceil(visible.length / maxRows);
+    const lastColumnCount = Math.min(maxColumns, visible.length);
+    const columnOptions = Array.from({ length: lastColumnCount - firstColumnCount + 1 }, (_, index) => firstColumnCount + index);
+    const preferenceKey = `${groupIndex}:${visible.length}`;
+    const automaticColumns = visible.length >= 3 && maxRows === 2 ? firstColumnCount : lastColumnCount;
+    const columns = columnOptions.includes(preferredColumns.get(preferenceKey))
+      ? preferredColumns.get(preferenceKey) : automaticColumns;
     const rows = Math.ceil(visible.length / columns);
+    all.forEach(pane => pane.classList.toggle('wide-row', visible.length === 3 && columns === 2 && pane === visible[2]));
     grid.dataset.visible = String(visible.length);
     grid.dataset.columns = String(columns);
     grid.dataset.rows = String(rows);
@@ -240,6 +251,7 @@
     document.getElementById('previous-group').disabled = groupIndex === 0;
     document.getElementById('next-group').disabled = groupIndex === groupCount - 1;
     document.getElementById('grid-layout-label').textContent = `▦  Grade ${columns} × ${rows}`;
+    document.getElementById('toggle-layout').hidden = columnOptions.length < 2 || grid.classList.contains('has-maximized');
     if (grid.classList.contains('has-maximized')) {
       grid.style.gridTemplateColumns = 'minmax(0, 1fr)';
       grid.style.gridTemplateRows = 'minmax(0, 1fr)';
@@ -252,7 +264,7 @@
     const columnFractions = stored?.columns || Array(columns).fill(1 / columns);
     const rowFractions = stored?.rows || Array(rows).fill(1 / rows);
     layout = {
-      key, columns, rows,
+      key, columns, rows, visibleCount: visible.length, columnOptions, preferenceKey,
       columnPixels: fitTracks(columnFractions, grid.clientWidth - gap * (columns - 1), minimumWidth),
       rowPixels: fitTracks(rowFractions, grid.clientHeight - gap * (rows - 1), minimumHeight)
     };
@@ -439,9 +451,17 @@
   });
   document.getElementById('restore-layout').addEventListener('click', () => {
     savedLayouts.clear();
+    preferredColumns.clear();
     updateLayout();
     syncStreams();
     notify('Layout automático restaurado');
+  });
+  document.getElementById('toggle-layout').addEventListener('click', () => {
+    if (!layout || layout.columnOptions.length < 2) return;
+    const index = layout.columnOptions.indexOf(layout.columns);
+    preferredColumns.set(layout.preferenceKey, layout.columnOptions[(index + 1) % layout.columnOptions.length]);
+    updateLayout();
+    syncStreams();
   });
   let resizeFrame = 0;
   const scheduleLayout = () => {

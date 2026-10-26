@@ -338,3 +338,29 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 @media(max-width:1110px){.topbar{flex-wrap:wrap;padding-top:6px;padding-bottom:6px}.topbar-summary{order:3;flex:1 0 100%;justify-content:flex-start;gap:14px}}
 @media(max-width:650px){.topbar{gap:5px 8px}.topbar-project{max-width:72px}.topbar-summary{gap:8px;justify-content:space-between}.topbar-summary .overview-stat{display:flex;align-items:baseline;gap:3px}.topbar-summary .overview-stat strong{font-size:10px}.topbar-summary .overview-stat span{font-size:8px}.topbar-right{gap:5px}.topbar-maestro{padding:3px 5px}.section-heading{margin-top:10px}}
 @media(max-width:420px){.topbar-summary .overview-stat{display:block}.topbar-summary .overview-stat span{display:block;font-size:7px}.topbar-summary{align-items:start}}
+
+/* Native pane: an uncluttered transcript with configuration expanded in place. */
+.native-pane .native-body{gap:6px;padding-bottom:12px;background:var(--terminal)}
+.native-pane .pane-header{background:var(--surface)}
+.native-pane .native-body .terminal-kicker{border-bottom:1px solid var(--border-soft);color:var(--text-muted)}
+.native-pane .native-body .terminal-kicker>span:first-child{color:var(--accent)}
+.native-pane .native-section,.native-pane .native-session-menu{display:block;min-width:0;border:0;border-top:1px solid var(--border-soft);border-radius:0;background:transparent;padding:5px 0}
+.native-pane .native-session-menu{border-top:0;border-bottom:1px solid var(--border-soft)}
+.native-pane .native-section>summary,.native-pane .native-session-menu>summary{display:flex;align-items:center;gap:6px;min-height:24px;list-style:none;cursor:pointer;color:var(--text-muted);font:10px 'Cascadia Code',Consolas,monospace}
+.native-pane .native-section>summary::-webkit-details-marker,.native-pane .native-session-menu>summary::-webkit-details-marker{display:none}
+.native-pane .native-section>summary::before,.native-pane .native-session-menu>summary::before{content:'▸';color:var(--accent);font-size:11px}
+.native-pane .native-section[open]>summary::before,.native-pane .native-session-menu[open]>summary::before{content:'▾'}
+.native-pane .native-section:not([open])>:not(summary),.native-pane .native-session-menu:not([open])>:not(summary){display:none}
+.native-pane .native-section[open]>summary,.native-pane .native-session-menu[open]>summary{margin-bottom:6px;color:var(--text)}
+.native-pane .native-section>label{display:block;margin:7px 0 4px}
+.native-pane .native-section>.cockpit-model-select{display:block}
+.native-pane .native-section>.cockpit-send{margin-top:7px}
+.native-pane .native-section>.native-note{margin-top:5px}
+.native-session-list{display:grid;gap:2px}
+.native-session-option{display:block;width:100%;padding:6px 8px;border:0;border-left:2px solid transparent;background:transparent;color:var(--text-muted);text-align:left;font:10px/1.4 'Cascadia Code',Consolas,monospace;overflow-wrap:anywhere}
+.native-session-option:hover,.native-session-option:focus-visible,.native-session-option.is-selected{background:var(--surface-raised);border-left-color:var(--accent);color:var(--text)}
+.native-pane .native-details .pane-meta{display:flex;height:auto;min-height:0;padding:4px 0;flex-wrap:wrap;gap:5px 12px;border:0;background:transparent}
+.native-pane .native-details .pane-meta span{font-size:8px}
+.native-pane .cockpit-conversation{min-height:64px}
+.native-pane .cockpit-composer{border-top:1px solid var(--border-soft);padding-top:8px}
+.pane-grid .pane.wide-row{grid-column:1/-1}
