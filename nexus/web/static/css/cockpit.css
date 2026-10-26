@@ -390,3 +390,51 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .native-settings:not([open])>:not(summary){display:none}
 .native-settings[open]{padding-bottom:6px}
 @media(max-width:650px){.pane-grid .native-pane{height:min(72dvh,640px);min-height:min(360px,72dvh)}.native-pane .native-entry .cockpit-send{padding:5px 7px}}
+
+/* Compact terminal panes: a narrow title bar and an uninterrupted output area. */
+.pane-grid .pane-header{height:34px;min-height:34px;padding:0 8px;background:var(--bg)}
+.pane-grid .pane-identity{gap:6px}
+.pane-grid .pane-icon{width:19px;height:19px;font-size:10px;border-radius:2px}
+.pane-grid .pane-identity strong{font:700 10px 'Cascadia Code',Consolas,monospace}
+.pane-grid .pane-identity div>span{display:none}
+.pane-grid .pane-status{padding:3px 5px;font-size:8px;background:transparent;border:1px solid var(--border-soft)}
+.pane-grid .pane-tools{gap:2px}
+.pane-grid .pane-tool{width:19px;height:21px;color:var(--text-muted);font-size:15px}
+.pane-grid .pane-meta{height:21px;min-height:21px;padding:0 8px;background:var(--bg);gap:10px}
+.pane-grid .pane-meta span{font-size:8px}
+.pane-grid .pane-footer{height:23px;min-height:23px;padding:0 8px;background:var(--bg);font-size:8px}
+.pane-grid .pane-body{background:var(--terminal)}
+
+/* The live Codex pane reads as a transcript, with its prompt and controls docked below. */
+.native-pane .native-console{display:flex;flex-direction:column;padding:0 11px 8px}
+.native-runtime{display:flex;align-items:flex-start;gap:9px;flex:none;padding:11px 0 8px;min-width:0}
+.native-runtime-mark{display:grid;place-items:center;flex:none;width:32px;height:28px;color:var(--accent);background:var(--accent-tint);font:700 11px 'Cascadia Code',Consolas,monospace}
+.native-runtime-copy{display:grid;gap:2px;min-width:0;color:var(--text-muted);font:9px/1.4 'Cascadia Code',Consolas,monospace}
+.native-runtime-copy strong{color:var(--text);font-size:10px}
+.native-runtime-copy strong span{margin-left:4px;color:var(--text-dim);font-size:8px;font-weight:400}
+.native-runtime-copy>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.native-pane .native-console>.native-note{flex:none;margin:0 0 6px}
+.native-pane .native-console>.native-note:empty{display:none}
+.native-pane .native-console .cockpit-conversation{display:grid;align-content:end;gap:10px;margin-top:auto;padding:0 0 5px;min-height:0}
+.native-pane .cockpit-conversation .cockpit-event{color:var(--text-muted);border:0}
+.native-pane .cockpit-message{padding:0;border:0;background:transparent;font:10px/1.5 'Cascadia Code',Consolas,monospace}
+.native-pane .cockpit-message>strong{display:block;color:var(--text-dim);font-size:8px;font-weight:500}
+.native-pane .cockpit-message>p{margin:3px 0 7px;padding:3px 6px;background:var(--surface-raised);border-left:2px solid var(--accent);color:var(--text)}
+.native-pane .cockpit-response{margin:0;padding:0;border:0}
+.native-pane .cockpit-response strong{color:var(--text-muted);font-size:9px}
+.native-pane .cockpit-response p{margin:3px 0 0;color:var(--text)}
+.native-pane .cockpit-live{flex:none;margin:4px 0 6px;background:transparent;border-left-color:var(--accent-border)}
+.native-pane .native-composer{max-height:38%;padding:5px 10px 6px;border-top:1px solid var(--border-soft);background:var(--terminal)}
+.native-pane .native-entry{align-items:center;gap:5px}
+.native-pane .native-entry .cockpit-input{min-height:28px;max-height:96px;padding:5px 6px;border:0;border-bottom:1px solid var(--border-strong);border-radius:0;background:transparent}
+.native-pane .native-entry .cockpit-input:focus{outline:0;border-color:var(--accent)}
+.native-pane .native-entry .cockpit-send{min-height:27px;padding:3px 6px;border-color:var(--border-soft);background:transparent}
+.native-pane .native-entry-prompt{font-size:15px}
+.native-pane .native-settings{max-height:45%;padding:0 10px;background:var(--bg)}
+.native-pane .native-settings>summary{min-height:24px;font-size:8px}
+.native-pane .native-settings.has-approvals>summary{color:var(--warning)}
+.native-pane .native-settings.has-approvals>summary::before{color:var(--warning)}
+.native-pane .native-settings .native-section,.native-pane .native-settings .native-session-menu{padding:5px 0}
+.native-pane .pane-footer{white-space:nowrap}
+.native-pane .pane-footer span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:650px){.pane-grid .pane-header{height:36px;min-height:36px}.native-pane .native-runtime{padding-top:9px}.native-pane .native-settings>summary span{max-width:45%}}

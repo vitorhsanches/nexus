@@ -183,6 +183,7 @@
     const list = $('native-approvals');
     const pending = pendingApprovals();
     $('native-approval-count').textContent = String(pending.length);
+    $('native-settings').classList.toggle('has-approvals', pending.length > 0);
     const shown = [...pending, ...state.approvals.filter(item => item.status !== 'PENDING').slice(0, 5)];
     list.replaceChildren(...(shown.length ? shown.map(approval => {
       const summary = approval.summary || {};
@@ -268,6 +269,9 @@
     $('native-meta-session').textContent = state.session?.session_id || '—';
     $('native-meta-backend').textContent = state.session ? (isNative(state.session) ? BACKEND : 'omniroute · legado') : BACKEND;
     $('native-foot').textContent = state.session?.branch || 'sem worktree ativo';
+    $('native-runtime-model').textContent = state.session?.requested_model || 'Selecione uma sessão';
+    $('native-runtime-worktree').textContent = state.session?.branch
+      ? `worktree · ${state.session.branch}` : 'Worktree isolado · sem projeto';
     $('native-settings-status').textContent = state.session
       ? `${state.session.session_id} · ${selectedModel() || state.session.requested_model || 'modelo pendente'}` : 'sem sessão';
   };
@@ -317,7 +321,11 @@
       state.approvals = data.approvals || [];
       const fresh = pendingApprovals().filter(item => !state.seenApprovals.has(item.approval_id));
       fresh.forEach(item => state.seenApprovals.add(item.approval_id));
-      if (fresh.length) host.notify('Codex Native aguarda sua aprovação');
+      if (fresh.length) {
+        $('native-settings').open = true;
+        $('native-approvals-section').open = true;
+        host.notify('Codex Native aguarda sua aprovação');
+      }
       if (state.approvalPollFailed) { state.approvalPollFailed = false; setNote('native-approval-note', ''); }
     } catch (error) {
       if (stale(generation)) return;

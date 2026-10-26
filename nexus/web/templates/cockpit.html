@@ -94,35 +94,13 @@
         </article>
 
         <article class="pane native-pane" id="native-pane" data-pane="native" tabindex="0" aria-label="Pane Codex Native">
-          <div class="pane-header"><div class="pane-identity"><span class="pane-icon agent-icon">CX</span><div><strong>Codex Native</strong><span>DESENVOLVIMENTO</span></div></div><div class="pane-tools"><span class="pane-status idle" id="native-status"><i></i><span class="native-status-label">Sem projeto</span></span><button class="pane-tool minimize" type="button" aria-label="Minimizar Codex Native" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Codex Native" title="Expandir">⤢</button></div></div>
+          <div class="pane-header"><div class="pane-identity"><span class="pane-icon agent-icon">CX</span><div><strong>Codex Native</strong><span>AGENTE</span></div></div><div class="pane-tools"><span class="pane-status idle" id="native-status"><i></i><span class="native-status-label">Sem projeto</span></span><button class="pane-tool minimize" type="button" aria-label="Minimizar Codex Native" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Codex Native" title="Expandir">⤢</button></div></div>
           <div class="pane-body terminal-body native-body">
             <div class="native-console">
-            <div class="terminal-kicker"><span>●</span> CODEX NATIVE / WORKTREE ISOLADO <span class="right" id="native-connection">OFFLINE</span></div>
+            <div class="native-runtime"><span class="native-runtime-mark" aria-hidden="true">CX</span><div class="native-runtime-copy"><strong>Codex Native <span id="native-connection">OFFLINE</span></strong><span id="native-runtime-model">Selecione uma sessão</span><span id="native-runtime-worktree">Worktree isolado · sem projeto</span></div></div>
             <p class="native-note" id="native-gate" role="status">Selecione um projeto autorizado.</p>
             <div class="cockpit-conversation" id="native-log" aria-live="polite"></div>
             <div class="cockpit-live" id="native-live" hidden></div>
-            <details class="native-section" id="native-approvals-section">
-              <summary>Aprovações humanas <b id="native-approval-count">0</b></summary>
-              <div id="native-approvals"></div>
-              <p class="native-note" id="native-approval-note" role="status"></p>
-            </details>
-            <details class="native-section" id="native-changes-section">
-              <summary>Arquivos alterados e diff</summary>
-              <button class="cockpit-send" id="native-refresh" type="button" disabled>Atualizar</button>
-              <div class="native-files" id="native-files"></div>
-              <p class="native-note" id="native-diff-meta"></p>
-              <pre class="cockpit-mission-diff" id="native-diff" hidden></pre>
-            </details>
-            <details class="native-section" id="native-review-section">
-              <summary>Revisão</summary>
-              <p class="native-note">Registra um snapshot do que um humano aprovaria. O cockpit não aplica nem rejeita alterações.</p>
-              <div class="native-actions"><button class="cockpit-send" id="native-review-create" type="button" disabled>Registrar revisão</button><button class="cockpit-send" id="native-review-preflight" type="button" disabled>Verificar preflight</button></div>
-              <p class="native-note" id="native-review" role="status"></p>
-              <p class="native-note" id="native-preflight" role="status"></p>
-              <p class="native-note" id="native-review-note" role="status"></p>
-              <div id="native-history"></div>
-              <a class="native-link" id="native-open-dev" href="/nexus#development">Abrir a interface Development para aplicar ou rejeitar →</a>
-            </details>
             </div>
             <form class="cockpit-composer native-composer" id="native-composer">
               <div class="native-entry"><span class="native-entry-prompt" aria-hidden="true">›</span><textarea class="cockpit-input" id="native-prompt" rows="2" maxlength="100000" placeholder="Escreva uma tarefa…" aria-label="Tarefa para o Codex Native" disabled></textarea><button class="cockpit-send" id="native-send" type="submit" disabled>Enviar ↵</button><button class="cockpit-send" id="native-stop" type="button" hidden>Parar</button></div>
@@ -130,7 +108,29 @@
               <p class="cockpit-compose-error" id="native-error" role="status"></p>
             </form>
             <details class="native-settings" id="native-settings">
-              <summary>⚙ Sessão e modelo <span id="native-settings-status">sem sessão</span></summary>
+              <summary>⚙ Controles do agente <span id="native-settings-status">sem sessão</span></summary>
+              <details class="native-section" id="native-approvals-section">
+                <summary>Aprovações humanas <b id="native-approval-count">0</b></summary>
+                <div id="native-approvals"></div>
+                <p class="native-note" id="native-approval-note" role="status"></p>
+              </details>
+              <details class="native-section" id="native-changes-section">
+                <summary>Arquivos alterados e diff</summary>
+                <button class="cockpit-send" id="native-refresh" type="button" disabled>Atualizar</button>
+                <div class="native-files" id="native-files"></div>
+                <p class="native-note" id="native-diff-meta"></p>
+                <pre class="cockpit-mission-diff" id="native-diff" hidden></pre>
+              </details>
+              <details class="native-section" id="native-review-section">
+                <summary>Revisão</summary>
+                <p class="native-note">Registra um snapshot do que um humano aprovaria. O cockpit não aplica nem rejeita alterações.</p>
+                <div class="native-actions"><button class="cockpit-send" id="native-review-create" type="button" disabled>Registrar revisão</button><button class="cockpit-send" id="native-review-preflight" type="button" disabled>Verificar preflight</button></div>
+                <p class="native-note" id="native-review" role="status"></p>
+                <p class="native-note" id="native-preflight" role="status"></p>
+                <p class="native-note" id="native-review-note" role="status"></p>
+                <div id="native-history"></div>
+                <a class="native-link" id="native-open-dev" href="/nexus#development">Abrir a interface Development para aplicar ou rejeitar →</a>
+              </details>
               <details class="native-session-menu" id="native-session-menu">
                 <summary id="native-session-summary">Sessões · selecione um projeto</summary>
                 <select id="native-session" aria-label="Sessão Codex Native" hidden></select>
