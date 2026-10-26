@@ -214,6 +214,42 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
   return { byId, grid, box, calls, settle, refresh, sources, tick, resize, context };
 }
 
+test('compact cockpit header keeps project counts and actions above the grid', () => {
+  const header = template.match(/<header class="topbar">([\s\S]*?)<\/header>/)?.[1];
+  assert.ok(header);
+  for (const id of ['breadcrumb-title', 'workspace-id', 'execution-count', 'data-status', 'focus-maestro']) {
+    assert.match(header, new RegExp(`id="${id}"`));
+  }
+  assert.equal((header.match(/class="overview-stat"/g) || []).length, 3);
+  assert.doesNotMatch(template, /<section class="mission-bar"|<section class="overview"/);
+});
+
+test('pane dividers still resize both axes and restore the automatic layout', () => {
+  const app = harness([], { gridWidth: 700, withNative: true });
+  const columns = app.grid.style.gridTemplateColumns;
+  const rows = app.grid.style.gridTemplateRows;
+  const vertical = app.grid.querySelector('.grid-divider.vertical');
+  const horizontal = app.grid.querySelector('.grid-divider.horizontal');
+  assert.ok(vertical);
+  assert.ok(horizontal);
+  vertical.dispatch('keydown', vertical, { key: 'ArrowRight' });
+  horizontal.dispatch('keydown', horizontal, { key: 'ArrowDown' });
+  assert.notEqual(app.grid.style.gridTemplateColumns, columns);
+  assert.notEqual(app.grid.style.gridTemplateRows, rows);
+  const keyboardColumns = app.grid.style.gridTemplateColumns;
+  vertical.setPointerCapture = () => {};
+  vertical.removeEventListener = (name, callback) => {
+    vertical.listeners[name] = (vertical.listeners[name] || []).filter(listener => listener !== callback);
+  };
+  vertical.dispatch('pointerdown', vertical, { pointerId: 1, clientX: 0 });
+  vertical.dispatch('pointermove', vertical, { pointerId: 1, clientX: 24 });
+  vertical.dispatch('pointerup', vertical, { pointerId: 1, clientX: 24 });
+  assert.notEqual(app.grid.style.gridTemplateColumns, keyboardColumns);
+  app.byId['restore-layout'].dispatch('click');
+  assert.equal(app.grid.style.gridTemplateColumns, columns);
+  assert.equal(app.grid.style.gridTemplateRows, rows);
+});
+
 test('persistent cost authorization captures bounded consent and can be revoked', async () => {
   const app = harness([]);
   await app.settle();

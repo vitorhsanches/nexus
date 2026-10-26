@@ -31,16 +31,10 @@
 
     <main class="workspace" id="workspace">
       <header class="topbar">
-        <div class="topbar-left"><button class="icon-button mobile-menu" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button><div class="breadcrumb"><span>WORKSPACE</span><span class="crumb-separator">/</span><strong id="breadcrumb-title">Cockpit</strong></div></div>
-        <div class="topbar-right"><span class="local-chip"><span></span>LOCAL · NEXUS</span><button class="top-icon" id="settings-ai-button" type="button" aria-label="Abrir configurações de IA" title="Configurações de IA">⚙</button><button class="top-icon" type="button" aria-label="Ajuda sobre o cockpit" title="Mensagens usam o motor Nexus; nenhum terminal shell conectado">?</button><span class="top-avatar">N</span></div>
+        <div class="topbar-left"><button class="icon-button mobile-menu" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button><div class="breadcrumb"><span>WORKSPACE</span><span class="crumb-separator">/</span><strong id="breadcrumb-title">Cockpit</strong></div><span class="topbar-project" id="workspace-id">—</span></div>
+        <div class="topbar-summary" aria-label="Resumo do projeto"><span class="overview-stat"><strong>02</strong><span>panes na grade</span></span><span class="overview-stat"><strong>00</strong><span>agentes registrados</span></span><span class="overview-stat"><strong id="execution-count">00</strong><span>missões registradas</span></span></div>
+        <div class="topbar-right"><span class="topbar-data-status" id="data-status" role="status">Conectando ao Nexus…</span><button class="topbar-maestro" id="focus-maestro" type="button">Maestro ↗</button><button class="top-icon" id="settings-ai-button" type="button" aria-label="Abrir configurações de IA" title="Configurações de IA">⚙</button><button class="top-icon" type="button" aria-label="Ajuda sobre o cockpit" title="Mensagens usam o motor Nexus; nenhum terminal shell conectado">?</button><span class="top-avatar">N</span></div>
       </header>
-
-      <section class="mission-bar" aria-labelledby="mission-title">
-        <div class="mission-heading"><div class="eyebrow"><span class="eyebrow-line"></span> WORKSPACE <span class="eyebrow-id" id="workspace-id">—</span></div><h1 id="mission-title">Cockpit <span class="heading-muted">/ visão geral</span></h1><p id="mission-description">Acompanhamento de agentes, missões e coordenação do projeto selecionado.</p></div>
-        <div class="mission-actions"><span class="status-pill"><span></span> Conversa Nexus</span><button class="outline-button" id="focus-maestro" type="button">Abrir Maestro <span>↗</span></button></div>
-      </section>
-
-      <section class="overview" aria-label="Resumo do projeto"><div class="overview-intro"><span class="overview-icon">▦</span><span>VISÃO DO PROJETO</span></div><div class="overview-stat"><strong>02</strong><span>panes na grade</span></div><div class="overview-stat"><strong>00</strong><span>agentes registrados</span></div><div class="overview-stat"><strong id="execution-count">00</strong><span>missões registradas</span></div><div class="overview-divider"></div><span class="overview-disclaimer" id="data-status">Conectando ao Nexus…</span></section>
 
       <section class="ai-settings" id="settings-ai" aria-labelledby="ai-settings-title" hidden>
         <div class="model-catalog-heading"><div><span class="section-kicker">CONFIGURAÇÕES → IA</span><h2 id="ai-settings-title">Ferramentas e funções</h2></div><button class="model-catalog-refresh" id="ai-settings-refresh" type="button">Atualizar status</button></div>
