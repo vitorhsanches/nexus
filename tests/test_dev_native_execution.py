@@ -284,7 +284,7 @@ def test_an_unanswered_request_expires_as_a_decline(isolated_registry):
     assert NativeFake.responses == [(7, {"decision": "decline"})]
     expired = approvals.list_for_session(session_id)[0]
     assert expired["status"] == "EXPIRED"
-    assert "no human decision" in expired["status_detail"]
+    assert "a human decision" in expired["status_detail"]
     assert _wait_until(lambda: _turn_status(turn_id) == "COMPLETED")
 
 
