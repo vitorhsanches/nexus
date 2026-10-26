@@ -21,6 +21,25 @@ body[data-view="dev"] #control-panel { display: none !important; }
 
 body[data-view="dev"] #ws-dev { display: flex; }
 
+/* Development contains several review panels and a composer in one column.
+   Keep the application shell clipped, but make this column the scroll owner;
+   otherwise the content after Autonomous mission is laid out below the
+   viewport and hidden by the shared chat shell. */
+body[data-view="dev"] #dev-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body[data-view="dev"] #dev-layout > .chat-conversation {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-bottom: 18px;
+}
+
 body[data-view="dev"] .topbar-chip:nth-child(-n+2) { display: none; }
 
 .dev-gate-banner {

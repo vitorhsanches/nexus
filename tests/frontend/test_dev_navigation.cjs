@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const root = path.resolve(__dirname, "../..");
 const devSource = fs.readFileSync(path.join(root, "nexus/web/static/js/dev.js"), "utf8");
 const nexusTemplateSource = fs.readFileSync(path.join(root, "nexus/web/templates/nexus.html"), "utf8");
+const devStylesheetSource = fs.readFileSync(path.join(root, "nexus/web/static/css/dev.css"), "utf8");
 
 class Element {
   constructor(id) {
@@ -233,6 +234,16 @@ test("nav entry and ws-dev section exist in the template", () => {
   assert.match(nexusTemplateSource, /id="nav-dev"[^>]*data-target="dev-view"/);
   assert.match(nexusTemplateSource, /id="ws-dev"/);
   assert.match(nexusTemplateSource, /id="dev-mission-start"/);
+});
+
+test("Development review remains reachable through its own scroll owner", () => {
+  assert.match(devStylesheetSource, /body\[data-view="dev"\] #dev-layout\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s);
+  assert.match(devStylesheetSource, /body\[data-view="dev"\] #dev-layout > \.chat-conversation\s*\{[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s);
+  assert.match(nexusTemplateSource, /id="dev-mission-panel"|class="dev-mission-panel"/);
+  assert.match(nexusTemplateSource, /id="dev-create-review"/);
+  assert.match(nexusTemplateSource, /id="dev-integration-preflight"/);
+  assert.match(nexusTemplateSource, /id="dev-reject-review"/);
+  assert.match(nexusTemplateSource, /id="dev-apply-review"/);
 });
 
 test("autonomous mission posts bounded model and trusted profile then stops for review", async () => {
