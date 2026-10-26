@@ -28,7 +28,6 @@
     modelOptions: [], defaultModel: null, testProfiles: [],
     selectedModel: null, selectedEffort: null,
     newSessionBackend: "codex_native", modelsBackend: null, approvals: [],
-    approvalsSessionId: null, approvalsStatus: "unknown", approvalsError: null,
     executionEnabled: false, executionStatusChecked: false,
     review: null, selectedReviewPath: null, reviewLoading: false,
     integrationEnabled: false, integrationReview: null, integrationPreflight: null, integrationBusy: false,
@@ -372,11 +371,6 @@
 
   function chooseProject(projectId) {
     state.session = null;
-    state.approvals = [];
-    state.approvalsSessionId = null;
-    state.approvalsStatus = "unknown";
-    state.approvalsError = null;
-    renderApprovals();
     renderMission(null);
     resetTurnView();
     var createButton = $("dev-create-session");
@@ -410,11 +404,6 @@
   function selectSession(sessionId) {
     renderMission(null);
     if (!state.session || state.session.session_id !== sessionId) {
-      state.approvals = [];
-      state.approvalsSessionId = sessionId;
-      state.approvalsStatus = "loading";
-      state.approvalsError = null;
-      renderApprovals();
       state.review = null; state.selectedReviewPath = null;
       var summary = $("dev-review-summary"); if (summary) summary.textContent = "Loading read-only diff review…";
       var reviewFiles = $("dev-review-files"), reviewPatch = $("dev-review-patch");
@@ -957,87 +946,47 @@
   function loadApprovals() {
     if (!state.session) return Promise.resolve();
     var sessionId = state.session.session_id;
-    state.approvalsSessionId = sessionId;
-    state.approvalsStatus = "loading";
-    state.approvalsError = null;
-    renderApprovals();
     return request("/dev/sessions/" + encodeURIComponent(sessionId) + "/approvals").then(function (payload) {
-      if (state.approvalsSessionId !== sessionId || !state.session || state.session.session_id !== sessionId) return;
+      if (!state.session || state.session.session_id !== sessionId) return;
       state.approvals = (payload && payload.approvals) || [];
-      state.approvalsStatus = "loaded";
-      state.approvalsError = null;
       renderApprovals();
-    }).catch(function (error) {
-      if (state.approvalsSessionId !== sessionId || !state.session || state.session.session_id !== sessionId) return;
-      state.approvalsStatus = "error";
-      state.approvalsError = error && error.message ? error.message : "Unknown error";
-      renderApprovals();
-    });
+    }).catch(function () {});
   }
 
   function renderApprovals() {
     var list = $("dev-approvals");
     if (!list) return;
     list.replaceChildren();
-    if (state.approvalsStatus === "unknown" && !state.approvals.length) {
-      var unknown = document.createElement("li"); unknown.textContent = "Select a Development session to view approval requests.";
-      list.appendChild(unknown);
-      return;
-    }
-    if (state.approvalsStatus === "loading" && !state.approvals.length) {
-      var loading = document.createElement("li"); loading.textContent = "Loading approval requests…";
-      list.appendChild(loading);
-      return;
-    }
-    if (state.approvalsStatus === "error" && !state.approvals.length) {
-      appendApprovalLoadError(list, "Could not load approval requests: " + state.approvalsError);
-      return;
-    }
     var shown = state.approvals.filter(function (item) { return item.status === "PENDING"; })
       .concat(state.approvals.filter(function (item) { return item.status !== "PENDING"; }).slice(0, 5));
     if (!shown.length) {
-      var empty = document.createElement("li"); empty.textContent = state.approvalsStatus === "loaded" ? "No approval requests." : "Approval requests are not currently available.";
+      var empty = document.createElement("li"); empty.textContent = "No approval requests.";
       list.appendChild(empty);
-    } else {
-      shown.forEach(function (approval) {
-        var row = document.createElement("li");
-        row.className = "dev-approval dev-approval-" + String(approval.status || "").toLowerCase();
-        var summary = approval.summary || {};
-        var text = document.createElement("span");
-        text.textContent = redacted(
-          (approval.kind === "file_change" ? "File change" : "Command") + " · " + approval.status +
-          (summary.command ? " · " + summary.command : "") +
-          (summary.grantRoot ? " · write access to " + summary.grantRoot : "") +
-          (summary.reason ? " · reason: " + summary.reason : "")
-        );
-        row.appendChild(text);
-        if (approval.status === "PENDING") {
-          [["accept", "Approve once"], ["decline", "Decline"]].forEach(function (pair) {
-            var button = document.createElement("button");
-            button.type = "button"; button.className = "chat-secondary-button";
-            button.textContent = pair[1];
-            button.addEventListener("click", function () { decideApproval(approval.approval_id, pair[0]); });
-            row.appendChild(button);
-          });
-        }
-        list.appendChild(row);
-      });
+      return;
     }
-    if (state.approvalsStatus === "error") {
-      appendApprovalLoadError(list, "Could not refresh approval requests; previously loaded requests are shown: " + state.approvalsError);
-    }
-  }
-
-  function appendApprovalLoadError(list, message) {
-    var row = document.createElement("li");
-    row.className = "dev-approval-load-error";
-    var text = document.createElement("span"); text.textContent = redacted(message);
-    row.appendChild(text);
-    var retry = document.createElement("button");
-    retry.type = "button"; retry.className = "chat-secondary-button"; retry.textContent = "Retry approvals";
-    retry.addEventListener("click", function () { loadApprovals(); });
-    row.appendChild(retry);
-    list.appendChild(row);
+    shown.forEach(function (approval) {
+      var row = document.createElement("li");
+      row.className = "dev-approval dev-approval-" + String(approval.status || "").toLowerCase();
+      var summary = approval.summary || {};
+      var text = document.createElement("span");
+      text.textContent = redacted(
+        (approval.kind === "file_change" ? "File change" : "Command") + " · " + approval.status +
+        (summary.command ? " · " + summary.command : "") +
+        (summary.grantRoot ? " · write access to " + summary.grantRoot : "") +
+        (summary.reason ? " · reason: " + summary.reason : "")
+      );
+      row.appendChild(text);
+      if (approval.status === "PENDING") {
+        [["accept", "Approve once"], ["decline", "Decline"]].forEach(function (pair) {
+          var button = document.createElement("button");
+          button.type = "button"; button.className = "chat-secondary-button";
+          button.textContent = pair[1];
+          button.addEventListener("click", function () { decideApproval(approval.approval_id, pair[0]); });
+          row.appendChild(button);
+        });
+      }
+      list.appendChild(row);
+    });
   }
 
   function decideApproval(approvalId, decision) {
