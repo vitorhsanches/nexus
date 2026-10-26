@@ -13,9 +13,11 @@ the Nexus Development cockpit.
 ## What one smoke covers
 
 1. **Gates and project.** The fixture project is registered, enabled and
-   Development-authorized, points at this fixture, and the source repository is
+   Development-authorized, points at this fixture, has no previous Development
+   session (including failed or closed sessions), and the source repository is
    clean. The server-side execution gate must already be on (the harness reads
-   it, never sets it); the integration gate is only reported.
+   it, never sets it); the integration gate is only reported. The requested
+   model must appear in a non-empty live catalog.
 2. **Session and worktree.** One session is created with the chosen backend; a
    session on any other backend is refused before a turn starts. The worktree
    must be outside the source fixture.
@@ -41,38 +43,56 @@ the Nexus Development cockpit.
 7. **Source untouched.** No integration was applied, and the source repository's
    HEAD, branch, working tree and `calc.py` are byte-for-byte what they were.
 
-## Manual smoke after the native candidate is integrated
+## Prepare one fresh smoke
 
-Prerequisites: the integrated candidate (Codex Native Development with approvals
-and the review/apply routes, plus the native-first launcher), `codex login`
-done, and no real project used as the fixture.
+Use a dedicated Nexus checkout, server port and persistent database for this
+smoke. Keep the existing port 18742 and its data untouched. `codex login` must
+already be available to that server's Windows user. The fixture and evidence
+paths must be new, persistent paths; never point either at an earlier smoke.
 
 ```powershell
-# 1. Disposable fixture (refuses to overwrite an existing path)
-$fixture = Join-Path $env:TEMP "nexus-dev-e2e-$(Get-Date -Format yyyyMMdd-HHmmss)"
-python scripts/run_dev_e2e.py --prepare $fixture
+# 1. From this candidate checkout, prepare a new fixture and recovery log.
+$smokeRoot = Join-Path (Split-Path (Get-Location) -Parent) 'p4-mvp-e2e-smokes'
+New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+$smokeId = [guid]::NewGuid().ToString('N')
+$fixture = Join-Path $smokeRoot "fixture-$smokeId"
+$evidence = Join-Path $smokeRoot "evidence-$smokeId.jsonl"
+python scripts/run_dev_e2e.py --prepare $fixture --evidence $evidence
 
-# 2. Start Nexus without OmniRoute; Development execution on, integration gate off
-.\scripts\start-nexus.ps1 -EnableDevelopment
+# 2. Add the printed unique project ID and absolute fixture path as a new,
+#    enabled entry in config/projects.local.json of this dedicated checkout.
+#    Preserve all existing entries. Example entry:
+#    {"id":"<printed project_id>","name":"Disposable E2E","path":"<printed fixture>","enabled":true}
+#    Registration is explicit; the harness never changes the registry.
 
-# 3. In the Projects UI: register $fixture (e.g. id "dev-e2e-fixture") and enable Development Mode for it
+# 3. Explicitly authorize only the printed project ID in this checkout.
+python -m nexus.dev.operator authorize <printed-project-id>
 
-# 4. Read-only readiness report: no session, no turn, no inference
-python scripts/run_dev_e2e.py --check --project-id dev-e2e-fixture --fixture $fixture
+# 4. Start the dedicated server without OmniRoute, with Development execution
+#    on and integration off. Choose a free port other than 18742.
+.\scripts\start-nexus.ps1 -EnableDevelopment -NexusPort <dedicated-port> -NoBrowser
 
-# 5. The real smoke. Starts ONE real Codex turn with your local login (cost applies)
-python scripts/run_dev_e2e.py --project-id dev-e2e-fixture --fixture $fixture --confirm-agent-call
+# 5. Read-only catalog and preflight. Use an ID actually returned by this server.
+Invoke-RestMethod 'http://127.0.0.1:<dedicated-port>/api/dev/models?backend=codex_native&refresh=true' | Select-Object -ExpandProperty models
+python scripts/run_dev_e2e.py --check --base-url http://127.0.0.1:<dedicated-port> --project-id <printed-project-id> --fixture $fixture --evidence $evidence --model <announced-model-id>
+
+# 6. After separate human authorization, run exactly one real turn.
+python scripts/run_dev_e2e.py --base-url http://127.0.0.1:<dedicated-port> --project-id <printed-project-id> --fixture $fixture --evidence $evidence --model <announced-model-id> --confirm-agent-call
 ```
 
-While step 5 runs, open the Development cockpit and approve or decline each
+While step 6 runs, open the Development cockpit and approve or decline each
 pending request yourself. Success prints a JSON report ending in
 `"integration_applied": false` and `"source_unchanged": true`. Then inspect the
 diff and, if you want to continue, run review -> preflight -> Apply by hand
 (that needs `NEXUS_DEV_INTEGRATION_ENABLED=1`, which the harness never sets).
 
-On a timeout or an uncertain response, inspect that same session and turn in
-Nexus before doing anything else; do not blindly rerun the command. The runner
-never retries a turn.
+The append-only JSONL evidence file records `session_created` and `turn_started`
+with their IDs as soon as each response arrives. On a timeout or an uncertain
+response, inspect that same session and turn in Nexus before doing anything
+else; never rerun against this fixture. Both `--check` and the real smoke refuse
+any fixture with an earlier Development session. The runner never retries a
+turn. A session response lost before its ID reaches the runner is still visible
+through the server's project-scoped session list.
 
 Useful options: `--backend omniroute`, `--model <id>` (must be offered by the
 selected backend), `--prompt`, `--turn-timeout`.

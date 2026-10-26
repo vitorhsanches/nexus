@@ -13,19 +13,20 @@ import argparse
 import hashlib
 import http.client
 import json
+import os
+import secrets
 import shutil
 import socket
-import os
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Protocol
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
-
+from typing import Protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "dev_e2e_project"
@@ -136,7 +137,8 @@ class DevelopmentSmokeBackend(Protocol):
     applies/rejects an integration: the harness has no method for either.
     """
 
-    def select_project(self, project_id: str) -> dict: ...
+    def projects(self) -> list[dict]: ...
+    def sessions(self) -> list[dict]: ...
     def execution_status(self) -> dict: ...
     def integration_status(self) -> dict: ...
     def models(self) -> dict: ...
@@ -160,9 +162,17 @@ class CurrentOmniRouteDevBackend:
     def __init__(self, api: NexusApi):
         self.api = api
 
-    def select_project(self, project_id: str) -> dict:
-        projects = self.api.request("GET", "/api/projects").get("projects", [])
-        return next((row for row in projects if row.get("id") == project_id), None)
+    def projects(self) -> list[dict]:
+        payload = self.api.request("GET", "/api/projects")
+        if not isinstance(payload, dict) or not isinstance(payload.get("projects"), list):
+            raise RuntimeError("Nexus did not return a valid project list.")
+        return payload["projects"]
+
+    def sessions(self) -> list[dict]:
+        payload = self.api.request("GET", "/api/dev/sessions")
+        if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), list):
+            raise RuntimeError("Nexus did not return a valid Development session list; fixture reuse cannot be ruled out.")
+        return payload["sessions"]
 
     def execution_status(self) -> dict:
         return self.api.request("GET", "/api/dev/execution-status")
@@ -171,7 +181,7 @@ class CurrentOmniRouteDevBackend:
         return self.api.request("GET", "/api/dev/integration-status")
 
     def models(self) -> dict:
-        return self.api.request("GET", "/api/dev/models")
+        return self.api.request("GET", "/api/dev/models?refresh=true")
 
     def create_session(self, project_id: str, model: str | None) -> dict:
         return self.api.request("POST", "/api/dev/sessions", {"project_id": project_id, "requested_model": model})
@@ -215,7 +225,7 @@ class CodexNativeDevBackend(CurrentOmniRouteDevBackend):
     backend_id = "codex_native"
 
     def models(self) -> dict:
-        return self.api.request("GET", "/api/dev/models?backend=codex_native")
+        return self.api.request("GET", "/api/dev/models?backend=codex_native&refresh=true")
 
     def create_session(self, project_id: str, model: str | None) -> dict:
         return self.api.request("POST", "/api/dev/sessions",
@@ -321,7 +331,8 @@ def _backend_for(args) -> DevelopmentSmokeBackend:
 
 
 def _require_fixture_project(backend: DevelopmentSmokeBackend, args) -> Path:
-    project = backend.select_project(args.project_id)
+    projects = backend.projects()
+    project = next((row for row in projects if row.get("id") == args.project_id), None)
     if project is None:
         raise RuntimeError(f"Fixture project {args.project_id!r} is not registered in Nexus.")
     if not project.get("enabled") or not project.get("dev_enabled"):
@@ -330,6 +341,9 @@ def _require_fixture_project(backend: DevelopmentSmokeBackend, args) -> Path:
     registered_path = Path(project.get("path", "")).resolve()
     if fixture_path != registered_path:
         raise RuntimeError(f"Selected project does not point to this disposable fixture: {registered_path}")
+    aliases = {row.get("id") for row in projects if row.get("path") and Path(row["path"]).resolve() == fixture_path}
+    if any(row.get("project_id") in aliases for row in backend.sessions()):
+        raise RuntimeError("This fixture already has a Development session. Prepare and authorize a new disposable fixture; existing sessions are preserved.")
     return fixture_path
 
 
@@ -353,9 +367,16 @@ def check_ready(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
     state = _source_state(fixture_path)
     if state["status"]:
         raise RuntimeError("Fixture source repository must be clean before the smoke; preserve its local changes first.")
+    require_prepared_evidence(args, fixture_path)
     catalog = backend.models() or {}
     model_ids = [row.get("id") for row in catalog.get("models", []) if isinstance(row, dict) and row.get("id")]
-    if args.model and model_ids and args.model not in model_ids:
+    if catalog.get("catalog_error"):
+        raise RuntimeError(f"Model catalog is unavailable: {catalog['catalog_error']}")
+    if not model_ids:
+        raise RuntimeError("Model catalog is empty; refusing to create a session or turn.")
+    if not args.model:
+        raise RuntimeError("--model is required so the requested model can be confirmed in the live catalog.")
+    if args.model not in model_ids:
         raise RuntimeError(f"Model {args.model!r} is not offered by this Nexus backend.")
     return {
         "backend": getattr(args, "backend", "codex_native"),
@@ -364,8 +385,61 @@ def check_ready(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
         "model_count": len(model_ids),
         "catalog_error": catalog.get("catalog_error"),
         "source_clean": True,
-        "ready_for_confirmed_smoke": not catalog.get("catalog_error"),
+        "model": args.model,
+        "ready_for_confirmed_smoke": True,
     }
+
+
+def append_evidence(path: Path, event: str, **fields) -> None:
+    """Append and flush each recovery milestone; never rewrite earlier evidence."""
+    record = {"at": datetime.now(timezone.utc).isoformat(), "event": event, **fields}
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def prepare_smoke(destination: Path, evidence: Path) -> dict:
+    """Create a fresh fixture and append-only recovery file without touching Nexus."""
+    destination, evidence = destination.resolve(), evidence.resolve()
+    if destination.exists() or evidence.exists():
+        raise FileExistsError("Fixture and evidence paths must both be new; existing smoke data is preserved.")
+    if not evidence.parent.is_dir():
+        raise FileNotFoundError(f"Evidence directory does not exist: {evidence.parent}")
+    project_id = f"dev-e2e-{secrets.token_hex(6)}"
+    fixture = prepare_fixture(destination)
+    state = _source_state(fixture)
+    record = {"at": datetime.now(timezone.utc).isoformat(), "event": "prepared", "project_id": project_id,
+              "fixture": str(fixture), "fixture_head": state["head"]}
+    with evidence.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return {"project_id": project_id, "fixture": str(fixture), "evidence": str(evidence),
+            "fixture_head": state["head"],
+            "project_entry": {"id": project_id, "name": f"Disposable E2E {project_id}",
+                              "path": str(fixture), "enabled": True},
+            "authorization": f"python -m nexus.dev.operator authorize {project_id}"}
+
+
+def require_prepared_evidence(args, fixture_path: Path) -> Path:
+    if not getattr(args, "evidence", None):
+        raise RuntimeError("--evidence is required for a real smoke so session and turn IDs remain recoverable.")
+    path = Path(args.evidence).resolve()
+    if not path.is_file():
+        raise RuntimeError(f"Prepared evidence file is missing: {path}")
+    try:
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        first = records[0]
+    except (IndexError, ValueError) as error:
+        raise RuntimeError("Prepared evidence file is invalid.") from error
+    if first.get("event") != "prepared" or first.get("project_id") != args.project_id or first.get("fixture") != str(fixture_path):
+        raise RuntimeError("Evidence does not match this fixture and project ID.")
+    if first.get("fixture_head") != _git(fixture_path, "rev-parse", "HEAD").strip():
+        raise RuntimeError("Fixture HEAD differs from its prepared evidence; prepare a new disposable fixture.")
+    if len(records) != 1:
+        raise RuntimeError("Evidence already records a session or other activity for this fixture; prepare a new disposable fixture.")
+    return path
 
 
 def _note_approvals(backend: DevelopmentSmokeBackend, session_id: str, timeout: float, seen: dict) -> None:
@@ -389,14 +463,18 @@ def run_smoke(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
         raise RuntimeError("Live smoke can invoke a real agent. Re-run with --confirm-agent-call after confirming cost and execution.")
     backend = backend or _backend_for(args)
     expected_backend = getattr(backend, "backend_id", getattr(args, "backend", "omniroute"))
-    fixture_path = _require_fixture_project(backend, args)
-    gates = _require_execution_gate(backend)
+    readiness = check_ready(args, backend)
+    fixture_path = Path(args.fixture).resolve()
+    evidence = require_prepared_evidence(args, fixture_path)
+    gates = readiness["gates"]
     source_before = _source_state(fixture_path)
     if source_before["status"]:
         raise RuntimeError("Fixture source repository must be clean before the smoke; preserve its local changes first.")
 
     session = backend.create_session(args.project_id, args.model)
     session_id = session["session_id"]
+    append_evidence(evidence, "session_created", session_id=session_id, backend=session.get("backend"),
+                    worktree_path=session.get("worktree_path"), base_sha=session.get("base_sha"))
     if session.get("backend", "omniroute") != expected_backend:
         raise RuntimeError(f"Nexus created a {session.get('backend')!r} session, expected {expected_backend!r}; "
                            "refusing to run on a different backend.")
@@ -406,6 +484,7 @@ def run_smoke(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
 
     turn = backend.start_turn(session_id, args.prompt, args.model)
     turn_id = turn["turn_id"]
+    append_evidence(evidence, "turn_started", session_id=session_id, turn_id=turn_id)
     deadline = time.monotonic() + args.turn_timeout
     observed_events: list[dict] = []
     approvals_seen: dict[str, dict] = {}
@@ -476,7 +555,7 @@ def run_smoke(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
     if source_after != source_before:
         raise RuntimeError("Source fixture repository changed during the run; inspect it before continuing.")
     worktree_branch = _git(worktree, "branch", "--show-current").strip()
-    return {
+    result = {
         "backend": expected_backend,
         "project_id": args.project_id,
         "session_id": session_id,
@@ -499,17 +578,21 @@ def run_smoke(args, backend: DevelopmentSmokeBackend | None = None) -> dict:
         "human_review": "Not approved by runner; inspect the diff in the Nexus Development cockpit.",
         "integration_applied": False,
     }
+    append_evidence(evidence, "smoke_completed", session_id=session_id, turn_id=turn_id,
+                    turn_status=last_status, integration_applied=False)
+    return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prepare", type=Path, help="Create a disposable Git fixture at a new path; existing paths are refused.")
+    parser.add_argument("--prepare", type=Path, help="Create a fresh disposable Git fixture at a new path.")
+    parser.add_argument("--evidence", type=Path, help="Persistent append-only JSONL recovery file; required for preparation and a real smoke.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--backend", choices=sorted(BACKENDS), default="codex_native",
                         help="Development backend for the session (default: codex_native, no OmniRoute).")
     parser.add_argument("--project-id", help="Existing Nexus registry ID for the disposable fixture.")
     parser.add_argument("--fixture", type=Path, help="Fixture project path registered in Nexus.")
-    parser.add_argument("--model", help="Optional model ID offered by the selected backend on the running Nexus server.")
+    parser.add_argument("--model", help="Required model ID announced by the selected backend's live catalog.")
     parser.add_argument("--prompt", default="Fix the intentional bug in calc.add. Keep the change small and run the two tests in test_calc.py.")
     parser.add_argument("--check", action="store_true",
                         help="Read-only readiness report (project, gates, catalog, clean source). No session, no inference.")
@@ -523,7 +606,11 @@ def main() -> int:
 
     try:
         if args.prepare:
-            print(prepare_fixture(args.prepare))
+            if not args.evidence:
+                parser.error("--evidence is required with --prepare")
+            if args.project_id:
+                parser.error("--prepare generates a fresh project ID; do not pass --project-id")
+            print(json.dumps(prepare_smoke(args.prepare, args.evidence), indent=2))
             return 0
         if not args.project_id or not args.fixture:
             parser.error("--project-id and --fixture are required unless using --prepare")

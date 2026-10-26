@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
-import subprocess
 import socket
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -105,12 +106,14 @@ class FakeNexusApi(run_dev_e2e.NexusApi):
     """
 
     def __init__(self, source, worktree, base_sha, *, session_backend=None, execution_enabled=True,
-                 review_overrides=None, history=None, on_diff=None, models=None):
+                 review_overrides=None, history=None, on_diff=None, models=None, sessions=None):
         super().__init__("http://nexus.test", timeout=1)
         self.source, self.worktree, self.base_sha = source, worktree, base_sha
         self.session_backend, self.execution_enabled = session_backend, execution_enabled
         self.review_overrides, self.history, self.on_diff = review_overrides or {}, history or [], on_diff
         self.models = models if models is not None else {"backend": "codex_native", "models": [{"id": "gpt-test"}], "catalog_error": None}
+        self.sessions = sessions if sessions is not None else []
+        self.project_rows = [{"id": "fixture", "path": str(self.source), "enabled": 1, "dev_enabled": 1}]
         self.calls: list[tuple[str, str, dict | None]] = []
         self.turn_polls = 0
         self.approval_polls = 0
@@ -119,7 +122,9 @@ class FakeNexusApi(run_dev_e2e.NexusApi):
     def request(self, method, path, payload=None, *, timeout=None):
         self.calls.append((method, path, payload))
         if (method, path) == ("GET", "/api/projects"):
-            return {"projects": [{"id": "fixture", "path": str(self.source), "enabled": 1, "dev_enabled": 1}]}
+            return {"projects": self.project_rows}
+        if (method, path) == ("GET", "/api/dev/sessions"):
+            return {"sessions": self.sessions}
         if (method, path) == ("GET", "/api/dev/execution-status"):
             return {"execution_enabled": self.execution_enabled}
         if (method, path) == ("GET", "/api/dev/integration-status"):
@@ -176,10 +181,15 @@ def _world(tmp_path, **api_options):
 
 
 def _args(source, **overrides):
+    evidence = source.parent / "evidence.jsonl"
+    if not evidence.exists():
+        run_dev_e2e.append_evidence(evidence, "prepared", project_id="fixture", fixture=str(source.resolve()),
+                                    fixture_head=run_dev_e2e._source_state(source)["head"])
     values = {
         "confirm_agent_call": True, "base_url": "http://127.0.0.1:8000", "http_timeout": 1, "project_id": "fixture",
         "fixture": source, "model": "gpt-test", "prompt": "Fix add", "turn_timeout": 5, "poll_interval": 0,
         "test_timeout": 15, "backend": "codex_native",
+        "evidence": evidence,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -194,7 +204,7 @@ def test_native_smoke_covers_session_turn_tests_diff_and_review_without_applying
     result = _run(source, api)
 
     assert result["backend"] == "codex_native"
-    assert api.calls[api.calls.index(("GET", "/api/dev/integration-status", None)) + 1][:2] == ("POST", "/api/dev/sessions")
+    assert api.calls.index(("GET", "/api/dev/models?backend=codex_native&refresh=true", None)) < api.calls.index(("POST", "/api/dev/sessions", {"project_id": "fixture", "requested_model": "gpt-test", "backend": "codex_native"}))
     [(_m, _p, session_payload)] = [call for call in api.calls if call[:2] == ("POST", "/api/dev/sessions")]
     assert session_payload == {"project_id": "fixture", "requested_model": "gpt-test", "backend": "codex_native"}
     assert [call for call in api.calls if call[1].endswith("/turns") and call[0] == "POST"] == [
@@ -292,21 +302,91 @@ def test_check_is_read_only_needs_no_confirmation_and_never_starts_inference(tmp
     report = run_dev_e2e.check_ready(_args(source, confirm_agent_call=False), backend=run_dev_e2e.CodexNativeDevBackend(api))
     assert report == {"backend": "codex_native", "project_id": "fixture",
                       "gates": {"execution_enabled": True, "integration_enabled": False}, "model_count": 1,
-                      "catalog_error": None, "source_clean": True, "ready_for_confirmed_smoke": True}
+                      "catalog_error": None, "source_clean": True, "model": "gpt-test", "ready_for_confirmed_smoke": True}
     assert {call[0] for call in api.calls} == {"GET"}
-    assert ("GET", "/api/dev/models?backend=codex_native", None) in api.calls
+    assert ("GET", "/api/dev/models?backend=codex_native&refresh=true", None) in api.calls
 
 
 def test_check_reports_a_catalog_error_and_rejects_unknown_models_and_disabled_gates(tmp_path):
     source, api = _world(tmp_path, models={"models": [], "catalog_error": "Codex is not signed in"})
-    report = run_dev_e2e.check_ready(_args(source), backend=run_dev_e2e.CodexNativeDevBackend(api))
-    assert report["ready_for_confirmed_smoke"] is False and report["catalog_error"] == "Codex is not signed in"
+    with pytest.raises(RuntimeError, match="catalog is unavailable"):
+        run_dev_e2e.check_ready(_args(source), backend=run_dev_e2e.CodexNativeDevBackend(api))
     source, api = _world(tmp_path / "b")
     with pytest.raises(RuntimeError, match="not offered"):
         run_dev_e2e.check_ready(_args(source, model="other-model"), backend=run_dev_e2e.CodexNativeDevBackend(api))
     source, api = _world(tmp_path / "c", execution_enabled=False)
     with pytest.raises(RuntimeError, match="execution is disabled"):
         run_dev_e2e.check_ready(_args(source), backend=run_dev_e2e.CodexNativeDevBackend(api))
+
+
+def test_check_rejects_empty_catalog_missing_model_and_previous_session(tmp_path):
+    source, api = _world(tmp_path, models={"models": [], "catalog_error": None})
+    backend = run_dev_e2e.CodexNativeDevBackend(api)
+    with pytest.raises(RuntimeError, match="catalog is empty"):
+        run_dev_e2e.check_ready(_args(source), backend=backend)
+    with pytest.raises(RuntimeError, match="catalog is empty"):
+        _run(source, api)
+    assert not [call for call in api.calls if call[0] == "POST"]
+
+    api.models = {"models": [{"id": "gpt-test"}]}
+    with pytest.raises(RuntimeError, match="--model is required"):
+        run_dev_e2e.check_ready(_args(source, model=None), backend=backend)
+
+    api.sessions = [{"session_id": "DEV-OLD", "project_id": "fixture", "status": "FAILED"}]
+    with pytest.raises(RuntimeError, match="already has a Development session"):
+        run_dev_e2e.check_ready(_args(source), backend=backend)
+    with pytest.raises(RuntimeError, match="already has a Development session"):
+        _run(source, api)
+    assert not [call for call in api.calls if call[0] == "POST"]
+
+    api.project_rows.append({"id": "older-project", "path": str(source), "enabled": 0, "dev_enabled": 0})
+    api.sessions = [{"session_id": "DEV-OLD", "project_id": "older-project", "status": "CLOSED"}]
+    with pytest.raises(RuntimeError, match="already has a Development session"):
+        run_dev_e2e.check_ready(_args(source), backend=backend)
+
+
+def test_prepare_creates_unique_fixture_and_recovery_record_without_overwrite(tmp_path):
+    prepared = run_dev_e2e.prepare_smoke(tmp_path / "fixture", tmp_path / "evidence.jsonl")
+    assert prepared["project_id"].startswith("dev-e2e-")
+    assert prepared["project_entry"]["id"] == prepared["project_id"]
+    assert prepared["project_entry"]["path"] == prepared["fixture"]
+    assert prepared["fixture_head"] == run_dev_e2e._source_state(Path(prepared["fixture"]))["head"]
+    rows = [json.loads(line) for line in Path(prepared["evidence"]).read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["event"] == "prepared"
+    with pytest.raises(FileExistsError):
+        run_dev_e2e.prepare_smoke(tmp_path / "fixture", tmp_path / "evidence.jsonl")
+    assert [json.loads(line) for line in Path(prepared["evidence"]).read_text(encoding="utf-8").splitlines()] == rows
+
+
+def test_check_rejects_fixture_head_changed_after_preparation(tmp_path):
+    source, api = _world(tmp_path)
+    args = _args(source)
+    (source / "calc.py").write_text("def add(left, right):\n    return left + right\n", encoding="utf-8")
+    subprocess.run(["git", "add", "calc.py"], cwd=source, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "Later fixture change"], cwd=source, check=True, capture_output=True)
+    with pytest.raises(RuntimeError, match="HEAD differs"):
+        run_dev_e2e.check_ready(args, backend=run_dev_e2e.CodexNativeDevBackend(api))
+
+
+def test_session_and_turn_ids_are_persisted_before_later_smoke_failure(tmp_path):
+    source, api = _world(tmp_path)
+    api.session_backend = "omniroute"
+    with pytest.raises(RuntimeError, match="different backend"):
+        _run(source, api)
+    evidence = source.parent / "evidence.jsonl"
+    records = [json.loads(line) for line in evidence.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "session_created" and records[-1]["session_id"] == "DEV-1"
+    with pytest.raises(RuntimeError, match="already records a session"):
+        _run(source, api)
+    assert not [call for call in api.calls if call[0] == "POST" and call[1].endswith("/turns")]
+
+
+def test_successful_smoke_records_both_ids_and_completion(tmp_path):
+    source, api = _world(tmp_path)
+    _run(source, api)
+    records = [json.loads(line) for line in (source.parent / "evidence.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["event"] for row in records] == ["prepared", "session_created", "turn_started", "smoke_completed"]
+    assert records[2]["session_id"] == "DEV-1" and records[2]["turn_id"] == "TURN-1"
 
 
 def test_cli_defaults_to_codex_native_and_real_turns_need_explicit_confirmation(monkeypatch, capsys):
