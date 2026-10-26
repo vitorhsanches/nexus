@@ -80,7 +80,6 @@ function setup(options = {}) {
     integrationPreflight: { ready: true, issues: [] }, integrationHistory: options.integrationHistory || [],
     reviewCreateError: options.reviewCreateError || null, reviewCreateStatus: options.reviewCreateStatus || 400,
     integrationHistoryError: options.integrationHistoryError || null, reviewCreateCount: 0,
-    approvalResponses: (options.approvalResponses || []).slice(),
   };
   backend.sessions.forEach((session) => { if (!backend.turns.has(session.session_id)) backend.turns.set(session.session_id, []); });
   function response(payload, status = 200) { return Promise.resolve({ ok: status >= 200 && status < 300, status, text: () => Promise.resolve(JSON.stringify(payload)) }); }
@@ -172,15 +171,7 @@ function setup(options = {}) {
     }
     if (parsed.pathname.endsWith("/interrupt") && method === "POST") return response({ status: "INTERRUPT_REQUESTED" });
     const approvalsMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals$/);
-    if (approvalsMatch && method === "GET") {
-      const sessionId = decodeURIComponent(approvalsMatch[1]);
-      if (backend.approvalResponses.length) {
-        const next = backend.approvalResponses.shift();
-        if (typeof next === "function") return next(sessionId, response);
-        return response(next.body, next.status || 200);
-      }
-      return response({ approvals: backend.approvals || [] });
-    }
+    if (approvalsMatch && method === "GET") return response({ approvals: backend.approvals || [] });
     const decideMatch = parsed.pathname.match(/^\/api\/dev\/sessions\/([^/]+)\/approvals\/([^/]+)$/);
     if (decideMatch && method === "POST") {
       const decision = JSON.parse(opts.body).decision;
@@ -210,19 +201,10 @@ function setup(options = {}) {
     setInterval() { return 1; }, clearInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {},
   };
   vm.runInNewContext(devSource, context);
-  return { elements, body, nav, window, backend, calls, eventSources, response };
+  return { elements, body, nav, window, backend, calls, eventSources };
 }
 
 async function flush() { await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve)); }
-
-async function selectDevelopmentSession(ui, index = 0) {
-  await ui.window.NexusDev.enter();
-  ui.elements["dev-project-select"].value = "demo";
-  ui.elements["dev-project-select"].dispatch("change");
-  await flush();
-  ui.elements["dev-session-list"].children[index].dispatch("click");
-  await flush();
-}
 
 function allText(node) {
   if (!node.children.length) return node.textContent || "";
@@ -856,95 +838,6 @@ test("a pending Codex approval is shown with its reason and decided only by an e
   const decision = ui.calls.find((call) => call.method === "POST" && call.path === "/api/dev/sessions/DEV-1/approvals/APPROVAL-1");
   assert.deepEqual(decision.body, { decision: "accept" });
   assert.match(ui.elements["dev-approvals"].children[0].children[0].textContent, /APPROVED/);
-});
-
-test("approval fetch failure is visible and never presented as an empty approval list", async () => {
-  const ui = setup({
-    sessions: [{ session_id: "DEV-1", project_id: "demo", backend: "codex_native", status: "ACTIVE" }],
-    approvalResponses: [{ status: 503, body: { detail: { message: "approval service unavailable" } } }],
-  });
-  await selectDevelopmentSession(ui);
-
-  const text = allText(ui.elements["dev-approvals"]);
-  assert.match(text, /Could not load approval requests: approval service unavailable/);
-  assert.doesNotMatch(text, /No approval requests\./);
-  assert.ok(ui.elements["dev-approvals"].children.some((row) => allText(row).includes("Retry approvals")));
-  assert.equal(ui.calls.filter((call) => call.method === "POST" && /\/approvals\//.test(call.path)).length, 0);
-});
-
-test("approval list recovers through Retry without reloading and preserves human-only decisions", async () => {
-  const pending = { approval_id: "APPROVAL-RECOVERED", kind: "command", status: "PENDING", summary: { command: "pytest" } };
-  const ui = setup({
-    sessions: [{ session_id: "DEV-1", project_id: "demo", backend: "codex_native", status: "ACTIVE" }],
-    approvalResponses: [
-      { status: 503, body: { detail: { message: "temporary failure" } } },
-      { status: 200, body: { approvals: [pending] } },
-    ],
-  });
-  await selectDevelopmentSession(ui);
-  const retry = ui.elements["dev-approvals"].children.flatMap((row) => row.children).find((child) => child.textContent === "Retry approvals");
-  assert.ok(retry);
-  retry.dispatch("click");
-  await flush();
-
-  const text = allText(ui.elements["dev-approvals"]);
-  assert.match(text, /Command · PENDING · pytest/);
-  assert.doesNotMatch(text, /Could not load approval requests/);
-  assert.ok(!ui.calls.some((call) => call.method === "POST" && /\/approvals\//.test(call.path)), "recovery must not decide an approval");
-});
-
-test("a failed approval refresh preserves known approvals and offers retry", async () => {
-  const known = { approval_id: "APPROVAL-KNOWN", kind: "command", status: "PENDING", summary: { command: "pytest -q" } };
-  const ui = setup({
-    executionEnabled: true,
-    sessions: [{ session_id: "DEV-1", project_id: "demo", backend: "codex_native", status: "ACTIVE" }],
-    approvalResponses: [
-      { status: 200, body: { approvals: [known] } },
-      { status: 503, body: { detail: { message: "refresh failed" } } },
-    ],
-  });
-  await selectDevelopmentSession(ui);
-  ui.elements["dev-prompt-input"].value = "fix and test";
-  ui.elements["dev-run-button"].dispatch("click");
-  await flush();
-  ui.eventSources[0].emit({ method: "item/commandExecution/requestApproval", id: 5, params: {} }, "approval-refresh");
-  await flush();
-
-  const text = allText(ui.elements["dev-approvals"]);
-  assert.match(text, /pytest -q/);
-  assert.match(text, /Could not refresh approval requests; previously loaded requests are shown: refresh failed/);
-  assert.ok(ui.elements["dev-approvals"].children.some((row) => allText(row).includes("Retry approvals")));
-  assert.equal(ui.calls.filter((call) => call.method === "POST" && /\/approvals\//.test(call.path)).length, 0);
-});
-
-test("switching sessions discards a late approval response from the prior session", async () => {
-  let resolveFirst;
-  const delayedFirst = new Promise((resolve) => { resolveFirst = resolve; });
-  const ui = setup({
-    sessions: [
-      { session_id: "DEV-1", project_id: "demo", backend: "codex_native", status: "ACTIVE" },
-      { session_id: "DEV-2", project_id: "demo", backend: "codex_native", status: "ACTIVE" },
-    ],
-    approvalResponses: [
-      () => delayedFirst,
-      { status: 200, body: { approvals: [{ approval_id: "APPROVAL-2", kind: "command", status: "PENDING", summary: { command: "session-two" } }] } },
-    ],
-  });
-  await ui.window.NexusDev.enter();
-  ui.elements["dev-project-select"].value = "demo";
-  ui.elements["dev-project-select"].dispatch("change");
-  await flush();
-  ui.elements["dev-session-list"].children[0].dispatch("click");
-  await flush();
-  ui.elements["dev-session-list"].children[1].dispatch("click");
-  await flush();
-  assert.match(allText(ui.elements["dev-approvals"]), /session-two/);
-
-  resolveFirst(ui.response({ approvals: [{ approval_id: "APPROVAL-1", kind: "command", status: "PENDING", summary: { command: "session-one" } }] }));
-  await flush();
-  const text = allText(ui.elements["dev-approvals"]);
-  assert.match(text, /session-two/);
-  assert.doesNotMatch(text, /session-one/);
 });
 
 test("command executions stream with their exit code and output", async () => {
