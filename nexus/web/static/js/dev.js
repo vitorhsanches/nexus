@@ -954,6 +954,31 @@
 
   // -- Human approvals (P4.0B) ------------------------------------------------
 
+  function approvalStatusDetail(approval) {
+    if (approval && approval.status_detail) return approval.status_detail;
+    var details = {
+      PENDING: "Waiting for an explicit human decision.",
+      APPROVED: "Approved once by a human; no standing permission was granted.",
+      DECLINED: "Declined by a human; the action was not executed.",
+      EXPIRED: "Expired before a human decision; the action was denied and no requested action was executed.",
+      CANCELLED: "Cancelled because the turn ended before a decision; no requested action was executed.",
+    };
+    return details[approval && approval.status] || "No additional status detail is available.";
+  }
+
+  function approvalDecisionError(error) {
+    if (error && error.code === "APPROVAL_EXPIRED") {
+      return "Approval expired before a human decision; the action was denied and no requested action was executed.";
+    }
+    if (error && error.code === "APPROVAL_CANCELLED") {
+      return "Approval was cancelled because the turn ended; no requested action was executed.";
+    }
+    if (error && error.code === "APPROVAL_ALREADY_DECIDED") {
+      return "This approval already has a recorded decision; refresh to reconcile its current status.";
+    }
+    return error && error.message ? error.message : "Unknown approval error";
+  }
+
   function loadApprovals() {
     if (!state.session) return Promise.resolve();
     var sessionId = state.session.session_id;
@@ -1008,7 +1033,8 @@
           (approval.kind === "file_change" ? "File change" : "Command") + " · " + approval.status +
           (summary.command ? " · " + summary.command : "") +
           (summary.grantRoot ? " · write access to " + summary.grantRoot : "") +
-          (summary.reason ? " · reason: " + summary.reason : "")
+          (summary.reason ? " · reason: " + summary.reason : "") +
+          " · " + approvalStatusDetail(approval)
         );
         row.appendChild(text);
         if (approval.status === "PENDING") {
@@ -1048,7 +1074,7 @@
       logActivityEvent((decision === "accept" ? "Approved" : "Declined") + " " + approvalId);
       return loadApprovals();
     }).catch(function (error) {
-      showStatus("Could not record the decision: " + error.message, "error");
+      showStatus("Could not record the decision: " + approvalDecisionError(error), "error");
       loadApprovals();
     });
   }
