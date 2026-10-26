@@ -686,4 +686,9 @@
   gateActions();
   loadOverview();
   setInterval(loadOverview, 6000);
+  // Deep link used by the cockpit: /nexus#development opens the Development view.
+  if (window.location && window.location.hash === "#development") {
+    var developmentNav = document.getElementById("nav-dev");
+    if (developmentNav) developmentNav.click();
+  }
 })();
