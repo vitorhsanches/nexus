@@ -87,7 +87,7 @@
     else if (state.gateError) text = `Estado do servidor indisponível: ${state.gateError}. Envio bloqueado.`;
     else if (state.gate === null) text = 'Verificando o estado do servidor…';
     else if (!state.gate) text = 'Execução Development desativada neste servidor (inicie o Nexus com -EnableDevelopment). Você pode criar sessões e revisar, mas não enviar tarefas.';
-    else text = `Execução habilitada · integração ${state.integrationGate ? 'habilitada (aplicar só na interface Development)' : 'desativada'}.`;
+    else text = '';
     setNote('native-gate', text, Boolean(state.gateError) || state.gate === false);
   };
   const renderModels = () => {
@@ -243,10 +243,9 @@
     const active = Boolean(state.activeTurnId);
     $('native-create').disabled = !state.projectId || !selectedModel() || state.busy.has('create');
     const canSend = Boolean(native && session.status === 'ACTIVE' && state.gate === true && !active && selectedModel() &&
-      $('native-prompt').value.trim() && $('native-confirm').checked && !state.busy.has('send'));
+      $('native-prompt').value.trim() && !state.busy.has('send'));
     $('native-send').disabled = !canSend;
     $('native-prompt').disabled = !native || session?.status !== 'ACTIVE';
-    $('native-confirm').disabled = !native || session?.status !== 'ACTIVE';
     $('native-stop').hidden = !active;
     $('native-stop').disabled = state.busy.has('stop');
     const files = state.diff?.files || [];
@@ -269,6 +268,8 @@
     $('native-meta-session').textContent = state.session?.session_id || '—';
     $('native-meta-backend').textContent = state.session ? (isNative(state.session) ? BACKEND : 'omniroute · legado') : BACKEND;
     $('native-foot').textContent = state.session?.branch || 'sem worktree ativo';
+    $('native-settings-status').textContent = state.session
+      ? `${state.session.session_id} · ${selectedModel() || state.session.requested_model || 'modelo pendente'}` : 'sem sessão';
   };
   const render = () => {
     renderGate(); renderModels(); renderSessions(); renderLog(); renderLive(); renderApprovals(); renderChanges(); renderReview(); renderControls(); renderChrome();
@@ -445,6 +446,7 @@
       const session = await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}`);
       if (stale(generation)) return;
       state.session = session;
+      if (state.models.some(model => model.id === session.requested_model)) $('native-model').value = session.requested_model;
       const latest = await loadTurns(generation);
       if (stale(generation)) return;
       if (turnIsActive(latest) && isNative(session)) watchTurn(generation, latest.turn_id);
@@ -508,7 +510,7 @@
     const session = state.session;
     const prompt = $('native-prompt').value.trim();
     if (!session || !isNative(session) || session.status !== 'ACTIVE' || state.gate !== true || state.activeTurnId ||
-        !prompt || !$('native-confirm').checked || !selectedModel() || state.busy.has('send')) return;
+        !prompt || !selectedModel() || state.busy.has('send')) return;
     const generation = state.generation;
     const body = { prompt, model: selectedModel(), ...($('native-effort').value ? { effort: $('native-effort').value } : {}) };
     state.busy.add('send'); setNote('native-error', ''); renderControls();
@@ -516,7 +518,6 @@
       const turn = await api(sessionPath('/turns'), { method: 'POST', body });
       if (stale(generation)) return;
       if ($('native-prompt').value.trim() === prompt) $('native-prompt').value = '';
-      $('native-confirm').checked = false;
       state.turns = [...state.turns, turn];
       state.live = { status: 'RUNNING', text: '' };
       watchTurn(generation, turn.turn_id);
@@ -595,7 +596,11 @@
   $('native-create').addEventListener('click', () => { void createSession(); });
   $('native-composer').addEventListener('submit', event => { event.preventDefault(); void sendTask(); });
   $('native-prompt').addEventListener('input', renderControls);
-  $('native-confirm').addEventListener('change', renderControls);
+  $('native-prompt').addEventListener('keydown', event => {
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    $('native-composer').requestSubmit();
+  });
   $('native-stop').addEventListener('click', () => { void stopTask(); });
   $('native-refresh').addEventListener('click', () => { void loadChanges(state.generation); void loadApprovals(state.generation); });
   $('native-review-create').addEventListener('click', () => { void createReview(); });

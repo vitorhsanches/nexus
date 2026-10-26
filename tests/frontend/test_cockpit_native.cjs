@@ -138,9 +138,8 @@ function harness(overrides = {}) {
       await settle();
     },
     async chooseModel(id = 'gpt-x') { byId['native-model'].value = id; byId['native-model'].dispatch('change'); await settle(); },
-    async compose(prompt, confirmed = true) {
+    async compose(prompt) {
       byId['native-prompt'].value = prompt; byId['native-prompt'].dispatch('input');
-      byId['native-confirm'].checked = confirmed; byId['native-confirm'].dispatch('change');
       await settle();
     },
     text: id => byId[id].textContent,
@@ -184,6 +183,16 @@ test('native disclosures are collapsed by default and their contents are not lai
   assert.match(stylesheet, /\.native-pane \.native-section:not\(\[open\]\)>:not\(summary\),\.native-pane \.native-session-menu:not\(\[open\]\)>:not\(summary\)\{display:none\}/);
 });
 
+test('the native transcript scrolls above a persistent task entry and bottom settings', () => {
+  const consoleAt = nativeMarkup.indexOf('class="native-console"');
+  const composerAt = nativeMarkup.indexOf('id="native-composer"');
+  const settingsAt = nativeMarkup.indexOf('id="native-settings"');
+  assert.ok(consoleAt >= 0 && consoleAt < composerAt && composerAt < settingsAt);
+  assert.doesNotMatch(nativeMarkup, /id="native-confirm"/);
+  assert.match(stylesheet, /\.native-console\{[^}]*overflow-y:auto/);
+  assert.match(stylesheet, /\.native-pane \.native-body\{display:flex;flex-direction:column/);
+});
+
 test('selecting a project loads real sessions, gates and the Codex catalog with GET only', async () => {
   const app = harness();
   await app.selectProject();
@@ -195,7 +204,7 @@ test('selecting a project loads real sessions, gates and the Codex catalog with 
   const labels = [...app.byId['native-session'].children].map(option => option.textContent);
   assert.ok(labels.some(label => label.includes('DEV-NATIVE') && label.includes('Codex Native')));
   assert.ok(labels.some(label => label.includes('DEV-LEGACY') && label.includes('OmniRoute (legado)')));
-  assert.match(app.text('native-gate'), /Execução habilitada/);
+  assert.equal(app.text('native-gate'), '', 'healthy execution status stays out of the transcript');
   assert.match(app.text('native-model-note'), /1 modelo/);
 });
 
@@ -230,14 +239,14 @@ test('a failed session creation shows the error, selects nothing and is not retr
   assert.equal(app.byId['native-create'].disabled, false);
 });
 
-test('sending needs an active Codex Native session, an enabled gate, a model, a task and explicit confirmation', async () => {
+test('sending needs an active Codex Native session, an enabled gate, a model and a task', async () => {
   const app = harness();
   await app.selectProject();
   await app.selectSession('DEV-NATIVE');
-  await app.chooseModel();
-  await app.compose('corrija o bug', false);
-  assert.equal(app.byId['native-send'].disabled, true, 'unconfirmed task');
-  await app.compose('corrija o bug', true);
+  assert.equal(app.byId['native-model'].value, 'gpt-x', 'the session reuses its selected model');
+  await app.compose('');
+  assert.equal(app.byId['native-send'].disabled, true, 'empty task');
+  await app.compose('corrija o bug');
   assert.equal(app.byId['native-send'].disabled, false);
   app.byId['native-effort'].value = 'high';
   app.byId['native-composer'].dispatch('submit');
@@ -245,11 +254,25 @@ test('sending needs an active Codex Native session, an enabled gate, a model, a 
   assert.deepEqual(app.posts.map(call => [call.url, call.body]), [
     ['/api/dev/sessions/DEV-NATIVE/turns', { prompt: 'corrija o bug', model: 'gpt-x', effort: 'high' }]]);
   assert.equal(app.byId['native-prompt'].value, '', 'the draft is cleared after the turn was accepted');
-  assert.equal(app.byId['native-confirm'].checked, false, 'consent never carries over to the next task');
   assert.equal(app.byId['native-send'].disabled, true);
   assert.equal(app.sources.length, 1);
   assert.match(app.sources[0].url, /^\/api\/dev\/sessions\/DEV-NATIVE\/events\?turn_id=TURN-1$/);
   assert.match(app.text('native-status'), /Executando/);
+});
+
+test('Enter sends once while Shift+Enter keeps the multiline draft', async () => {
+  const app = harness();
+  await app.selectProject();
+  await app.selectSession('DEV-NATIVE');
+  await app.chooseModel();
+  await app.compose('primeira tarefa');
+  app.byId['native-prompt'].dispatch('keydown', app.byId['native-prompt'], { key: 'Enter', shiftKey: true });
+  await app.settle();
+  assert.equal(app.posts.length, 0);
+  assert.equal(app.byId['native-prompt'].value, 'primeira tarefa');
+  app.byId['native-prompt'].dispatch('keydown', app.byId['native-prompt'], { key: 'Enter' });
+  await app.settle();
+  assert.equal(app.posts.length, 1);
 });
 
 test('a disabled execution gate blocks sending and says how to enable it', async () => {
@@ -539,7 +562,6 @@ test('a legacy OmniRoute session is labelled and read-only: no sending, no revie
   assert.match(app.text('native-meta-backend'), /omniroute · legado/);
   assert.match(app.text('native-compose-note'), /OmniRoute legada: somente leitura/);
   assert.equal(app.byId['native-prompt'].disabled, true);
-  assert.equal(app.byId['native-confirm'].disabled, true);
   assert.equal(app.byId['native-send'].disabled, true);
   assert.equal(app.byId['native-review-create'].disabled, true);
   assert.match(app.text('native-files'), /M x\.py/, 'its files remain viewable');
