@@ -675,7 +675,9 @@ def initialize_database() -> None:
                 target_agent_key TEXT NOT NULL,
                 source_pane_id TEXT NOT NULL,
                 target_pane_id TEXT NOT NULL,
-                source_mission_id TEXT NOT NULL,
+                source_backend TEXT NOT NULL DEFAULT 'omniroute',
+                source_mission_id TEXT,
+                source_native_review_id TEXT,
                 source_session_id TEXT NOT NULL,
                 target_session_id TEXT NOT NULL,
                 source_base_sha TEXT NOT NULL,
@@ -698,7 +700,15 @@ def initialize_database() -> None:
                 result_json TEXT,
                 FOREIGN KEY (plan_id) REFERENCES workspace_plans(id),
                 FOREIGN KEY (source_pane_id) REFERENCES workspace_panes(id),
-                FOREIGN KEY (target_pane_id) REFERENCES workspace_panes(id)
+                FOREIGN KEY (target_pane_id) REFERENCES workspace_panes(id),
+                -- P5.3A: exactly one kind of source evidence per row, never
+                -- both and never neither -- enforced at the schema level,
+                -- not just by application code.
+                CHECK (
+                    (source_backend = 'omniroute' AND source_mission_id IS NOT NULL AND source_native_review_id IS NULL)
+                    OR
+                    (source_backend = 'codex_native' AND source_mission_id IS NULL AND source_native_review_id IS NOT NULL)
+                )
             );
             CREATE INDEX IF NOT EXISTS idx_workspace_handoffs_target
                 ON workspace_handoffs(target_pane_id, created_at);
@@ -789,3 +799,93 @@ def initialize_database() -> None:
             );
             """
         )
+
+    # P5.3A: rebuild workspace_handoffs for a pre-native database.
+    # source_mission_id was NOT NULL, which cannot express a Codex Native
+    # review as source evidence; SQLite has no ALTER TABLE to drop a NOT
+    # NULL constraint, so this is the one table in this file rebuilt
+    # rather than grown with ADD COLUMN. The rebuild runs inside its own
+    # BEGIN IMMEDIATE, re-checking the column under the write lock so two
+    # processes starting at once cannot both rebuild it (the second one
+    # blocks on the lock, then sees source_backend already present and
+    # does nothing); every legacy row, its mission_id and the two existing
+    # indexes survive unchanged, re-created only after the data copy.
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        handoff_cols = {row[1] for row in connection.execute("PRAGMA table_info(workspace_handoffs)")}
+        if "source_backend" not in handoff_cols:
+            connection.execute("ALTER TABLE workspace_handoffs RENAME TO workspace_handoffs_pre_p53a")
+            connection.execute(
+                """
+                CREATE TABLE workspace_handoffs (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    plan_id TEXT NOT NULL,
+                    source_agent_key TEXT NOT NULL,
+                    target_agent_key TEXT NOT NULL,
+                    source_pane_id TEXT NOT NULL,
+                    target_pane_id TEXT NOT NULL,
+                    source_backend TEXT NOT NULL DEFAULT 'omniroute',
+                    source_mission_id TEXT,
+                    source_native_review_id TEXT,
+                    source_session_id TEXT NOT NULL,
+                    target_session_id TEXT NOT NULL,
+                    source_base_sha TEXT NOT NULL,
+                    source_head_sha TEXT NOT NULL,
+                    target_base_sha TEXT NOT NULL,
+                    target_head_sha TEXT NOT NULL,
+                    snapshot_fingerprint TEXT NOT NULL,
+                    files_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    owner_token TEXT,
+                    owner_host TEXT,
+                    owner_pid INTEGER,
+                    owner_acquired_at TEXT,
+                    created_at TEXT NOT NULL,
+                    approved_at TEXT,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    result_json TEXT,
+                    FOREIGN KEY (plan_id) REFERENCES workspace_plans(id),
+                    FOREIGN KEY (source_pane_id) REFERENCES workspace_panes(id),
+                    FOREIGN KEY (target_pane_id) REFERENCES workspace_panes(id),
+                    CHECK (
+                        (source_backend = 'omniroute' AND source_mission_id IS NOT NULL AND source_native_review_id IS NULL)
+                        OR
+                        (source_backend = 'codex_native' AND source_mission_id IS NULL AND source_native_review_id IS NOT NULL)
+                    )
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO workspace_handoffs
+                    (id, project_id, plan_id, source_agent_key, target_agent_key,
+                     source_pane_id, target_pane_id, source_backend, source_mission_id,
+                     source_native_review_id, source_session_id, target_session_id,
+                     source_base_sha, source_head_sha, target_base_sha, target_head_sha,
+                     snapshot_fingerprint, files_json, status, owner_token, owner_host,
+                     owner_pid, owner_acquired_at, created_at, approved_at, started_at,
+                     finished_at, error_code, error_message, result_json)
+                SELECT
+                    id, project_id, plan_id, source_agent_key, target_agent_key,
+                    source_pane_id, target_pane_id, 'omniroute', source_mission_id,
+                    NULL, source_session_id, target_session_id,
+                    source_base_sha, source_head_sha, target_base_sha, target_head_sha,
+                    snapshot_fingerprint, files_json, status, owner_token, owner_host,
+                    owner_pid, owner_acquired_at, created_at, approved_at, started_at,
+                    finished_at, error_code, error_message, result_json
+                FROM workspace_handoffs_pre_p53a
+                """
+            )
+            connection.execute("DROP TABLE workspace_handoffs_pre_p53a")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workspace_handoffs_target "
+                "ON workspace_handoffs(target_pane_id, created_at)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_handoffs_target_transferring "
+                "ON workspace_handoffs(target_session_id) WHERE status = 'TRANSFERRING'"
+            )

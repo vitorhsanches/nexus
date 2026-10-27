@@ -101,24 +101,59 @@ def assert_session_execution_allowed(connection, session_id: str, *, turn: bool 
         ).fetchone()
         if source is None:
             raise HandoffBlocked("Declared dependency agent is missing.")
-        mission = connection.execute(
-            """SELECT * FROM dev_autonomous_missions WHERE dev_session_id = ?
-               ORDER BY created_at DESC, id DESC LIMIT 1""", (source["dev_session_id"],),
+        source_backend_row = connection.execute(
+            "SELECT backend FROM dev_sessions WHERE id=?", (source["dev_session_id"],)
         ).fetchone()
-        if mission is None or mission["status"] != "READY_FOR_REVIEW":
-            raise HandoffBlocked("Declared dependency is not ready for review.")
-        try:
-            changed = json.loads(mission["result_json"] or "{}").get("changed_files") or []
-        except (TypeError, ValueError):
-            raise HandoffBlocked("Dependency mission result is invalid.") from None
-        if changed:
-            transferred = connection.execute(
-                """SELECT 1 FROM workspace_handoffs WHERE source_mission_id = ?
-                   AND target_pane_id = ? AND status = 'TRANSFERRED' LIMIT 1""",
-                (mission["id"], target["id"]),
+        # P5.3A: a native source has no mission row -- the dependency
+        # evidence is a human-created, still-REVIEWED integration review,
+        # never "no mission_id exists, so the dependency is satisfied".
+        if source_backend_row is not None and source_backend_row["backend"] == "codex_native":
+            step = connection.execute(
+                """SELECT * FROM workspace_plan_execution_steps WHERE plan_id=? AND agent_key=?""",
+                (target["plan_id"], key),
             ).fetchone()
-            if transferred is None:
-                raise HandoffBlocked("Dependency worktree changes have not been transferred.")
+            if (step is None or step["status"] != "READY_FOR_REVIEW" or step["error_code"]
+                    or not step["native_review_id"] or step["mission_id"]):
+                raise HandoffBlocked("Declared dependency is not ready for review.")
+            review = connection.execute(
+                "SELECT * FROM dev_integration_reviews WHERE review_id = ?", (step["native_review_id"],)
+            ).fetchone()
+            if (review is None or review["dev_session_id"] != source["dev_session_id"]
+                    or review["status"] != "REVIEWED" or review["error_code"]):
+                raise HandoffBlocked("Dependency review is invalid or no longer current.")
+            try:
+                snapshot = json.loads(review["snapshot_json"] or "{}")
+                changed = (snapshot.get("diff") or {}).get("files") or []
+            except (TypeError, ValueError):
+                raise HandoffBlocked("Dependency review snapshot is invalid.") from None
+            if changed:
+                transferred = connection.execute(
+                    """SELECT 1 FROM workspace_handoffs WHERE source_backend = 'codex_native'
+                       AND source_native_review_id = ? AND target_pane_id = ?
+                       AND status = 'TRANSFERRED' LIMIT 1""",
+                    (step["native_review_id"], target["id"]),
+                ).fetchone()
+                if transferred is None:
+                    raise HandoffBlocked("Dependency worktree changes have not been transferred.")
+        else:
+            mission = connection.execute(
+                """SELECT * FROM dev_autonomous_missions WHERE dev_session_id = ?
+                   ORDER BY created_at DESC, id DESC LIMIT 1""", (source["dev_session_id"],),
+            ).fetchone()
+            if mission is None or mission["status"] != "READY_FOR_REVIEW":
+                raise HandoffBlocked("Declared dependency is not ready for review.")
+            try:
+                changed = json.loads(mission["result_json"] or "{}").get("changed_files") or []
+            except (TypeError, ValueError):
+                raise HandoffBlocked("Dependency mission result is invalid.") from None
+            if changed:
+                transferred = connection.execute(
+                    """SELECT 1 FROM workspace_handoffs WHERE source_backend = 'omniroute'
+                       AND source_mission_id = ? AND target_pane_id = ? AND status = 'TRANSFERRED' LIMIT 1""",
+                    (mission["id"], target["id"]),
+                ).fetchone()
+                if transferred is None:
+                    raise HandoffBlocked("Dependency worktree changes have not been transferred.")
 
 
 def view(row) -> dict | None:
@@ -150,13 +185,17 @@ def list_for_plan(plan_id: str) -> list[dict]:
     return [view(row) for row in rows]
 
 
-def latest_transfer(source_mission_id: str, target_pane_id: str) -> dict | None:
+def latest_transfer(source_backend: str, source_evidence_id: str, target_pane_id: str) -> dict | None:
+    """source_evidence_id is a mission_id for 'omniroute', a native_review_id
+    for 'codex_native' -- never guessed from its shape, always named by the
+    caller's own resolved backend."""
     with get_connection() as connection:
         row = connection.execute(
-            """SELECT * FROM workspace_handoffs WHERE source_mission_id = ?
+            """SELECT * FROM workspace_handoffs WHERE source_backend = ?
+               AND COALESCE(source_mission_id, source_native_review_id) = ?
                AND target_pane_id = ? AND status = 'TRANSFERRED'
                ORDER BY finished_at DESC LIMIT 1""",
-            (source_mission_id, target_pane_id),
+            (source_backend, source_evidence_id, target_pane_id),
         ).fetchone()
     return view(row)
 
@@ -198,11 +237,26 @@ def _claim_identity_valid(connection, row) -> bool:
            FROM workspace_panes p JOIN dev_sessions s ON s.id = p.dev_session_id
            WHERE p.id = ?""", (row["target_pane_id"],),
     ).fetchone()
-    mission = connection.execute(
-        "SELECT * FROM dev_autonomous_missions WHERE id = ?", (row["source_mission_id"],),
-    ).fetchone()
-    if source is None or target is None or mission is None:
+    if source is None or target is None:
         return False
+    if row["source_backend"] == "codex_native":
+        if not row["source_native_review_id"] or row["source_mission_id"]:
+            return False
+        evidence = connection.execute(
+            "SELECT * FROM dev_integration_reviews WHERE review_id = ?", (row["source_native_review_id"],),
+        ).fetchone()
+        if (evidence is None or evidence["dev_session_id"] != row["source_session_id"]
+                or evidence["status"] != "REVIEWED" or evidence["error_code"]):
+            return False
+    else:
+        if not row["source_mission_id"] or row["source_native_review_id"]:
+            return False
+        evidence = connection.execute(
+            "SELECT * FROM dev_autonomous_missions WHERE id = ?", (row["source_mission_id"],),
+        ).fetchone()
+        if (evidence is None or evidence["dev_session_id"] != row["source_session_id"]
+                or evidence["status"] != "READY_FOR_REVIEW" or evidence["error_code"]):
+            return False
     if (source["project_id"] != row["project_id"] or target["project_id"] != row["project_id"]
             or source["plan_id"] != row["plan_id"] or target["plan_id"] != row["plan_id"]
             or source["plan_agent_key"] != row["source_agent_key"]
@@ -211,9 +265,7 @@ def _claim_identity_valid(connection, row) -> bool:
             or target["dev_session_id"] != row["target_session_id"]
             or source["session_status"] != "ACTIVE" or target["session_status"] != "ACTIVE"
             or source["session_base_sha"] != row["source_base_sha"]
-            or target["session_base_sha"] != row["target_base_sha"]
-            or mission["dev_session_id"] != row["source_session_id"]
-            or mission["status"] != "READY_FOR_REVIEW" or mission["error_code"]):
+            or target["session_base_sha"] != row["target_base_sha"]):
         return False
     try:
         return row["source_agent_key"] in (json.loads(target["brief_json"] or "{}").get("depends_on") or [])
@@ -223,29 +275,31 @@ def _claim_identity_valid(connection, row) -> bool:
 
 def create(snapshot: dict) -> dict:
     handoff_id = f"HANDOFF-{uuid4().hex[:12].upper()}"
+    evidence_id = snapshot["source_mission_id"] or snapshot["source_native_review_id"]
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         existing = connection.execute(
-            """SELECT * FROM workspace_handoffs WHERE source_mission_id = ?
+            """SELECT * FROM workspace_handoffs WHERE source_backend = ?
+               AND COALESCE(source_mission_id, source_native_review_id) = ?
                AND target_pane_id = ? AND snapshot_fingerprint = ?
                AND status IN ('PREVIEWED','APPROVED','TRANSFERRED')
                ORDER BY created_at DESC LIMIT 1""",
-            (snapshot["source_mission_id"], snapshot["target_pane_id"], snapshot["snapshot_fingerprint"]),
+            (snapshot["source_backend"], evidence_id, snapshot["target_pane_id"], snapshot["snapshot_fingerprint"]),
         ).fetchone()
         if existing is not None:
             return view(existing)
         connection.execute(
             """INSERT INTO workspace_handoffs
                (id, project_id, plan_id, source_agent_key, target_agent_key,
-                source_pane_id, target_pane_id, source_mission_id,
-                source_session_id, target_session_id, source_base_sha,
+                source_pane_id, target_pane_id, source_backend, source_mission_id,
+                source_native_review_id, source_session_id, target_session_id, source_base_sha,
                 source_head_sha, target_base_sha, target_head_sha,
                 snapshot_fingerprint, files_json, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREVIEWED', ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREVIEWED', ?)""",
             (handoff_id, *(snapshot[key] for key in (
                 "project_id", "plan_id", "source_agent_key", "target_agent_key",
-                "source_pane_id", "target_pane_id", "source_mission_id",
-                "source_session_id", "target_session_id", "source_base_sha",
+                "source_pane_id", "target_pane_id", "source_backend", "source_mission_id",
+                "source_native_review_id", "source_session_id", "target_session_id", "source_base_sha",
                 "source_head_sha", "target_base_sha", "target_head_sha",
                 "snapshot_fingerprint",
             )), json.dumps(snapshot["files"], ensure_ascii=False), _now()),
