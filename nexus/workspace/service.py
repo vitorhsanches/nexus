@@ -3,10 +3,10 @@
 A pane is a persisted agent identity that owns exactly one real
 Development session. Everything that executes goes through the existing
 engine -- nexus.dev.service.create_dev_session (authorization + isolated
-worktree), nexus.dev.models.list_dev_models (approved live routes) and
-nexus.dev.mission_runner.start_mission (Codex App-Server via OmniRoute,
-trusted tests, single repair, READY_FOR_REVIEW). This module adds no
-executor of its own and never applies, merges or pushes anything.
+worktree), the selected backend's model catalog and
+nexus.dev.mission_runner.start_mission (Codex App-Server, trusted tests,
+single repair, READY_FOR_REVIEW). This module adds no executor of its own
+and never applies, merges or pushes anything.
 
 Invariants:
 
@@ -35,19 +35,43 @@ MAX_TITLE_LENGTH = 80
 ACTIVE_MISSION_STATUSES = frozenset({"PENDING", "RUNNING", "TESTING", "REPAIRING"})
 
 
-def _catalog() -> dict:
+def _catalog(backend: str = "omniroute") -> dict:
+    if backend == "codex_native":
+        from nexus.chat.service import list_models
+
+        return list_models(backend="codex_native")
+    if backend != "omniroute":
+        raise DevServiceError("UNSUPPORTED_BACKEND", f"Unsupported Development backend: {backend!r}", http_status=422)
     from nexus.dev.models import list_dev_models
 
     return list_dev_models()
 
 
-def _require_approved_model(model: str) -> dict:
-    catalog = _catalog()
+def _require_approved_model(model: str, backend: str = "omniroute") -> dict:
+    if backend == "codex_native":
+        from nexus.dev.executor import validate_native_choice
+
+        # Reuse Development's exact local-account validation. This checks the
+        # Codex catalog only and never starts a turn or performs inference.
+        validate_native_choice(model, None)
+    catalog = _catalog(backend)
     for row in catalog["models"]:
         if row["id"] == model:
             return row
-    message = catalog.get("catalog_error") or "The selected model is not an approved live Development route."
+    message = catalog.get("catalog_error") or (
+        "The selected model is not offered by the local Codex account."
+        if backend == "codex_native"
+        else "The selected model is not an approved live Development route."
+    )
     raise DevServiceError("MODEL_NOT_ALLOWED", message, http_status=403)
+
+
+def _require_backend_model(model: str, backend: str) -> dict:
+    # Keep the historical one-argument call shape for OmniRoute integrations
+    # and tests that replace the legacy validator.
+    if backend == "omniroute":
+        return _require_approved_model(model)
+    return _require_approved_model(model, backend)
 
 
 def _require_pane(pane_id: str):
@@ -110,9 +134,15 @@ def pane_view(row) -> dict:
         if mission.get("status") not in ACTIVE_MISSION_STATUSES:
             cost_authorizations.release_execution("mission", mission["mission_id"])
     latest = _latest_mission(missions)
+    backend = (
+        session["backend"]
+        if session is not None and "backend" in session.keys() and session["backend"]
+        else "omniroute"
+    )
     return {
         "pane_id": row["id"],
         "project_id": row["project_id"],
+        "backend": backend,
         "plan_id": row["plan_id"],
         "origin": row["origin"],
         "role": row["role"],
@@ -122,6 +152,7 @@ def pane_view(row) -> dict:
         "layout": {name: (row[name] if name == "position" else bool(row[name])) for name in store.LAYOUT_FIELDS},
         "session": None if session is None else {
             "session_id": session["id"],
+            "backend": backend,
             "status": session["status"],
             "branch": session["branch"],
             "worktree_path": session["worktree_path"],
@@ -165,9 +196,29 @@ def _plan_cost_confirmed(row, model: str) -> bool:
         approval = json.loads(plan["approval_json"])
         choice = (approval.get("agent_models") or {}).get(row["plan_agent_key"]) or {}
         confirmed = approval.get("cost_confirmed_for") or []
-        return isinstance(confirmed, list) and choice.get("model") == model and model in confirmed
+        return (
+            approval.get("backend", "omniroute") == _pane_backend(row)
+            and isinstance(confirmed, list)
+            and choice.get("model") == model
+            and model in confirmed
+        )
     except (TypeError, ValueError, AttributeError):
         return False
+
+
+def _pane_backend(row) -> str:
+    from nexus.registry import dev_sessions
+
+    try:
+        dev_session_id = row["dev_session_id"]
+    except (KeyError, IndexError):
+        return "omniroute"
+    session = dev_sessions.get_session(dev_session_id)
+    return (
+        session["backend"]
+        if session is not None and "backend" in session.keys() and session["backend"]
+        else "omniroute"
+    )
 
 
 def _brief_view(row) -> dict | None:
@@ -177,7 +228,8 @@ def _brief_view(row) -> dict | None:
     authorization = brief.get("authorization") or {}
     used = _plan_authorized_uses(row["id"])
     model = row["model"]
-    approved = next((item for item in _catalog()["models"] if item["id"] == model), None) if model else None
+    backend = _pane_backend(row)
+    approved = next((item for item in _catalog(backend)["models"] if item["id"] == model), None) if model else None
     cost_authorized = approved is not None and (
         approved.get("cost_status") == "free" or _plan_cost_confirmed(row, model)
     )
@@ -322,17 +374,20 @@ def create_pane(
     role: str,
     title: str | None = None,
     model: str | None = None,
+    backend: str = "omniroute",
     plan_id: str | None = None,
     _origin: str | None = None,
     _plan_agent_key: str | None = None,
     _brief: dict | None = None,
 ) -> dict:
     """Create one operational pane: a real Development session + identity."""
-    from nexus.dev.service import create_dev_session
+    from nexus.dev.service import create_dev_session, validate_dev_project
 
     if role not in policy.ROLES:
         raise DevServiceError("INVALID_ROLE", f"Unknown pane role: {role!r}", http_status=400)
     clean_title = _clean_title(title, role)
+    # Check project authorization before consulting either model catalog.
+    validate_dev_project(project_id)
     if plan_id is not None:
         plan = store.get_plan(plan_id)
         if plan is None or plan["project_id"] != project_id:
@@ -344,7 +399,7 @@ def create_pane(
             f"At most {limit} open panes per project; hide one before adding another.",
             http_status=409,
         )
-    if model is None and plan_id is None:
+    if model is None and plan_id is None and backend == "omniroute":
         from nexus.registry import workspace_ai_preferences
         from nexus.workspace import ai_settings
 
@@ -353,10 +408,14 @@ def create_pane(
             # authorize a turn, a mission, or a paid use.
             model = ai_settings.require_saved(project_id, "development")["model_id"]
     if model is not None:
-        _require_approved_model(model)
+        _require_backend_model(model, backend)
     # Authorization, worktree isolation and persistence of the session all
     # come from the existing Development service.
-    session = create_dev_session(project_id, requested_model=model)
+    session = (
+        create_dev_session(project_id, requested_model=model, backend=backend)
+        if backend != "omniroute"
+        else create_dev_session(project_id, requested_model=model)
+    )
     pane_id = store.create_pane(
         project_id=project_id,
         dev_session_id=session["session_id"],
@@ -379,6 +438,7 @@ def approve_plan(
     plan_id: str,
     *,
     agent_models: dict[str, str],
+    backend: str = "omniroute",
     max_turns_per_agent: int,
     mission_timeout_seconds: int,
     confirm_costs: bool,
@@ -387,7 +447,8 @@ def approve_plan(
 
     The request must name the exact model for every agent (an explicit
     change from the plan's recommendation is recorded, never silent). The
-    approval also records an execution authorization per pane -- that exact
+    selected backend is persisted with the plan approval and every session.
+    The approval also records an execution authorization per pane -- that exact
     model, at most ``max_turns_per_agent`` missions/messages and the mission
     timeout -- so later actions inside those limits need no extra
     confirmation. Nothing starts executing here.
@@ -398,6 +459,9 @@ def approve_plan(
     plan = plan_view(plan_row)
     if plan["status"] != "PROPOSED":
         raise DevServiceError("PLAN_NOT_PROPOSED", f"Plan is {plan['status']}; only a proposed plan can be approved.", http_status=409)
+    from nexus.dev.service import validate_dev_project
+
+    validate_dev_project(plan["project_id"])
     agents = plan["agents"]
     if not agents:
         raise DevServiceError("PLAN_HAS_NO_AGENTS", "This plan has no agents to create.", http_status=400)
@@ -418,7 +482,7 @@ def approve_plan(
     chosen = {}
     for agent in agents:
         model = agent_models[agent["key"]]
-        row = _require_approved_model(model)
+        row = _require_backend_model(model, backend)
         chosen[agent["key"]] = {
             "model": model,
             "cost_status": row.get("cost_status") or "unknown",
@@ -433,6 +497,7 @@ def approve_plan(
             http_status=400,
         )
     approval = {
+        "backend": backend,
         "agent_models": chosen,
         "max_turns_per_agent": max_turns_per_agent,
         "mission_timeout_seconds": mission_timeout_seconds,
@@ -465,6 +530,7 @@ def approve_plan(
                 role=agent["role"],
                 title=agent["title"],
                 model=choice["model"],
+                backend=backend,
                 plan_id=plan_id,
                 _origin="maestro",
                 _plan_agent_key=agent["key"],
@@ -496,7 +562,7 @@ def update_pane(pane_id: str, *, title: str | None = None, model: str | None = N
         clean = _clean_title(title, row["role"])
         store.update_pane(pane_id, event_kind="RENAMED", event_detail={"from": row["title"], "to": clean}, title=clean)
     if model is not None and model != row["model"]:
-        _require_approved_model(model)
+        _require_backend_model(model, _pane_backend(row))
         latest = _latest_mission(_missions(row["dev_session_id"]))
         active = latest["mission_id"] if latest and latest["status"] in ACTIVE_MISSION_STATUSES else None
         store.update_pane(
@@ -530,12 +596,13 @@ def _authorize_use(row, confirm_model: str | None, confirm_cost: bool = False) -
     """
     if not row["model"]:
         raise DevServiceError("MODEL_REQUIRED", "Choose a model for this pane first.", http_status=400)
-    current = _require_approved_model(row["model"])
+    backend = _pane_backend(row)
+    current = _require_backend_model(row["model"], backend)
     brief = _brief_view(row)
     if brief and brief["authorization"]["applies"] and confirm_model in (None, row["model"]):
         return True
     from nexus.workspace import cost_authorizations
-    if confirm_model in (None, row["model"]):
+    if backend == "omniroute" and confirm_model in (None, row["model"]):
         configured = next((item for item in cost_authorizations.list_authorizations(row["project_id"])["authorizations"]
                            if item["model"] == row["model"] and item["status"] == "ACTIVE"), None)
         if configured is not None:
@@ -635,7 +702,11 @@ def _run_gated(
     with _execution_lock(row):
         by_plan = _check_execution_gates(row, confirm_model, confirm_cost)
         from nexus.workspace import cost_authorizations
-        reserved = None if by_plan else cost_authorizations.reserve_if_active(row["project_id"], row["model"])
+        reserved = (
+            cost_authorizations.reserve_if_active(row["project_id"], row["model"])
+            if not by_plan and _pane_backend(row) == "omniroute"
+            else None
+        )
         lease_id = reserved[0] if reserved else None
         try:
             result = start(by_plan)
@@ -666,7 +737,7 @@ def _agent_context(row) -> str:
 def _execution_effort(row, effort: str | None) -> str | None:
     """Recheck the selected effort without changing a pane's authorized route."""
     model = row["model"] or ""
-    if not model.startswith(("cc/", "cx/")):
+    if _pane_backend(row) == "codex_native" or not model.startswith(("cc/", "cx/")):
         return effort
     from nexus.workspace import ai_settings
 

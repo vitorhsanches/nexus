@@ -22,6 +22,7 @@ from nexus.workspace import policy, service
 FREE = {"id": "free/model", "cost_status": "free"}
 STANDARD = {"id": "std/model", "cost_status": "standard"}
 LOW = {"id": "low/model", "cost_status": "low_cost"}
+NATIVE = {"id": "gpt-native", "cost_status": "known"}
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -134,6 +135,49 @@ def test_unauthorized_project_and_unapproved_model_create_nothing(ws_env):
     assert service.list_panes("demo", include_hidden=True) == []
     with database.get_connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM dev_sessions").fetchone()[0] == 0
+
+
+def test_codex_native_pane_uses_native_catalog_and_persists_backend(ws_env, monkeypatch):
+    native_catalog = {"backend": "codex_native", "models": [NATIVE], "catalog_error": None}
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: native_catalog)
+    validated = []
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: validated.append((model, effort)))
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda **kwargs: pytest.fail("OmniRoute catalog must not be used"))
+
+    pane = service.create_pane("demo", role="implementer", model="gpt-native", backend="codex_native")
+    session = dev_sessions.get_session(pane["session"]["session_id"])
+
+    assert validated == [("gpt-native", None), ("gpt-native", None)]
+    assert pane["backend"] == pane["session"]["backend"] == "codex_native"
+    assert pane["model"] == session["requested_model"] == "gpt-native"
+    assert session["status"] == "ACTIVE"
+    assert Path(session["worktree_path"]).is_dir()
+
+
+def test_codex_native_invalid_model_and_session_failure_do_not_persist_panes(ws_env, monkeypatch):
+    native_catalog = {"backend": "codex_native", "models": [], "catalog_error": None}
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: native_catalog)
+
+    def reject_model(model, effort):
+        raise DevServiceError("MODEL_NOT_ALLOWED", "not offered", http_status=422)
+
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", reject_model)
+    with pytest.raises(DevServiceError) as invalid:
+        service.create_pane("demo", role="implementer", model="gpt-invalid", backend="codex_native")
+    assert invalid.value.code == "MODEL_NOT_ALLOWED"
+    assert service.list_panes("demo") == []
+
+    native_catalog["models"] = [NATIVE]
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
+
+    def fail_session(*args, **kwargs):
+        raise DevServiceError("WORKTREE_CREATE_FAILED", "simulated failure", http_status=500)
+
+    monkeypatch.setattr("nexus.dev.service.create_dev_session", fail_session)
+    with pytest.raises(DevServiceError) as failed:
+        service.create_pane("demo", role="implementer", model="gpt-native", backend="codex_native")
+    assert failed.value.code == "WORKTREE_CREATE_FAILED"
+    assert service.list_panes("demo") == []
 
 
 def test_open_pane_limit_blocks_new_sessions(ws_env, monkeypatch):
@@ -279,6 +323,19 @@ def test_workspace_routes_round_trip(ws_env):
     assert patched.json()["layout"]["collapsed"] is True
     assert client.get(f"/api/workspace/panes/{pane_id}/history").status_code == 200
     assert client.get("/api/workspace/plans", params={"project_id": "demo"}).json()["plans"][0]["plan_id"] == plan["plan_id"]
+
+
+def test_workspace_pane_route_accepts_codex_native_backend(ws_env, monkeypatch):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native", "models": [NATIVE], "catalog_error": None,
+    })
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
+    response = _client().post("/api/workspace/panes", json={
+        "project_id": "demo", "role": "implementer", "model": "gpt-native", "backend": "codex_native",
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["backend"] == response.json()["session"]["backend"] == "codex_native"
+    assert response.json()["session"]["status"] == "ACTIVE"
 
 
 def test_workspace_routes_report_errors_and_reject_unknown_fields(ws_env):

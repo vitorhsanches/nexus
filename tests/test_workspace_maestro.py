@@ -350,6 +350,30 @@ def test_simple_plan_approval_creates_exactly_one_pane_without_starting_work(env
     assert again.value.code == "PLAN_NOT_PROPOSED"
 
 
+def test_planned_panes_can_be_approved_on_codex_native_with_explicit_cost_consent(env, monkeypatch):
+    native = {"id": "gpt-native", "cost_status": "known"}
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native", "models": [native], "catalog_error": None,
+    })
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
+    plan = _llm_plan(env, SIMPLE)
+
+    with pytest.raises(DevServiceError) as unpaid:
+        service.approve_plan(plan["plan_id"], agent_models={"impl": "gpt-native"}, backend="codex_native",
+                             max_turns_per_agent=2, mission_timeout_seconds=600, confirm_costs=False)
+    assert unpaid.value.code == "COST_CONFIRMATION_REQUIRED"
+    result = service.approve_plan(plan["plan_id"], agent_models={"impl": "gpt-native"}, backend="codex_native",
+                                  max_turns_per_agent=2, mission_timeout_seconds=600, confirm_costs=True)
+    pane = result["panes"][0]
+    assert result["plan"]["status"] == "APPROVED"
+    assert result["plan"]["approval"]["backend"] == "codex_native"
+    assert pane["backend"] == pane["session"]["backend"] == "codex_native"
+    assert pane["model"] == "gpt-native" and pane["brief"]["authorization"]["applies"] is True
+    with database.get_connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM dev_autonomous_missions").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM dev_turns").fetchone()[0] == 0
+
+
 def test_multi_plan_needs_cost_confirmation_then_creates_isolated_panes_in_one_step(env):
     plan = _llm_plan(env, MULTI)
     models = {"api": "free/model", "ui": "std/model", "qa": "free/model"}
