@@ -141,13 +141,28 @@ def create_execution(
     profiles = {step["agent_key"]: step["test_profile"] for step in steps}
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        if confirmed_model_ids:
+        if expected_agent_models is not None:
             plan = connection.execute(
                 "SELECT status, approval_json FROM workspace_plans WHERE id = ?", (plan_id,)
             ).fetchone()
             approval = _json(plan["approval_json"], {}) if plan is not None else {}
             if plan is None or plan["status"] != "APPROVED" or approval.get("agent_models") != expected_agent_models:
-                raise ValueError("plan approval changed before cost confirmation")
+                raise ValueError("plan approval changed before execution authorization")
+            for step in steps:
+                pane = connection.execute(
+                    """SELECT p.model, p.plan_agent_key, d.backend, d.project_id
+                       FROM workspace_panes AS p
+                       JOIN dev_sessions AS d ON d.id = p.dev_session_id
+                       WHERE p.id = ? AND p.plan_id = ?""",
+                    (step["pane_id"], plan_id),
+                ).fetchone()
+                choice = expected_agent_models.get(step["agent_key"]) or {}
+                if (pane is None or pane["project_id"] != project_id
+                        or pane["plan_agent_key"] != step["agent_key"]
+                        or pane["model"] != choice.get("model")
+                        or (pane["backend"] or "omniroute")
+                        != choice.get("backend", approval.get("backend", "omniroute"))):
+                    raise ValueError("pane or session changed before authorization")
         existing = connection.execute(
             "SELECT * FROM workspace_plan_executions WHERE plan_id = ?", (plan_id,)
         ).fetchone()
@@ -403,17 +418,23 @@ def update_execution(plan_id: str, status: str, *, current_index: int | None = N
     fields = ["status = ?", "updated_at = ?"]
     params: list = [status, _now()]
     if current_index is not None:
-        fields.append("current_index = ?"); params.append(current_index)
+        fields.append("current_index = ?")
+        params.append(current_index)
     if interrupt_requested is not None:
-        fields.append("interrupt_requested = ?"); params.append(int(interrupt_requested))
+        fields.append("interrupt_requested = ?")
+        params.append(int(interrupt_requested))
     if error_code is not None:
-        fields.append("error_code = ?"); params.append(error_code)
+        fields.append("error_code = ?")
+        params.append(error_code)
     if error_message is not None:
-        fields.append("error_message = ?"); params.append(error_message)
+        fields.append("error_message = ?")
+        params.append(error_message)
     if result is not None:
-        fields.append("result_json = ?"); params.append(json.dumps(result, ensure_ascii=False))
+        fields.append("result_json = ?")
+        params.append(json.dumps(result, ensure_ascii=False))
     if status in {"AWAITING_REVIEW", "BLOCKED", "FAILED", "INTERRUPTED", "RESULT_UNCERTAIN"}:
-        fields.append("finished_at = COALESCE(finished_at, ?)"); params.append(_now())
+        fields.append("finished_at = COALESCE(finished_at, ?)")
+        params.append(_now())
     params.append(plan_id)
     with get_connection() as connection:
         _require_owner(connection, plan_id, owner_token)
@@ -429,21 +450,29 @@ def update_step(plan_id: str, agent_key: str, status: str, *, mission_id: str | 
     fields = ["status = ?", "updated_at = ?"]
     params: list = [status, _now()]
     if mission_id is not None:
-        fields.append("mission_id = ?"); params.append(mission_id)
+        fields.append("mission_id = ?")
+        params.append(mission_id)
     if native_turn_id is not None:
-        fields.append("native_turn_id = ?"); params.append(native_turn_id)
+        fields.append("native_turn_id = ?")
+        params.append(native_turn_id)
     if native_review_id is not None:
-        fields.append("native_review_id = ?"); params.append(native_review_id)
+        fields.append("native_review_id = ?")
+        params.append(native_review_id)
     if result is not None:
-        fields.append("result_json = ?"); params.append(json.dumps(result, ensure_ascii=False))
+        fields.append("result_json = ?")
+        params.append(json.dumps(result, ensure_ascii=False))
     if error_code is not None:
-        fields.append("error_code = ?"); params.append(error_code)
+        fields.append("error_code = ?")
+        params.append(error_code)
     if error_message is not None:
-        fields.append("error_message = ?"); params.append(error_message)
+        fields.append("error_message = ?")
+        params.append(error_message)
     if status in {"RUNNING", "STARTING"}:
-        fields.append("started_at = COALESCE(started_at, ?)"); params.append(_now())
+        fields.append("started_at = COALESCE(started_at, ?)")
+        params.append(_now())
     if status in {"READY_FOR_REVIEW", "BLOCKED", "FAILED", "INTERRUPTED", "RESULT_UNCERTAIN"}:
-        fields.append("finished_at = COALESCE(finished_at, ?)"); params.append(_now())
+        fields.append("finished_at = COALESCE(finished_at, ?)")
+        params.append(_now())
     params.extend([plan_id, agent_key])
     with get_connection() as connection:
         _require_owner(connection, plan_id, owner_token)

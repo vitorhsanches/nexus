@@ -197,7 +197,8 @@ def _plan_cost_confirmed(row, model: str) -> bool:
         choice = (approval.get("agent_models") or {}).get(row["plan_agent_key"]) or {}
         confirmed = approval.get("cost_confirmed_for") or []
         return (
-            approval.get("backend", "omniroute") == _pane_backend(row)
+            choice.get("backend", approval.get("backend", "omniroute"))
+            == _pane_backend(row)
             and isinstance(confirmed, list)
             and choice.get("model") == model
             and model in confirmed
@@ -439,6 +440,7 @@ def approve_plan(
     *,
     agent_models: dict[str, str],
     backend: str = "omniroute",
+    agent_backends: dict[str, str] | None = None,
     max_turns_per_agent: int,
     mission_timeout_seconds: int,
     confirm_costs: bool,
@@ -447,7 +449,7 @@ def approve_plan(
 
     The request must name the exact model for every agent (an explicit
     change from the plan's recommendation is recorded, never silent). The
-    selected backend is persisted with the plan approval and every session.
+    selected backend is recorded per agent and persisted in every session.
     The approval also records an execution authorization per pane -- that exact
     model, at most ``max_turns_per_agent`` missions/messages and the mission
     timeout -- so later actions inside those limits need no extra
@@ -467,6 +469,19 @@ def approve_plan(
         raise DevServiceError("PLAN_HAS_NO_AGENTS", "This plan has no agents to create.", http_status=400)
     if not isinstance(agent_models, dict) or set(agent_models) != {agent["key"] for agent in agents}:
         raise DevServiceError("MODELS_NOT_CONFIRMED", "Confirm the exact model for every planned agent.", http_status=400)
+    if agent_backends is not None and (
+        not isinstance(agent_backends, dict)
+        or set(agent_backends) != set(agent_models)
+        or any(
+            value not in {"omniroute", "codex_native"}
+            for value in agent_backends.values()
+        )
+    ):
+        raise DevServiceError(
+            "BACKENDS_NOT_CONFIRMED",
+            "Confirm the exact backend for every planned agent.",
+            http_status=400,
+        )
     if not MIN_PLAN_TURNS <= max_turns_per_agent <= MAX_PLAN_TURNS:
         raise DevServiceError("INVALID_LIMITS", f"max_turns_per_agent must be {MIN_PLAN_TURNS}..{MAX_PLAN_TURNS}.", http_status=400)
     if not MIN_MISSION_TIMEOUT <= mission_timeout_seconds <= MAX_MISSION_TIMEOUT:
@@ -482,9 +497,13 @@ def approve_plan(
     chosen = {}
     for agent in agents:
         model = agent_models[agent["key"]]
-        row = _require_backend_model(model, backend)
+        agent_backend = (
+            agent_backends[agent["key"]] if agent_backends is not None else backend
+        )
+        row = _require_backend_model(model, agent_backend)
         chosen[agent["key"]] = {
             "model": model,
+            "backend": agent_backend,
             "cost_status": row.get("cost_status") or "unknown",
             "recommended": agent.get("model"),
             "changed_by_user": model != agent.get("model"),
@@ -530,7 +549,7 @@ def approve_plan(
                 role=agent["role"],
                 title=agent["title"],
                 model=choice["model"],
-                backend=backend,
+                backend=choice["backend"],
                 plan_id=plan_id,
                 _origin="maestro",
                 _plan_agent_key=agent["key"],

@@ -67,18 +67,46 @@ def authorize_execution(
         _fail("AGENTS_NOT_CONFIRMED", "Execution must use the exact approved agent order.", 400)
     selected = approval.get("agent_models") or {}
     panes = {pane["plan_agent_key"]: pane for pane in store.panes_for_plan(plan_id)}
-    if set(panes) != set(planned) or any(panes[key]["model"] != selected.get(key, {}).get("model") for key in planned):
+    if (not isinstance(selected, dict) or set(selected) != set(planned)
+            or any(not isinstance(selected[key], dict) for key in planned)
+            or set(panes) != set(planned)
+            or any(
+                panes[key]["model"] != selected[key].get("model")
+                for key in planned
+            )):
         _fail("PANES_NOT_READY", "The approved plan does not have the exact authorized agents and models.")
+    from nexus.dev.executor import session_backend
     from nexus.registry import dev_sessions
+    from nexus.workspace import service
 
     # P5.2B: a Codex Native agent has no trusted test profile to confirm --
     # never invent a fictitious one for it, and never silently accept one
     # a caller mistakenly supplies for it either.
+    if not isinstance(test_profiles, dict) or any(
+        not isinstance(key, str) for key in test_profiles
+    ):
+        _fail(
+            "TEST_PROFILES_NOT_CONFIRMED",
+            "Test profiles must be keyed by approved agent.", 400,
+        )
     native_keys = set()
     for key, pane in panes.items():
         session = dev_sessions.get_session(pane["dev_session_id"])
-        if session is not None and session["backend"] == "codex_native":
+        if session is None or session["project_id"] != plan["project_id"]:
+            _fail("PANES_NOT_READY", "Approved pane has no Development session.")
+        actual_backend = session_backend(session)
+        expected_backend = selected[key].get(
+            "backend", approval.get("backend", "omniroute")
+        )
+        if actual_backend != expected_backend:
+            _fail(
+                "SESSION_BACKEND_MISMATCH",
+                "Session backend differs from the approved backend.",
+            )
+        if actual_backend == "codex_native":
             native_keys.add(key)
+        elif actual_backend != "omniroute":
+            _fail("UNSUPPORTED_BACKEND", "Persisted backend is not supported.")
     if set(test_profiles) & native_keys:
         _fail("TEST_PROFILE_NOT_APPLICABLE", "Codex Native agents have no test profile; omit them.", 400)
     required_profiles = set(planned) - native_keys
@@ -86,17 +114,29 @@ def authorize_execution(
         _fail("TEST_PROFILES_NOT_CONFIRMED", "Choose one trusted test profile for every OmniRoute agent.", 400)
     if max_turns_per_agent != approval.get("max_turns_per_agent") or mission_timeout_seconds != approval.get("mission_timeout_seconds"):
         _fail("LIMITS_NOT_CONFIRMED", "Execution limits must exactly match the plan approval.", 400)
-    from nexus.dev.test_profiles import list_test_profiles
-    available = {row["id"] for row in list_test_profiles(plan["project_id"])}
-    missing = sorted(set(test_profiles.values()) - available)
-    if missing:
-        _fail("TEST_PROFILE_NOT_FOUND", "Trusted test profile unavailable: " + ", ".join(missing), 409)
-    from nexus.dev.models import list_dev_models
-    catalog = {item["id"]: item for item in list_dev_models()["models"]}
-    selected_ids = {value.get("model") for value in selected.values() if isinstance(value, dict)}
-    if len(selected) != len(planned) or not selected_ids or any(model not in catalog for model in selected_ids):
-        _fail("MODEL_NOT_AVAILABLE", "An approved model is no longer available in the live catalog.", 409)
-    charged = {model for model in selected_ids if catalog[model].get("cost_status") != "free"}
+    if required_profiles:
+        from nexus.dev.test_profiles import list_test_profiles
+        available = {row["id"] for row in list_test_profiles(plan["project_id"])}
+        missing = sorted(set(test_profiles.values()) - available)
+        if missing:
+            _fail(
+                "TEST_PROFILE_NOT_FOUND",
+                "Trusted test profile unavailable: " + ", ".join(missing), 409,
+            )
+    if len(selected) != len(planned) or any(
+        not isinstance(selected.get(key), dict) for key in planned
+    ):
+        _fail("MODEL_NOT_AVAILABLE", "Approved model is unavailable.", 409)
+    charged = set()
+    for key in keys:
+        model = selected[key]["model"]
+        backend = "codex_native" if key in native_keys else "omniroute"
+        try:
+            live = service._require_backend_model(model, backend)
+        except DevServiceError:
+            _fail("MODEL_NOT_AVAILABLE", "Approved model is unavailable.", 409)
+        if live.get("cost_status") != "free":
+            charged.add(model)
     confirmed = approval.get("cost_confirmed_for")
     confirmed_ids = {item for item in confirmed if isinstance(item, str)} if isinstance(confirmed, list) else set()
     missing_consent = charged - confirmed_ids
@@ -116,7 +156,9 @@ def authorize_execution(
             expected_agent_models=selected,
         )
     except ValueError as error:
-        _fail("EXECUTION_ALREADY_AUTHORIZED", str(error), 409)
+        code = ("EXECUTION_AUTHORIZATION_CHANGED" if "changed before" in str(error)
+                else "EXECUTION_ALREADY_AUTHORIZED")
+        _fail(code, str(error), 409)
     return execution_store.view(plan_id)
 
 
@@ -324,6 +366,30 @@ def _run(plan_id: str, token: str) -> None:
                 update(persisted["status"], current_index=index)
                 return
             pane = store.get_pane(persisted["pane_id"])
+            plan = store.get_plan(plan_id)
+            approval = _approval(plan) if plan is not None else {}
+            choice = (approval.get("agent_models") or {}).get(step["agent_key"]) or {}
+            session = (
+                dev_sessions.get_session(pane["dev_session_id"])
+                if pane is not None else None
+            )
+            from nexus.dev.executor import session_backend
+            if (plan is None or plan["status"] != "APPROVED" or session is None
+                    or session["project_id"] != plan["project_id"]
+                    or pane["model"] != choice.get("model")
+                    or session_backend(session) != choice.get(
+                        "backend", approval.get("backend", "omniroute")
+                    )):
+                message = "Approved model or backend no longer matches session."
+                step_update(
+                    step["agent_key"], "BLOCKED",
+                    error_code="EXECUTION_AUTHORIZATION_CHANGED", error_message=message,
+                )
+                update(
+                    "BLOCKED", current_index=index,
+                    error_code="EXECUTION_AUTHORIZATION_CHANGED", error_message=message,
+                )
+                return
             is_native = _is_native_pane(pane)
             evidence_id = persisted["native_turn_id"] if is_native else persisted["mission_id"]
             # A durable evidence id is authoritative even if the step status
@@ -364,6 +430,20 @@ def _run(plan_id: str, token: str) -> None:
                             step_update(step["agent_key"], "BLOCKED", error_code=code, error_message=str(error))
                             update("BLOCKED", current_index=index, error_code=code, error_message=str(error))
                             return
+                try:
+                    service._require_backend_model(
+                        pane["model"], session_backend(session)
+                    )
+                except DevServiceError as error:
+                    step_update(
+                        step["agent_key"], "BLOCKED",
+                        error_code=error.code, error_message=str(error),
+                    )
+                    update(
+                        "BLOCKED", current_index=index,
+                        error_code=error.code, error_message=str(error),
+                    )
+                    return
                 update("RUNNING", current_index=index)
                 # Persist the launch barrier before any external side effect.
                 # If ownership changes during the call, recovery stops here as
@@ -538,6 +618,20 @@ def bind_native_review(plan_id: str, agent_key: str, review_id: str) -> dict:
     session = dev_sessions.get_session(pane["dev_session_id"])
     if session is None:
         _fail("SESSION_NOT_FOUND", "The agent's development session no longer exists.", 404)
+    from nexus.dev.executor import session_backend
+    plan = store.get_plan(plan_id)
+    approval = _approval(plan) if plan is not None else {}
+    choice = (approval.get("agent_models") or {}).get(agent_key) or {}
+    if (plan is None or plan["status"] != "APPROVED"
+            or session_backend(session) != "codex_native"
+            or choice.get(
+                "backend", approval.get("backend", "omniroute")
+            ) != "codex_native"
+            or pane["model"] != choice.get("model")):
+        _fail(
+            "EXECUTION_AUTHORIZATION_CHANGED",
+            "Native review no longer matches approved pane and session.",
+        )
     turn = dev_sessions.get_turn_for_session(session["id"], step["native_turn_id"])
     if turn is None or turn["status"] != "COMPLETED":
         _fail("NATIVE_REVIEW_TURN_NOT_READY", "The step's own turn is not durably COMPLETED.")

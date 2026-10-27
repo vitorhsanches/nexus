@@ -94,6 +94,9 @@ class PlanApproveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     agent_models: dict[str, str] = Field(min_length=1, max_length=8)
     backend: Literal["omniroute", "codex_native"] = "omniroute"
+    agent_backends: dict[str, Literal["omniroute", "codex_native"]] | None = Field(
+        default=None, max_length=8,
+    )
     max_turns_per_agent: int = Field(ge=1, le=6)
     mission_timeout_seconds: int = Field(ge=60, le=3600)
     confirm_costs: bool = False
@@ -102,7 +105,7 @@ class PlanApproveRequest(BaseModel):
 class PlanExecuteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     agent_keys: list[str] = Field(min_length=1, max_length=8)
-    test_profiles: dict[str, str] = Field(min_length=1, max_length=8)
+    test_profiles: dict[str, str] = Field(max_length=8)
     max_turns_per_agent: int = Field(ge=1, le=6)
     mission_timeout_seconds: int = Field(ge=60, le=3600)
     confirm_costs: bool = False
@@ -280,6 +283,7 @@ def approve_plan(plan_id: str, request: PlanApproveRequest):
         plan_id,
         agent_models=request.agent_models,
         backend=request.backend,
+        agent_backends=request.agent_backends,
         max_turns_per_agent=request.max_turns_per_agent,
         mission_timeout_seconds=request.mission_timeout_seconds,
         confirm_costs=request.confirm_costs,

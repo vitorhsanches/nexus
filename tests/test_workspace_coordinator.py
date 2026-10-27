@@ -31,6 +31,14 @@ def coord_env(tmp_path, monkeypatch):
     database.initialize_database()
     monkeypatch.setattr("nexus.dev.test_profiles.list_test_profiles", lambda _project: [{"id": "unit"}])
     monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: {"models": [FREE], "catalog_error": None})
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "free/model", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice", lambda model, effort: None,
+    )
     with database.get_connection() as connection:
         connection.execute(
             "INSERT INTO projects (id, name, path, enabled, dev_enabled) VALUES ('demo', 'Demo', ?, 1, 1)",
@@ -204,6 +212,26 @@ def test_durable_token_gates_mission_and_internal_turn_in_one_transaction(coord_
 
 def _set_backend(session_id: str, backend: str) -> None:
     with database.get_connection() as connection:
+        pane = connection.execute(
+            """SELECT plan_id, plan_agent_key FROM workspace_panes
+               WHERE dev_session_id=?""",
+            (session_id,),
+        ).fetchone()
+        plan = connection.execute(
+            "SELECT approval_json FROM workspace_plans WHERE id=?", (pane["plan_id"],)
+        ).fetchone()
+        approval = json.loads(plan["approval_json"])
+        choice = approval["agent_models"][pane["plan_agent_key"]]
+        choice["backend"] = backend
+        choice["cost_status"] = "known" if backend == "codex_native" else "free"
+        if backend == "codex_native":
+            approval["cost_confirmed_for"] = sorted(
+                set(approval["cost_confirmed_for"]) | {choice["model"]}
+            )
+        connection.execute(
+            "UPDATE workspace_plans SET approval_json=? WHERE id=?",
+            (json.dumps(approval), pane["plan_id"]),
+        )
         connection.execute("UPDATE dev_sessions SET backend=? WHERE id=?", (backend, session_id))
 
 
@@ -720,6 +748,173 @@ def test_api_uses_exact_persisted_approval_limits(coord_env, monkeypatch):
         assert accepted.json()["status"] == "AWAITING_EXECUTION"
 
 
+def test_api_authorizes_all_native_without_profiles_or_omniroute_catalog(
+    coord_env, monkeypatch,
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nexus.web.workspace_routes import router
+
+    _set_backend("DEV-API", "codex_native")
+    _set_backend("DEV-TESTS", "codex_native")
+    monkeypatch.setattr(
+        "nexus.dev.models.list_dev_models",
+        lambda: pytest.fail("OmniRoute catalog called"),
+    )
+    monkeypatch.setattr(coordinator, "start", lambda ident: executions.view(ident))
+    app = FastAPI()
+    app.include_router(router)
+    payload = {"agent_keys": ["api", "tests"], "test_profiles": {},
+               "max_turns_per_agent": 1, "mission_timeout_seconds": 60}
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/workspace/plans/{coord_env['plan_id']}/execute", json=payload,
+        )
+    assert response.status_code == 200
+    assert response.json()["status"] == "AWAITING_EXECUTION"
+    assert [step["test_profile"] for step in response.json()["steps"]] == ["", ""]
+
+
+@pytest.mark.parametrize("profiles,code", [
+    ({}, "TEST_PROFILES_NOT_CONFIRMED"),
+    ({"api": "unit", "tests": "unit", "other": "unit"}, "TEST_PROFILES_NOT_CONFIRMED"),
+])
+def test_api_requires_exact_legacy_profiles(coord_env, monkeypatch, profiles, code):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nexus.web.workspace_routes import router
+
+    monkeypatch.setattr(coordinator, "start", lambda ident: executions.view(ident))
+    app = FastAPI()
+    app.include_router(router)
+    payload = {"agent_keys": ["api", "tests"], "test_profiles": profiles,
+               "max_turns_per_agent": 1, "mission_timeout_seconds": 60}
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/workspace/plans/{coord_env['plan_id']}/execute", json=payload,
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == code
+    assert executions.get_execution(coord_env["plan_id"]) is None
+
+
+def test_api_mixed_plan_rejects_native_profile_and_accepts_legacy_only(
+    coord_env, monkeypatch,
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nexus.web.workspace_routes import router
+
+    _set_backend("DEV-API", "codex_native")
+    monkeypatch.setattr(coordinator, "start", lambda ident: executions.view(ident))
+    app = FastAPI()
+    app.include_router(router)
+    payload = {
+        "agent_keys": ["api", "tests"],
+        "test_profiles": {"api": "unit", "tests": "unit"},
+        "max_turns_per_agent": 1,
+        "mission_timeout_seconds": 60,
+    }
+    with TestClient(app) as client:
+        rejected = client.post(
+            f"/api/workspace/plans/{coord_env['plan_id']}/execute", json=payload,
+        )
+        accepted = client.post(f"/api/workspace/plans/{coord_env['plan_id']}/execute",
+                               json={**payload, "test_profiles": {"tests": "unit"}})
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"]["code"] == "TEST_PROFILE_NOT_APPLICABLE"
+    assert accepted.status_code == 200
+
+
+@pytest.mark.parametrize("profiles", [None, [], {"unknown": "unit"}])
+def test_coordinator_rejects_malformed_profiles_without_http_schema(
+    coord_env, profiles,
+):
+    with pytest.raises(DevServiceError) as invalid:
+        coordinator.authorize_execution(
+            coord_env["plan_id"], agent_keys=["api", "tests"],
+            test_profiles=profiles, max_turns_per_agent=1,
+            mission_timeout_seconds=60,
+        )
+    assert invalid.value.code == "TEST_PROFILES_NOT_CONFIRMED"
+    assert executions.get_execution(coord_env["plan_id"]) is None
+
+
+def test_execution_rejects_backend_and_model_drift_before_authorization(coord_env):
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE dev_sessions SET backend='codex_native' WHERE id='DEV-API'"
+        )
+    with pytest.raises(DevServiceError) as mismatch:
+        _authorize(coord_env)
+    assert mismatch.value.code == "SESSION_BACKEND_MISMATCH"
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE dev_sessions SET backend='omniroute' WHERE id='DEV-API'"
+        )
+        connection.execute(
+            "UPDATE workspace_panes SET model='other/model' WHERE id='PANE-API'"
+        )
+    with pytest.raises(DevServiceError) as changed:
+        _authorize(coord_env)
+    assert changed.value.code == "PANES_NOT_READY"
+    assert executions.get_execution(coord_env["plan_id"]) is None
+
+
+def test_authorized_native_step_refuses_backend_change_before_launch(
+    coord_env, monkeypatch,
+):
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    monkeypatch.setattr(
+        coordinator, "_start_native_turn",
+        lambda pane: pytest.fail("native turn launched"),
+    )
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE dev_sessions SET backend='omniroute' WHERE id='DEV-API'"
+        )
+    coordinator.start(coord_env["plan_id"])
+    result = _wait(coord_env["plan_id"], {"BLOCKED"})
+    assert result["error_code"] == "EXECUTION_AUTHORIZATION_CHANGED"
+    assert result["steps"][0]["native_turn_id"] is None
+
+
+def test_native_authorization_rejects_model_disappearing_from_native_catalog(
+    coord_env, monkeypatch,
+):
+    _set_backend("DEV-API", "codex_native")
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native", "models": [], "catalog_error": None,
+    })
+    with pytest.raises(DevServiceError) as missing:
+        _authorize_with_native_api(coord_env)
+    assert missing.value.code == "MODEL_NOT_AVAILABLE"
+    assert executions.get_execution(coord_env["plan_id"]) is None
+
+
+def test_authorization_rechecks_session_backend_in_atomic_insert(
+    coord_env, monkeypatch,
+):
+    original = executions.create_execution
+
+    def change_then_insert(*args, **kwargs):
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE dev_sessions SET backend='codex_native' WHERE id='DEV-API'"
+            )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(executions, "create_execution", change_then_insert)
+    with pytest.raises(DevServiceError) as changed:
+        _authorize(coord_env)
+    assert changed.value.code == "EXECUTION_AUTHORIZATION_CHANGED"
+    assert executions.get_execution(coord_env["plan_id"]) is None
+
+
 # P5.2C: a simulated Codex Native agent through the coordinator -- launch
 # via the P5.2A gate, poll a turn instead of a mission, park at
 # AWAITING_NATIVE_REVIEW, and resume only once a confirmed human review is
@@ -781,8 +976,11 @@ def _single_native_plan(env) -> str:
     }
     plan_id = store.create_plan("demo", "one agent", policy_version="maestro-plan/1", complexity="simple",
                                 proposal=proposal, source="llm")
-    approval = {"agent_models": {"solo": {"model": "free/model", "cost_status": "free"}},
-               "max_turns_per_agent": 1, "mission_timeout_seconds": 60, "cost_confirmed_for": []}
+    approval = {"agent_models": {"solo": {
+        "model": "free/model", "backend": "codex_native", "cost_status": "known",
+    }},
+               "max_turns_per_agent": 1, "mission_timeout_seconds": 60,
+               "cost_confirmed_for": ["free/model"]}
     brief = {"task": "solo", "acceptance_criteria": ["ok"], "depends_on": [],
              "authorization": {"model": "free/model", "cost_status": "free", "max_turns": 1, "mission_timeout_seconds": 60}}
     with database.get_connection() as connection:

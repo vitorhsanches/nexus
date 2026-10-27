@@ -374,6 +374,76 @@ def test_planned_panes_can_be_approved_on_codex_native_with_explicit_cost_consen
         assert connection.execute("SELECT COUNT(*) FROM dev_turns").fetchone()[0] == 0
 
 
+def test_mixed_plan_persists_each_agent_backend_and_rejects_incomplete_mapping(
+    env, monkeypatch,
+):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "gpt-native", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice", lambda model, effort: None,
+    )
+    plan = _llm_plan(env, MULTI)
+    models = {"api": "gpt-native", "ui": "std/model", "qa": "free/model"}
+    with pytest.raises(DevServiceError) as incomplete:
+        service.approve_plan(plan["plan_id"], agent_models=models,
+                             agent_backends={"api": "codex_native"},
+                             max_turns_per_agent=1, mission_timeout_seconds=600,
+                             confirm_costs=True)
+    assert incomplete.value.code == "BACKENDS_NOT_CONFIRMED"
+    result = service.approve_plan(plan["plan_id"], agent_models=models,
+                                  agent_backends={
+                                      "api": "codex_native",
+                                      "ui": "omniroute",
+                                      "qa": "omniroute",
+                                  },
+                                  max_turns_per_agent=1, mission_timeout_seconds=600,
+                                  confirm_costs=True)
+    assert result["plan"]["status"] == "APPROVED"
+    assert {pane["plan_agent_key"]: pane["backend"] for pane in result["panes"]} == {
+        "api": "codex_native", "ui": "omniroute", "qa": "omniroute",
+    }
+    approved_backends = {
+        key: choice["backend"]
+        for key, choice in result["plan"]["approval"]["agent_models"].items()
+    }
+    assert approved_backends == {
+        "api": "codex_native", "ui": "omniroute", "qa": "omniroute",
+    }
+
+
+def test_created_native_plan_authorizes_execution_without_omniroute(env, monkeypatch):
+    from nexus.workspace import coordinator
+
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "gpt-native", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice", lambda model, effort: None,
+    )
+    plan = _llm_plan(env, SIMPLE)
+    approved = service.approve_plan(
+        plan["plan_id"], agent_models={"impl": "gpt-native"},
+                                    backend="codex_native", max_turns_per_agent=1,
+        mission_timeout_seconds=600, confirm_costs=True,
+    )
+    monkeypatch.setattr(
+        "nexus.dev.models.list_dev_models",
+        lambda: pytest.fail("OmniRoute catalog called"),
+    )
+    authorized = coordinator.authorize_execution(
+        plan["plan_id"], agent_keys=["impl"], test_profiles={},
+        max_turns_per_agent=1, mission_timeout_seconds=600,
+    )
+    assert authorized["status"] == "AWAITING_EXECUTION"
+    assert approved["panes"][0]["session"]["backend"] == "codex_native"
+    assert authorized["steps"][0]["test_profile"] == ""
+
+
 def test_multi_plan_needs_cost_confirmation_then_creates_isolated_panes_in_one_step(env):
     plan = _llm_plan(env, MULTI)
     models = {"api": "free/model", "ui": "std/model", "qa": "free/model"}
@@ -402,7 +472,10 @@ def test_explicit_model_change_at_approval_is_recorded_not_silent(env):
     result = service.approve_plan(plan["plan_id"], agent_models={"impl": "std/model"}, max_turns_per_agent=1,
                                   mission_timeout_seconds=600, confirm_costs=True)
     choice = result["plan"]["approval"]["agent_models"]["impl"]
-    assert choice == {"model": "std/model", "cost_status": "standard", "recommended": "free/model", "changed_by_user": True}
+    assert choice == {
+        "model": "std/model", "backend": "omniroute", "cost_status": "standard",
+        "recommended": "free/model", "changed_by_user": True,
+    }
 
 
 def test_low_cost_plan_needs_consent_and_legacy_approval_cannot_launch(env):
