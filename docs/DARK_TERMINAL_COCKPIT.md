@@ -11,7 +11,7 @@ cockpit keeps its identity (Maestro, panes, sidebar, layout controls) and adds a
 |---|---|
 | Project and sessions | Uses the selected project; lists its real sessions. Codex Native sessions and legacy OmniRoute sessions are labelled differently (`Codex Native` / `OmniRoute (legado)`). |
 | Create a Codex Native session | Only by clicking *Criar sessão Codex Native*, with a model you chose from the catalog announced by your local Codex login. Creates an isolated worktree. |
-| Send a task | Only with an active Codex Native session, an enabled server gate, a chosen model, a non-empty task **and** the confirmation checkbox (it resets after every send). The POST is never repeated automatically; after a failed POST the draft is kept and the result is flagged as uncertain. |
+| Send a task | Only with an active Codex Native session, an enabled server gate, a chosen model and a non-empty task, by an explicit click or Enter. The POST is never repeated automatically; after a failed POST the draft is kept and the result is flagged as uncertain. |
 | Follow the run | Live text and activity over SSE, reconnecting from the last event id; polling of the persisted turn is the fallback and the source of truth. The final answer comes from the stored turn. |
 | Interrupt | Explicit *Interromper* click on the active turn. |
 | Human approvals | Pending requests are shown exactly (command, directory, reason, write access) with *Aprovar uma vez* / *Recusar*. Nothing is decided automatically. |
