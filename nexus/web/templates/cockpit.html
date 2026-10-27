@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/css/cockpit.css?v={{ asset_version }}">
   <script src="/static/js/cockpit.js?v={{ asset_version }}" defer></script>
   <script src="/static/js/cockpit-native.js?v={{ asset_version }}" defer></script>
+  <script src="/static/js/cockpit-plans.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -170,10 +171,30 @@
         </article>
 
         <article class="pane" data-pane="review" tabindex="0" aria-label="Pane Revisão">
-          <div class="pane-header"><div class="pane-identity"><span class="pane-icon review-icon">✓</span><div><strong>Revisão</strong><span>GATE HUMANO</span></div></div><div class="pane-tools"><span class="pane-status waiting"><i></i> Aguardando</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Revisão" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Revisão" title="Expandir">⤢</button></div></div>
-          <div class="pane-meta"><span>TIPO <b>Aprovação</b></span><span>STATUS <b>Sem resultado</b></span><span>SESSÃO <b>—</b></span></div>
-          <div class="pane-body review-body"><div class="terminal-kicker"><span>●</span> CHECKPOINT / REVISÃO <span class="right">LEITURA</span></div><div class="review-steps"><div class="review-step"><span class="step-number">01</span><div><strong>Plano da missão</strong><small>Espaço para revisar escopo e dependências</small></div><span class="step-mark">○</span></div><div class="review-step"><span class="step-number">02</span><div><strong>Handoff entre agentes</strong><small>Transferência sujeita à aprovação</small></div><span class="step-mark">○</span></div><div class="review-step"><span class="step-number">03</span><div><strong>Resultado final</strong><small>Integração permanece decisão humana</small></div><span class="step-mark">○</span></div></div></div>
-          <div class="pane-footer"><span class="foot-path">◇ &nbsp;workspace / revisão</span><span>AGUARDANDO DADOS DO NEXUS</span></div>
+          <div class="pane-header"><div class="pane-identity"><span class="pane-icon review-icon">✓</span><div><strong>Revisão</strong><span>GATE HUMANO</span></div></div><div class="pane-tools"><span class="pane-status waiting" id="review-status-badge"><i></i> Aguardando</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Revisão" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Revisão" title="Expandir">⤢</button></div></div>
+          <div class="pane-meta"><span>PLANO <b id="review-meta-plan">—</b></span><span>STATUS <b id="review-meta-status">Sem resultado</b></span><span>PASSO <b id="review-meta-step">—</b></span></div>
+          <div class="pane-body review-body">
+            <div class="terminal-kicker"><span>●</span> MAESTRO NATIVE <span class="right">EXECUÇÃO REAL</span></div>
+            <div class="review-plan-picker">
+              <label for="review-plan-select">Plano</label>
+              <select id="review-plan-select" aria-label="Selecionar plano" disabled><option value="">Selecione um projeto</option></select>
+            </div>
+            <p class="native-note" id="review-plan-note" role="status">Selecione um projeto autorizado.</p>
+            <div id="review-steps" class="review-steps" aria-live="polite"></div>
+            <div id="review-bind" class="review-bind" hidden>
+              <p class="native-note">Vincular revisão nativa ao passo <strong id="review-bind-agent"></strong></p>
+              <select id="review-bind-select" aria-label="Selecionar revisão existente"></select>
+              <div class="native-actions">
+                <button class="cockpit-send" id="review-bind-refresh" type="button">Atualizar revisões</button>
+                <button class="cockpit-send" id="review-bind-submit" type="button" disabled>Vincular revisão</button>
+              </div>
+              <p class="cockpit-compose-error" id="review-bind-error" role="status"></p>
+              <p class="native-note" id="review-bind-note" role="status"></p>
+            </div>
+            <p class="native-note" id="review-handoff-note" role="status"></p>
+            <p class="native-note" id="review-final" role="status"></p>
+          </div>
+          <div class="pane-footer"><span class="foot-path" id="review-foot">◇ &nbsp;workspace / revisão</span><span id="review-foot-right">AGUARDANDO DADOS DO NEXUS</span></div>
         </article>
       </section>
 
