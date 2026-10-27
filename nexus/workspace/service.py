@@ -263,7 +263,12 @@ def _dependency_status(row) -> list[dict]:
         pane = by_key.get(key)
         latest = _latest_mission(_missions(pane["dev_session_id"])) if pane is not None else None
         changed = bool(latest and latest["changed_files"])
-        handoff = (workspace_handoff.latest_transfer(latest["mission_id"], row["id"])
+        # P5.3A: this status display still only reads OmniRoute missions
+        # (via _missions/_latest_mission above); it did not know about a
+        # native dependency before this change either -- latest_transfer()
+        # now requires the evidence backend, and "omniroute" here keeps
+        # this helper's existing behavior exactly, not a regression.
+        handoff = (workspace_handoff.latest_transfer("omniroute", latest["mission_id"], row["id"])
                    if changed and pane is not None else None)
         item = {
             "key": key,

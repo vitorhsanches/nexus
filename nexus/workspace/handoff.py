@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
+from nexus.chat.appserver_client import BACKEND_CODEX_NATIVE
+from nexus.dev.executor import session_backend
 from nexus.dev.service import DevServiceError, validate_dev_project
 from nexus.dev.worktree import (
     DevWorktreeError,
@@ -21,7 +23,7 @@ from nexus.dev.worktree import (
     read_worktree_head_sha,
     verify_dev_worktree,
 )
-from nexus.registry import dev_missions, dev_sessions
+from nexus.registry import dev_integrations, dev_missions, dev_sessions
 from nexus.registry import workspace as panes
 from nexus.registry import workspace_handoff as records
 
@@ -127,28 +129,75 @@ def _identity(source_pane_id: str, target_pane_id: str) -> tuple:
     return source, target
 
 
-def _snapshot(source_pane_id: str, target_pane_id: str, mission_id: str) -> dict:
+def _mission_evidence(mission_id: str, dev_session_id: str) -> tuple[list, str | None]:
+    """OmniRoute source evidence: the exact, latest, conclusively finished mission."""
+    mission = dev_missions.get_mission(mission_id)
+    if mission is None or mission["dev_session_id"] != dev_session_id:
+        _fail("HANDOFF_MISSION_MISMATCH", "The mission does not belong to the source agent.")
+    if mission["status"] != "READY_FOR_REVIEW" or mission["error_code"]:
+        _fail("HANDOFF_MISSION_NOT_READY", "The source mission is not conclusively ready for review.")
+    missions = dev_missions.list_missions(dev_session_id)
+    if not missions or missions[0]["id"] != mission_id:
+        _fail("HANDOFF_MISSION_STALE", "Only the source agent's latest mission can be transferred.")
     try:
-        return _build_snapshot(source_pane_id, target_pane_id, mission_id)
+        result = json.loads(mission["result_json"] or "{}")
+        changed = result.get("changed_files") or []
+        review_fingerprint = (result.get("review") or {}).get("review_id")
+    except (TypeError, ValueError, KeyError):
+        _fail("HANDOFF_MISSION_EVIDENCE", "Mission change evidence is invalid.")
+    return changed, review_fingerprint
+
+
+def _native_evidence(review_id: str, dev_session_id: str) -> tuple[list, str | None]:
+    """Codex Native source evidence: the exact, latest, still-REVIEWED
+    integration review -- never the diff.review_id content fingerprint,
+    which identifies content, not a persisted decision; approval_ready
+    means the snapshot could be completely reviewed, not that a human has
+    consented to anything -- that consent is the handoff's own approve().
+    """
+    review = dev_integrations.get_review(review_id)
+    if review is None or review["dev_session_id"] != dev_session_id:
+        _fail("HANDOFF_REVIEW_MISMATCH", "The review does not belong to the source agent.")
+    if review["status"] != "REVIEWED" or review["error_code"]:
+        _fail("HANDOFF_REVIEW_NOT_READY", "The source review is not conclusively ready for review.")
+    latest = dev_integrations.list_reviews(dev_session_id)
+    if not latest or latest[0]["review_id"] != review_id:
+        _fail("HANDOFF_REVIEW_STALE", "Only the source agent's most recent review can be transferred.")
+    try:
+        # dev_integrations.get_review() already returns the parsed
+        # "snapshot" dict, not the raw "snapshot_json" column.
+        snapshot = review["snapshot"]
+        if not snapshot.get("approval_ready"):
+            _fail("HANDOFF_REVIEW_EVIDENCE", "The source review's snapshot is incomplete.")
+        diff_section = snapshot.get("diff") or {}
+        changed = diff_section.get("files") or []
+        review_fingerprint = diff_section.get("review_id")
+    except (TypeError, ValueError, KeyError):
+        _fail("HANDOFF_REVIEW_EVIDENCE", "Review change evidence is invalid.")
+    return changed, review_fingerprint
+
+
+def _snapshot(source_pane_id: str, target_pane_id: str, source_evidence_id: str) -> dict:
+    try:
+        return _build_snapshot(source_pane_id, target_pane_id, source_evidence_id)
     except (DevWorktreeError, OSError) as error:
         _fail("HANDOFF_WORKTREE_INVALID", f"Worktree verification failed: {error}")
 
 
-def _build_snapshot(source_pane_id: str, target_pane_id: str, mission_id: str) -> dict:
+def _build_snapshot(source_pane_id: str, target_pane_id: str, source_evidence_id: str) -> dict:
     source, target = _identity(source_pane_id, target_pane_id)
     project_path = validate_dev_project(source["project_id"])
-    mission = dev_missions.get_mission(mission_id)
-    if mission is None or mission["dev_session_id"] != source["dev_session_id"]:
-        _fail("HANDOFF_MISSION_MISMATCH", "The mission does not belong to the source agent.")
-    if mission["status"] != "READY_FOR_REVIEW" or mission["error_code"]:
-        _fail("HANDOFF_MISSION_NOT_READY", "The source mission is not conclusively ready for review.")
-    missions = dev_missions.list_missions(source["dev_session_id"])
-    if not missions or missions[0]["id"] != mission_id:
-        _fail("HANDOFF_MISSION_STALE", "Only the source agent's latest mission can be transferred.")
     source_session = dev_sessions.get_session(source["dev_session_id"])
     target_session = dev_sessions.get_session(target["dev_session_id"])
     if not source_session or not target_session or source_session["status"] != "ACTIVE" or target_session["status"] != "ACTIVE":
         _fail("HANDOFF_SESSION_INACTIVE", "Both development sessions must be active.")
+    is_native = session_backend(source_session) == BACKEND_CODEX_NATIVE
+    if is_native:
+        evidence_backend = "codex_native"
+        changed, evidence_review_fingerprint = _native_evidence(source_evidence_id, source["dev_session_id"])
+    else:
+        evidence_backend = "omniroute"
+        changed, evidence_review_fingerprint = _mission_evidence(source_evidence_id, source["dev_session_id"])
     if (dev_missions.get_active_mission_for_session(source_session["id"])
             or dev_sessions.get_active_turn_for_session(source_session["id"])):
         _fail("HANDOFF_SOURCE_BUSY", "The source agent is executing.")
@@ -164,21 +213,21 @@ def _build_snapshot(source_pane_id: str, target_pane_id: str, mission_id: str) -
         _fail("HANDOFF_TARGET_BUSY", "The target agent is executing.")
     diff = read_worktree_diff(str(source_root), source_session["base_sha"])
     try:
-        result = json.loads(mission["result_json"] or "{}")
-        changed = result.get("changed_files") or []
-        mission_review = result.get("review") or {}
-        expected = {(row["path"], row["status"]) for row in changed}
-    except (TypeError, ValueError, KeyError):
-        _fail("HANDOFF_MISSION_EVIDENCE", "Mission change evidence is invalid.")
+        # changed_files (OmniRoute) is already "added"/"modified"; a native
+        # review's diff.files can still say "untracked" -- normalize both
+        # sides the same way "actual" below always has been.
+        expected = {(row["path"], "added" if row["status"] == "untracked" else row["status"]) for row in changed}
+    except (TypeError, KeyError):
+        _fail("HANDOFF_MISSION_EVIDENCE", "Change evidence is invalid.")
     if not expected or len(expected) != len(changed) or diff["truncated"]:
-        _fail("HANDOFF_MISSION_EVIDENCE", "Mission change evidence is empty, duplicated or truncated.")
-    if mission_review.get("review_id") != diff["review_id"]:
-        _fail("HANDOFF_SOURCE_DRIFT", "Source snapshot differs from the review captured when the mission completed.")
+        _fail("HANDOFF_MISSION_EVIDENCE", "Change evidence is empty, duplicated or truncated.")
+    if evidence_review_fingerprint != diff["review_id"]:
+        _fail("HANDOFF_SOURCE_DRIFT", "Source snapshot differs from the review captured when the source finished.")
     actual = {(row["path"], row["status"]) for row in diff["files"]}
     # Existing changed_files labels untracked as added; Git review uses untracked.
     actual = {(path, "added" if status == "untracked" else status) for path, status in actual}
     if actual != expected:
-        _fail("HANDOFF_SOURCE_DRIFT", "Source files no longer match mission evidence.")
+        _fail("HANDOFF_SOURCE_DRIFT", "Source files no longer match the recorded evidence.")
     tracked_target = _git(target_root, "ls-files", "-z").split("\0")
     by_case = {}
     for path in tracked_target:
@@ -207,7 +256,10 @@ def _build_snapshot(source_pane_id: str, target_pane_id: str, mission_id: str) -
         "project_id": source["project_id"], "plan_id": source["plan_id"],
         "source_agent_key": source["plan_agent_key"], "target_agent_key": target["plan_agent_key"],
         "source_pane_id": source["id"], "target_pane_id": target["id"],
-        "source_mission_id": mission_id, "source_session_id": source_session["id"],
+        "source_backend": evidence_backend,
+        "source_mission_id": source_evidence_id if evidence_backend == "omniroute" else None,
+        "source_native_review_id": source_evidence_id if evidence_backend == "codex_native" else None,
+        "source_session_id": source_session["id"],
         "target_session_id": target_session["id"], "source_base_sha": source_session["base_sha"],
         "source_head_sha": source_head, "target_base_sha": target_session["base_sha"],
         "target_head_sha": target_head, "files": files,
@@ -223,8 +275,17 @@ def _same(record, snapshot: dict) -> bool:
             and all(record[key] == snapshot[key] for key in snapshot if key not in {"files", "snapshot_fingerprint"}))
 
 
-def preview(source_pane_id: str, target_pane_id: str, mission_id: str) -> dict:
-    snapshot = _snapshot(source_pane_id, target_pane_id, mission_id)
+def _evidence_id(record) -> str:
+    """The one source evidence id a handoff record actually carries --
+    a mission_id for 'omniroute', a native_review_id for 'codex_native'.
+    The schema's own CHECK constraint already guarantees exactly one of
+    the two columns is set; this never guesses which from the value's
+    shape."""
+    return record["source_mission_id"] or record["source_native_review_id"]
+
+
+def preview(source_pane_id: str, target_pane_id: str, source_evidence_id: str) -> dict:
+    snapshot = _snapshot(source_pane_id, target_pane_id, source_evidence_id)
     if records.target_has_unresolved_transfer(snapshot["target_session_id"]):
         _fail("HANDOFF_TARGET_UNCERTAIN", "A previous transfer to this target needs human review.")
     return records.create(snapshot)
@@ -239,7 +300,7 @@ def approve(handoff_id: str, fingerprint: str, source_pane_id: str, target_pane_
     if record["status"] not in {"PREVIEWED", "APPROVED"}:
         _fail("HANDOFF_NOT_PREVIEWED", "Only a preview can be approved.")
     try:
-        snapshot = _snapshot(source_pane_id, target_pane_id, record["source_mission_id"])
+        snapshot = _snapshot(source_pane_id, target_pane_id, _evidence_id(record))
         if not _same(record, snapshot):
             _fail("HANDOFF_SNAPSHOT_CHANGED", "Snapshot changed; create and approve a new preview.")
     except DevServiceError as error:
@@ -261,7 +322,7 @@ def transfer(handoff_id: str) -> dict:
     if record["status"] != "APPROVED":
         _fail("HANDOFF_NOT_APPROVED", "Only an approved handoff can be transferred.")
     try:
-        snapshot = _snapshot(record["source_pane_id"], record["target_pane_id"], record["source_mission_id"])
+        snapshot = _snapshot(record["source_pane_id"], record["target_pane_id"], _evidence_id(record))
         if not _same(record, snapshot):
             _fail("HANDOFF_SNAPSHOT_CHANGED", "Snapshot changed; create and approve a new preview.")
     except DevServiceError as error:
@@ -273,7 +334,7 @@ def transfer(handoff_id: str) -> dict:
     # The committed TRANSFERRING row is the write-ahead barrier. A crash here
     # leaves the row unreplayable; no startup recovery invokes this function.
     try:
-        snapshot = _snapshot(record["source_pane_id"], record["target_pane_id"], record["source_mission_id"])
+        snapshot = _snapshot(record["source_pane_id"], record["target_pane_id"], _evidence_id(record))
         if not _same(record, snapshot):
             _fail("HANDOFF_SNAPSHOT_CHANGED", "Snapshot changed immediately before transfer.")
         source = dev_sessions.get_session(record["source_session_id"])
@@ -340,40 +401,82 @@ def history(plan_id: str) -> list[dict]:
 def verified_dependency(plan_id: str, source_step, target_step) -> dict:
     """Read-only proof that the exact completed step reached the target intact.
 
-    This deliberately uses the persisted step mission, never the session's
-    latest mission. It is also called immediately before a resumed launch.
+    This deliberately uses the persisted step's own evidence (mission_id or
+    native_review_id), never the session's latest mission/review. It is
+    also called immediately before a resumed launch.
     """
     source = panes.get_pane(source_step["pane_id"])
     target = panes.get_pane(target_step["pane_id"])
-    if source is None or target is None or not source_step["mission_id"]:
-        _fail("RESUME_DEPENDENCY_INVALID", "Dependency identity or mission is missing.")
+    source_evidence_id = source_step["native_review_id"] or source_step["mission_id"]
+    if source is None or target is None or not source_evidence_id:
+        _fail("RESUME_DEPENDENCY_INVALID", "Dependency identity or evidence is missing.")
     if (source["plan_id"] != plan_id or target["plan_id"] != plan_id
             or source["project_id"] != target["project_id"]
             or source["plan_agent_key"] != source_step["agent_key"]
             or target["plan_agent_key"] != target_step["agent_key"]):
         _fail("RESUME_DEPENDENCY_INVALID", "Dependency does not belong to this plan.")
     _identity(source["id"], target["id"])
-    mission = dev_missions.get_mission(source_step["mission_id"])
-    if (mission is None or mission["dev_session_id"] != source["dev_session_id"]
-            or mission["status"] != "READY_FOR_REVIEW" or mission["error_code"]
-            or source_step["status"] != "READY_FOR_REVIEW" or source_step["error_code"]):
-        _fail("RESUME_SOURCE_INVALID", "The persisted source mission is not conclusively ready.")
+    source_session_for_backend = dev_sessions.get_session(source["dev_session_id"])
+    if source_session_for_backend is None:
+        _fail("RESUME_DEPENDENCY_INVALID", "The source development session no longer exists.")
+    is_native = session_backend(source_session_for_backend) == BACKEND_CODEX_NATIVE
+    # Mirrors the original ordering exactly: confirm the source is
+    # conclusively ready, THEN ask whether any transfer exists at all
+    # (DEPENDENCY_WORKTREE_NOT_TRANSFERRED is the common, actionable
+    # "you haven't handed off yet" case) -- and only once a transfer
+    # record actually exists, re-derive and validate the review
+    # fingerprint/changed-files to cross-check it. Parsing that evidence
+    # before the transfer-existence check would surface a confusing
+    # RESUME_EVIDENCE_INVALID for the ordinary "not transferred yet" case.
+    if is_native:
+        evidence_backend = "codex_native"
+        if source_step["mission_id"] or not source_step["native_review_id"]:
+            _fail("RESUME_DEPENDENCY_INVALID", "Native dependency evidence is inconsistent.")
+        review = dev_integrations.get_review(source_step["native_review_id"])
+        if (review is None or review["dev_session_id"] != source["dev_session_id"]
+                or review["status"] != "REVIEWED" or review["error_code"]
+                or source_step["status"] != "READY_FOR_REVIEW" or source_step["error_code"]):
+            _fail("RESUME_SOURCE_INVALID", "The persisted source review is not conclusively ready.")
+    else:
+        evidence_backend = "omniroute"
+        if source_step["native_review_id"] or not source_step["mission_id"]:
+            _fail("RESUME_DEPENDENCY_INVALID", "Mission dependency evidence is inconsistent.")
+        mission = dev_missions.get_mission(source_step["mission_id"])
+        if (mission is None or mission["dev_session_id"] != source["dev_session_id"]
+                or mission["status"] != "READY_FOR_REVIEW" or mission["error_code"]
+                or source_step["status"] != "READY_FOR_REVIEW" or source_step["error_code"]):
+            _fail("RESUME_SOURCE_INVALID", "The persisted source mission is not conclusively ready.")
     try:
-        record = records.latest_transfer(source_step["mission_id"], target["id"])
+        record = records.latest_transfer(evidence_backend, source_evidence_id, target["id"])
     except (TypeError, ValueError, KeyError):
         _fail("RESUME_EVIDENCE_INVALID", "Persisted handoff result cannot be decoded.")
     if record is None or record["status"] != "TRANSFERRED":
-        _fail("DEPENDENCY_WORKTREE_NOT_TRANSFERRED", "The exact source mission has no completed handoff.")
-    try:
-        mission_result = json.loads(mission["result_json"] or "{}")
-        review_id = (mission_result.get("review") or {}).get("review_id")
-        changed = mission_result.get("changed_files") or []
-    except (TypeError, ValueError, AttributeError):
-        _fail("RESUME_EVIDENCE_INVALID", "Source mission review evidence is invalid.")
-    if not isinstance(review_id, str) or not review_id:
-        _fail("RESUME_EVIDENCE_INVALID", "Source mission has no durable review fingerprint.")
-    if mission_result.get("integration_applied") is True:
-        _fail("RESUME_SOURCE_INVALID", "Source mission was already integrated outside this sequence.")
+        _fail("DEPENDENCY_WORKTREE_NOT_TRANSFERRED", "The exact source evidence has no completed handoff.")
+    if is_native:
+        try:
+            snapshot = review["snapshot"]
+            diff_section = snapshot.get("diff") or {}
+            review_id = diff_section.get("review_id")
+            changed = diff_section.get("files") or []
+        except (TypeError, ValueError, AttributeError, KeyError):
+            _fail("RESUME_EVIDENCE_INVALID", "Source review evidence is invalid.")
+        if not isinstance(review_id, str) or not review_id:
+            _fail("RESUME_EVIDENCE_INVALID", "Source review has no durable review fingerprint.")
+        # dev_integrations reviews have their own status machine
+        # (REVIEWED -> APPROVED/APPLYING/APPLIED/REJECTED/...); already-
+        # resolved reviews fail the REVIEWED check above, so there is no
+        # separate embedded "integration_applied" flag to re-check here.
+    else:
+        try:
+            mission_result = json.loads(mission["result_json"] or "{}")
+            review_id = (mission_result.get("review") or {}).get("review_id")
+            changed = mission_result.get("changed_files") or []
+        except (TypeError, ValueError, AttributeError):
+            _fail("RESUME_EVIDENCE_INVALID", "Source mission review evidence is invalid.")
+        if not isinstance(review_id, str) or not review_id:
+            _fail("RESUME_EVIDENCE_INVALID", "Source mission has no durable review fingerprint.")
+        if mission_result.get("integration_applied") is True:
+            _fail("RESUME_SOURCE_INVALID", "Source mission was already integrated outside this sequence.")
     source_session = dev_sessions.get_session(source["dev_session_id"])
     target_session = dev_sessions.get_session(target["dev_session_id"])
     if (not source_session or not target_session or source_session["status"] != "ACTIVE"
@@ -386,6 +489,8 @@ def verified_dependency(plan_id: str, source_step, target_step) -> dict:
             or record["source_agent_key"] != source_step["agent_key"]
             or record["target_agent_key"] != target_step["agent_key"]
             or record["source_pane_id"] != source["id"] or record["target_pane_id"] != target["id"]
+            or record["source_backend"] != evidence_backend
+            or (record["source_mission_id"] or record["source_native_review_id"]) != source_evidence_id
             or record["source_session_id"] != source_session["id"]
             or record["target_session_id"] != target_session["id"]
             or record["source_base_sha"] != source_session["base_sha"]
@@ -400,7 +505,8 @@ def verified_dependency(plan_id: str, source_step, target_step) -> dict:
         _fail("RESUME_EVIDENCE_INVALID", "Persisted handoff evidence is incomplete or mismatched.")
     snapshot_keys = (
         "project_id", "plan_id", "source_agent_key", "target_agent_key",
-        "source_pane_id", "target_pane_id", "source_mission_id", "source_session_id",
+        "source_pane_id", "target_pane_id", "source_backend", "source_mission_id",
+        "source_native_review_id", "source_session_id",
         "target_session_id", "source_base_sha", "source_head_sha",
         "target_base_sha", "target_head_sha",
     )
@@ -413,11 +519,12 @@ def verified_dependency(plan_id: str, source_step, target_step) -> dict:
         _fail("RESUME_EVIDENCE_INVALID", "Changed-file evidence has an invalid shape.")
     try:
         expected_changes = {(item["path"], item["status"]) for item in record["files"]}
-        recorded_changes = {(item["path"], item["status"]) for item in changed}
+        recorded_changes = {(item["path"], "added" if item["status"] == "untracked" else item["status"])
+                            for item in changed}
     except (TypeError, KeyError):
-        _fail("RESUME_EVIDENCE_INVALID", "Source mission changed-file list is invalid.")
+        _fail("RESUME_EVIDENCE_INVALID", "Source changed-file list is invalid.")
     if not expected_changes or len(changed) != len(record["files"]) or recorded_changes != expected_changes:
-        _fail("RESUME_EVIDENCE_INVALID", "Source mission change evidence differs from the handoff.")
+        _fail("RESUME_EVIDENCE_INVALID", "Source change evidence differs from the handoff.")
     project_path = validate_dev_project(source["project_id"])
     try:
         source_root = verify_dev_worktree(project_path, source_session["worktree_path"], source_session["id"])

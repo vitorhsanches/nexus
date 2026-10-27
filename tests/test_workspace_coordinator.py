@@ -1248,3 +1248,121 @@ def test_native_predecessor_blocks_the_next_step_instead_of_skipping_handoff(coo
     assert state["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
     assert state["steps"][1]["status"] == "BLOCKED"
     assert state["steps"][1]["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
+
+
+# P5.3A: assert_session_execution_allowed's dependency-readiness check (the
+# "achado da P5.2A" the task names explicitly) -- a native source has no
+# mission row, so the evidence is the source step's own bound
+# native_review_id, never "no mission_id exists, so it must be satisfied".
+
+
+def _save_review_with_files(session_id, review_id, *, files, approval_ready=True):
+    from nexus.registry import dev_integrations
+
+    return dev_integrations.save_review(
+        review_id=review_id, dev_session_id=session_id, project_id="demo",
+        base_sha="base", target_head="base", target_branch="main",
+        snapshot={"diff": {"files": files, "truncated": False, "review_id": "fingerprint"},
+                 "approval_ready": approval_ready},
+    )
+
+
+def _bind_native_review_to_step(plan_id, agent_key, review_id):
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE workspace_plan_execution_steps SET status='READY_FOR_REVIEW', "
+            "native_review_id=? WHERE plan_id=? AND agent_key=?",
+            (review_id, plan_id, agent_key),
+        )
+
+
+def _pane_id_for(plan_id, agent_key):
+    return next(p["id"] for p in store.panes_for_plan(plan_id) if p["plan_agent_key"] == agent_key)
+
+
+def _attempt_tests_launch(plan_id, token):
+    """"tests" launched the only legitimate way -- as the coordinator would,
+    inside coordinated_launch with its step durably STARTING -- so the
+    launch gate itself passes and the dependency-readiness check below it
+    is what's actually under test."""
+    executions.update_step(plan_id, "tests", "STARTING", owner_token=token)
+    with executions.coordinated_launch(plan_id, "tests", token):
+        return dev_missions.create_mission("DEV-TESTS", "tests", requested_model="free/model",
+                                           allowed_models=["free/model"], test_profile="unit")
+
+
+def test_dependency_gate_blocks_native_source_without_a_bound_review(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    # "api" step exists but was never bound to a review.
+    with pytest.raises(workspace_handoff.HandoffBlocked, match="not ready for review"):
+        _attempt_tests_launch(plan_id, token)
+
+
+def test_dependency_gate_allows_native_source_with_no_changes_to_transfer(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    review = _save_review("DEV-API", _review_id("no-changes"))  # default snapshot has files=[]
+    _bind_native_review_to_step(plan_id, "api", review["review_id"])
+    # No changes means nothing to hand off -- the dependency is satisfied
+    # by the review alone, same policy as an OmniRoute mission with an
+    # empty changed_files list.
+    mission_id = _attempt_tests_launch(plan_id, token)
+    assert mission_id
+
+
+def test_dependency_gate_blocks_native_source_with_untransferred_changes(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    review = _save_review_with_files("DEV-API", _review_id("has-changes"),
+                                      files=[{"path": "api.py", "status": "modified"}])
+    _bind_native_review_to_step(plan_id, "api", review["review_id"])
+    with pytest.raises(workspace_handoff.HandoffBlocked, match="not been transferred"):
+        _attempt_tests_launch(plan_id, token)
+
+
+def test_dependency_gate_allows_native_source_after_a_proven_transfer(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    review = _save_review_with_files("DEV-API", _review_id("transferred"),
+                                      files=[{"path": "api.py", "status": "modified"}])
+    _bind_native_review_to_step(plan_id, "api", review["review_id"])
+    api_pane = _pane_id_for(plan_id, "api")
+    tests_pane = _pane_id_for(plan_id, "tests")
+    with database.get_connection() as connection:
+        connection.execute(
+            """INSERT INTO workspace_handoffs
+               (id, project_id, plan_id, source_agent_key, target_agent_key, source_pane_id, target_pane_id,
+                source_backend, source_native_review_id, source_session_id, target_session_id, source_base_sha,
+                source_head_sha, target_base_sha, target_head_sha, snapshot_fingerprint, files_json, status,
+                created_at, approved_at, started_at, finished_at)
+               VALUES ('HANDOFF-PROVEN', 'demo', ?, 'api', 'tests', ?, ?,
+                       'codex_native', ?, 'DEV-API', 'DEV-TESTS', 'base', 'base', 'base', 'base',
+                       'fp', '[{"path": "api.py", "status": "modified"}]', 'TRANSFERRED',
+                       'now', 'now', 'now', 'now')""",
+            (plan_id, api_pane, tests_pane, review["review_id"]),
+        )
+    mission_id = _attempt_tests_launch(plan_id, token)
+    assert mission_id
+
+
+def test_dependency_gate_blocks_native_source_with_a_rejected_review(coord_env):
+    """The bound review must still be currently REVIEWED -- a review id
+    that was rejected (or applied, or superseded) must never be treated
+    as satisfying the dependency just because it was once bound."""
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    review = _save_review("DEV-API", _review_id("rejected-dep"), status="REJECTED")
+    _bind_native_review_to_step(plan_id, "api", review["review_id"])
+    with pytest.raises(workspace_handoff.HandoffBlocked, match="invalid or no longer current"):
+        _attempt_tests_launch(plan_id, token)
