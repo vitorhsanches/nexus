@@ -8,6 +8,8 @@ There is intentionally no route that applies, merges, pushes or deletes.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +28,7 @@ class PaneCreateRequest(BaseModel):
     role: str = Field(min_length=1, max_length=32)
     title: str | None = Field(default=None, max_length=200)
     model: str | None = Field(default=None, min_length=1, max_length=128)
+    backend: Literal["omniroute", "codex_native"] = "omniroute"
     plan_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -90,6 +93,7 @@ class MaestroMessageRequest(BaseModel):
 class PlanApproveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     agent_models: dict[str, str] = Field(min_length=1, max_length=8)
+    backend: Literal["omniroute", "codex_native"] = "omniroute"
     max_turns_per_agent: int = Field(ge=1, le=6)
     mission_timeout_seconds: int = Field(ge=60, le=3600)
     confirm_costs: bool = False
@@ -185,6 +189,7 @@ def create_pane(request: PaneCreateRequest):
         role=request.role,
         title=request.title,
         model=request.model,
+        backend=request.backend,
         plan_id=request.plan_id,
     )
 
@@ -274,6 +279,7 @@ def approve_plan(plan_id: str, request: PlanApproveRequest):
         service.approve_plan,
         plan_id,
         agent_models=request.agent_models,
+        backend=request.backend,
         max_turns_per_agent=request.max_turns_per_agent,
         mission_timeout_seconds=request.mission_timeout_seconds,
         confirm_costs=request.confirm_costs,
