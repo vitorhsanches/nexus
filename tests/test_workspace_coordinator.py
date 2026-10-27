@@ -205,9 +205,17 @@ def _set_backend(session_id: str, backend: str) -> None:
         connection.execute("UPDATE dev_sessions SET backend=? WHERE id=?", (backend, session_id))
 
 
+def _authorize_with_native_api(env):
+    """Like _authorize(), but "api" is codex_native: it gets no test profile."""
+    return coordinator.authorize_execution(
+        env["plan_id"], agent_keys=["api", "tests"], test_profiles={"tests": "unit"},
+        max_turns_per_agent=1, mission_timeout_seconds=60,
+    )
+
+
 def test_native_turn_launch_is_gated_without_any_mission_row(coord_env):
     _set_backend("DEV-API", "codex_native")
-    _authorize(coord_env)
+    _authorize_with_native_api(coord_env)
     plan_id = coord_env["plan_id"]
     token = executions.claim_execution(plan_id)
     executions.update_step(plan_id, "api", "STARTING", owner_token=token)
@@ -231,7 +239,7 @@ def test_native_turn_launch_is_gated_without_any_mission_row(coord_env):
 def test_native_turn_launch_refuses_replay_after_the_first_turn(coord_env):
     """Codex Native has no repair-turn loop: exactly one launch per step, ever."""
     _set_backend("DEV-API", "codex_native")
-    _authorize(coord_env)
+    _authorize_with_native_api(coord_env)
     plan_id = coord_env["plan_id"]
     token = executions.claim_execution(plan_id)
     executions.update_step(plan_id, "api", "STARTING", owner_token=token)
@@ -256,7 +264,7 @@ def test_native_turn_launch_refuses_replay_after_the_first_turn(coord_env):
 
 def test_native_turn_launch_requires_a_live_owner_token(coord_env):
     _set_backend("DEV-API", "codex_native")
-    _authorize(coord_env)
+    _authorize_with_native_api(coord_env)
     plan_id = coord_env["plan_id"]
     token = executions.claim_execution(plan_id)
     executions.update_step(plan_id, "api", "STARTING", owner_token=token)
@@ -288,7 +296,7 @@ def test_native_and_omniroute_panes_are_gated_independently_in_one_plan(coord_en
                                           "max_turns": 1, "mission_timeout_seconds": 60}}),
              coord_env["plan_id"]),
         )
-    _authorize(coord_env)
+    _authorize_with_native_api(coord_env)
     plan_id = coord_env["plan_id"]
     token = executions.claim_execution(plan_id)
     executions.update_step(plan_id, "api", "STARTING", owner_token=token)
@@ -306,6 +314,56 @@ def test_native_and_omniroute_panes_are_gated_independently_in_one_plan(coord_en
         mission_id = dev_missions.create_mission("DEV-TESTS", "tests", requested_model="free/model",
                                                  allowed_models=["free/model"], test_profile="unit")
     assert mission_id
+
+
+# P5.2B: test_profile is backend-aware -- required for OmniRoute, never
+# fabricated for Codex Native, never silently accepted for it either.
+
+
+def test_authorize_execution_omits_test_profile_for_native_agent(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    result = coordinator.authorize_execution(
+        coord_env["plan_id"], agent_keys=["api", "tests"], test_profiles={"tests": "unit"},
+        max_turns_per_agent=1, mission_timeout_seconds=60,
+    )
+    assert result["status"] == "AWAITING_EXECUTION"
+    steps = {step["agent_key"]: step for step in result["steps"]}
+    assert steps["api"]["test_profile"] == ""
+    assert steps["tests"]["test_profile"] == "unit"
+    assert steps["api"]["native_turn_id"] is None and steps["api"]["native_review_id"] is None
+
+
+def test_authorize_execution_rejects_test_profile_supplied_for_native_agent(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    with pytest.raises(DevServiceError) as error:
+        coordinator.authorize_execution(
+            coord_env["plan_id"], agent_keys=["api", "tests"],
+            test_profiles={"api": "unit", "tests": "unit"},
+            max_turns_per_agent=1, mission_timeout_seconds=60,
+        )
+    assert error.value.code == "TEST_PROFILE_NOT_APPLICABLE"
+    assert executions.get_execution(coord_env["plan_id"]) is None
+
+
+def test_authorize_execution_still_requires_test_profile_for_omniroute_agent(coord_env):
+    with pytest.raises(DevServiceError) as error:
+        coordinator.authorize_execution(
+            coord_env["plan_id"], agent_keys=["api", "tests"], test_profiles={"tests": "unit"},
+            max_turns_per_agent=1, mission_timeout_seconds=60,
+        )
+    assert error.value.code == "TEST_PROFILES_NOT_CONFIRMED"
+    assert executions.get_execution(coord_env["plan_id"]) is None
+
+
+def test_authorize_execution_all_native_plan_needs_no_test_profiles(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    _set_backend("DEV-TESTS", "codex_native")
+    result = coordinator.authorize_execution(
+        coord_env["plan_id"], agent_keys=["api", "tests"], test_profiles={},
+        max_turns_per_agent=1, mission_timeout_seconds=60,
+    )
+    assert result["status"] == "AWAITING_EXECUTION"
+    assert all(step["test_profile"] == "" for step in result["steps"])
 
 
 def test_sequential_execution_reuses_mission_runner_and_completes_for_review(coord_env, monkeypatch):

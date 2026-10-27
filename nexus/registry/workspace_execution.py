@@ -372,6 +372,7 @@ def update_execution(plan_id: str, status: str, *, current_index: int | None = N
 
 
 def update_step(plan_id: str, agent_key: str, status: str, *, mission_id: str | None = None,
+                native_turn_id: str | None = None, native_review_id: str | None = None,
                 result: dict | None = None, error_code: str | None = None,
                 error_message: str | None = None, owner_token: str) -> None:
     if status not in STEP_STATUSES:
@@ -380,6 +381,10 @@ def update_step(plan_id: str, agent_key: str, status: str, *, mission_id: str | 
     params: list = [status, _now()]
     if mission_id is not None:
         fields.append("mission_id = ?"); params.append(mission_id)
+    if native_turn_id is not None:
+        fields.append("native_turn_id = ?"); params.append(native_turn_id)
+    if native_review_id is not None:
+        fields.append("native_review_id = ?"); params.append(native_review_id)
     if result is not None:
         fields.append("result_json = ?"); params.append(json.dumps(result, ensure_ascii=False))
     if error_code is not None:
@@ -433,6 +438,7 @@ def view(plan_id: str) -> dict | None:
         "steps": [{
             "agent_key": step["agent_key"], "ordinal": step["ordinal"], "pane_id": step["pane_id"],
             "test_profile": step["test_profile"], "status": step["status"], "mission_id": step["mission_id"],
+            "native_turn_id": step["native_turn_id"], "native_review_id": step["native_review_id"],
             "result": _json(step["result_json"], None), "error_code": step["error_code"],
             "error_message": step["error_message"], "started_at": step["started_at"],
             "finished_at": step["finished_at"], "updated_at": step["updated_at"],

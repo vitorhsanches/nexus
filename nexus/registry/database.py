@@ -633,6 +633,8 @@ def initialize_database() -> None:
                 test_profile TEXT NOT NULL,
                 status TEXT NOT NULL,
                 mission_id TEXT,
+                native_turn_id TEXT,
+                native_review_id TEXT,
                 result_json TEXT,
                 error_code TEXT,
                 error_message TEXT,
@@ -652,6 +654,14 @@ def initialize_database() -> None:
         for column in ("owner_token", "lease_renewed_at", "resume_history_json"):
             if column not in execution_cols:
                 connection.execute(f"ALTER TABLE workspace_plan_executions ADD COLUMN {column} TEXT")
+        # P5.2B: Codex Native evidence per step (a turn, then a human-created
+        # review) -- distinct from, and never confused with, mission_id.
+        # Nullable and additive: an OmniRoute-only database or plan never
+        # populates them.
+        step_cols = {row[1] for row in connection.execute("PRAGMA table_info(workspace_plan_execution_steps)")}
+        for column in ("native_turn_id", "native_review_id"):
+            if column not in step_cols:
+                connection.execute(f"ALTER TABLE workspace_plan_execution_steps ADD COLUMN {column} TEXT")
 
         # P2B.2A: an approved, immutable snapshot and a durable write barrier.
         # A TRANSFERRING row is deliberately never reclaimed automatically.

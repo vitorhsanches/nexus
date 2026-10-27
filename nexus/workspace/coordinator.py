@@ -65,14 +65,27 @@ def authorize_execution(
     expected_order = list(planned)
     if keys != expected_order:
         _fail("AGENTS_NOT_CONFIRMED", "Execution must use the exact approved agent order.", 400)
-    if set(test_profiles) != set(planned) or any(not isinstance(value, str) or not value.strip() for value in test_profiles.values()):
-        _fail("TEST_PROFILES_NOT_CONFIRMED", "Choose one trusted test profile for every agent.", 400)
-    if max_turns_per_agent != approval.get("max_turns_per_agent") or mission_timeout_seconds != approval.get("mission_timeout_seconds"):
-        _fail("LIMITS_NOT_CONFIRMED", "Execution limits must exactly match the plan approval.", 400)
     selected = approval.get("agent_models") or {}
     panes = {pane["plan_agent_key"]: pane for pane in store.panes_for_plan(plan_id)}
     if set(panes) != set(planned) or any(panes[key]["model"] != selected.get(key, {}).get("model") for key in planned):
         _fail("PANES_NOT_READY", "The approved plan does not have the exact authorized agents and models.")
+    from nexus.registry import dev_sessions
+
+    # P5.2B: a Codex Native agent has no trusted test profile to confirm --
+    # never invent a fictitious one for it, and never silently accept one
+    # a caller mistakenly supplies for it either.
+    native_keys = set()
+    for key, pane in panes.items():
+        session = dev_sessions.get_session(pane["dev_session_id"])
+        if session is not None and session["backend"] == "codex_native":
+            native_keys.add(key)
+    if set(test_profiles) & native_keys:
+        _fail("TEST_PROFILE_NOT_APPLICABLE", "Codex Native agents have no test profile; omit them.", 400)
+    required_profiles = set(planned) - native_keys
+    if set(test_profiles) != required_profiles or any(not isinstance(value, str) or not value.strip() for value in test_profiles.values()):
+        _fail("TEST_PROFILES_NOT_CONFIRMED", "Choose one trusted test profile for every OmniRoute agent.", 400)
+    if max_turns_per_agent != approval.get("max_turns_per_agent") or mission_timeout_seconds != approval.get("mission_timeout_seconds"):
+        _fail("LIMITS_NOT_CONFIRMED", "Execution limits must exactly match the plan approval.", 400)
     from nexus.dev.test_profiles import list_test_profiles
     available = {row["id"] for row in list_test_profiles(plan["project_id"])}
     missing = sorted(set(test_profiles.values()) - available)
@@ -90,7 +103,8 @@ def authorize_execution(
     if missing_consent and not confirm_costs:
         _fail("COST_CONFIRMATION_REQUIRED", "Execution needs explicit cost confirmation for the selected routes.", 400)
     steps = [
-        {"agent_key": key, "ordinal": index, "pane_id": panes[key]["id"], "test_profile": test_profiles[key]}
+        {"agent_key": key, "ordinal": index, "pane_id": panes[key]["id"],
+         "test_profile": test_profiles.get(key, "")}
         for index, key in enumerate(keys)
     ]
     try:
