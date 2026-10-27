@@ -111,6 +111,11 @@ class PlanExecuteRequest(BaseModel):
     confirm_costs: bool = False
 
 
+class NativeReviewBindRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
 class HandoffPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_pane_id: str = Field(min_length=1, max_length=64)
@@ -333,6 +338,20 @@ def resume_plan(plan_id: str):
     from nexus.workspace import coordinator
 
     return _call(coordinator.resume, plan_id)
+
+
+@router.post("/plans/{plan_id}/steps/{agent_key}/review")
+def bind_plan_step_review(plan_id: str, agent_key: str, request: NativeReviewBindRequest):
+    """Explicit operator action (P5.UIA): bind a confirmed Codex Native
+    review as a coordinated plan step's completion evidence. A thin
+    wrapper only -- every identity, backend, freshness, staleness and
+    fencing check already lives in coordinator.bind_native_review; this
+    route adds no new validation, gate or side effect of its own. Never
+    creates a review, approves/transfers a handoff, resumes the sequence,
+    applies or pushes anything -- those remain separate, explicit actions."""
+    from nexus.workspace import coordinator
+
+    return _call(coordinator.bind_native_review, plan_id, agent_key, request.review_id)
 
 
 @router.post("/handoffs/preview")
