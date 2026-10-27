@@ -246,7 +246,6 @@ def _step_result(mission) -> dict:
 
 def _resume_evidence(plan_id: str, execution: dict) -> dict:
     """Read-only eligibility for the one legacy handoff block we can resume."""
-    from nexus.dev.models import list_dev_models
     from nexus.dev.test_profiles import list_test_profiles
     from nexus.registry import workspace_handoff
     from nexus.workspace import handoff, service
@@ -309,7 +308,6 @@ def _resume_evidence(plan_id: str, execution: dict) -> dict:
         for step in steps
     ):
         _fail("RESUME_AUTHORIZATION_INVALID", "A trusted test profile changed or disappeared.")
-    catalog = {item["id"]: item for item in list_dev_models()["models"]}
     selected = approval.get("agent_models") or {}
     if not isinstance(selected, dict):
         _fail("RESUME_AUTHORIZATION_INVALID", "Approved model map is invalid.")
@@ -319,11 +317,26 @@ def _resume_evidence(plan_id: str, execution: dict) -> dict:
         pane = store.get_pane(step["pane_id"])
         choice = selected.get(step["agent_key"])
         model = choice.get("model") if isinstance(choice, dict) else None
+        backend = "codex_native" if step["agent_key"] in native_keys else "omniroute"
+        expected_backend = (
+            choice.get("backend", approval.get("backend", "omniroute"))
+            if isinstance(choice, dict) else None
+        )
+        if expected_backend != backend or not isinstance(model, str):
+            _fail(
+                "RESUME_AUTHORIZATION_INVALID",
+                "An agent's approved backend or model is invalid.",
+            )
+        try:
+            live_model = service._require_backend_model(model, backend)
+        except DevServiceError:
+            _fail(
+                "RESUME_AUTHORIZATION_INVALID",
+                "An exact approved model is no longer available.",
+            )
         if (pane is None or pane["plan_id"] != plan_id or pane["project_id"] != plan["project_id"]
                 or pane["plan_agent_key"] != step["agent_key"] or pane["model"] != model
-                or not isinstance(model, str)
-                or model not in catalog
-                or (catalog[model].get("cost_status") != "free" and model not in confirmed_ids)):
+                or (live_model.get("cost_status") != "free" and model not in confirmed_ids)):
             _fail("RESUME_AUTHORIZATION_INVALID", "An exact model or its cost consent is invalid.")
     pending_pane = store.get_pane(pending["pane_id"])
     try:

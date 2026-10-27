@@ -1448,6 +1448,13 @@ def _git(root, *args):
     subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
 
 
+def _git_output(root, *args):
+    result = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
 @pytest.fixture
 def two_native_env(tmp_path, monkeypatch):
     original_db, original_storage = database.DATABASE_PATH, database.STORAGE_DIR
@@ -1455,7 +1462,24 @@ def two_native_env(tmp_path, monkeypatch):
     database.DATABASE_PATH = database.STORAGE_DIR / "nexus.db"
     monkeypatch.setenv("NEXUS_DEV_WORKTREE_ROOT", str(tmp_path / "worktrees"))
     database.initialize_database()
-    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: {"models": [FREE], "catalog_error": None})
+    monkeypatch.setattr(
+        "nexus.dev.models.list_dev_models",
+        lambda: pytest.fail("a Codex Native plan must not use the OmniRoute catalog"),
+    )
+    monkeypatch.setattr(
+        "nexus.chat.service.list_models",
+        lambda *, refresh=False, backend="omniroute": {
+            "backend": backend,
+            "models": (
+                [{"id": "free/model", "cost_status": "known"}]
+                if backend == "codex_native" else []
+            ),
+            "catalog_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice", lambda _model, _effort: None
+    )
     repo = tmp_path / "project"
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -1483,14 +1507,24 @@ def two_native_env(tmp_path, monkeypatch):
     }
     plan_id = store.create_plan("demo", "two native agents", policy_version="maestro-plan/1",
                                 complexity="multi", proposal=proposal, source="llm")
-    approval = {"agent_models": {key: {"model": "free/model", "cost_status": "free"} for key in ("api", "tests")},
-               "max_turns_per_agent": 1, "mission_timeout_seconds": 60, "cost_confirmed_for": []}
+    approval = {
+        "agent_models": {
+            key: {"model": "free/model", "backend": "codex_native", "cost_status": "known"}
+            for key in ("api", "tests")
+        },
+        "max_turns_per_agent": 1,
+        "mission_timeout_seconds": 60,
+        "cost_confirmed_for": ["free/model"],
+    }
     with database.get_connection() as connection:
         connection.execute("UPDATE workspace_plans SET status='APPROVED', approval_json=? WHERE id=?",
                           (json.dumps(approval), plan_id))
     source = create_dev_session("demo", backend="codex_native")
     target = create_dev_session("demo", backend="codex_native")
-    authorization = {"model": "free/model", "cost_status": "free", "max_turns": 1, "mission_timeout_seconds": 60}
+    authorization = {
+        "model": "free/model", "cost_status": "known", "max_turns": 1,
+        "mission_timeout_seconds": 60,
+    }
     api_pane = store.create_pane(project_id="demo", dev_session_id=source["session_id"], origin="maestro",
                                  role="backend", title="API", model="free/model", plan_id=plan_id,
                                  plan_agent_key="api", brief={"task": "API", "acceptance_criteria": ["ok"],
@@ -1563,6 +1597,9 @@ def test_two_native_agents_sequence_with_approved_handoff_of_changes(two_native_
     Agent B. The second agent must never launch before every step is proven."""
     env = two_native_env
     plan_id = env["plan_id"]
+    original_head = _git_output(env["repo"], "rev-parse", "HEAD")
+    original_status = _git_output(env["repo"], "status", "--porcelain")
+    original_content = (Path(env["repo"]) / "api.py").read_text(encoding="utf-8")
     turns = []
     monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
     _authorize_both_native(env)
@@ -1610,6 +1647,9 @@ def test_two_native_agents_sequence_with_approved_handoff_of_changes(two_native_
     assert done["status"] == "AWAITING_REVIEW"
     assert done["result"]["human_approval_required"] is True
     assert done["result"]["integration_applied"] is False
+    assert _git_output(env["repo"], "rev-parse", "HEAD") == original_head
+    assert _git_output(env["repo"], "status", "--porcelain") == original_status
+    assert (Path(env["repo"]) / "api.py").read_text(encoding="utf-8") == original_content
 
 
 def test_second_native_agent_never_launches_without_a_bound_review(coord_env, monkeypatch):
@@ -1683,6 +1723,43 @@ def test_resume_requires_a_transferred_handoff_not_merely_approved(coord_env):
     with pytest.raises(DevServiceError) as error:
         coordinator.resume(plan_id)
     assert error.value.code == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+
+
+def test_resume_refuses_revoked_plan_approval_after_transfer(two_native_env, monkeypatch):
+    env = two_native_env
+    plan_id = env["plan_id"]
+    turns = []
+    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    _authorize_both_native(env)
+    coordinator.start(plan_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not turns:
+        time.sleep(0.02)
+    assert len(turns) == 1
+    (Path(env["source"]["worktree_path"]) / "api.py").write_text(
+        "def api():\n    return 2\n", encoding="utf-8"
+    )
+    dev_sessions.update_turn_status(turns[0], "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review_id = _native_review(env, "source", "revoked-approval")
+    coordinator.bind_native_review(plan_id, "api", review_id)
+    blocked = _wait(plan_id, {"BLOCKED"})
+    assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+    preview = handoff.preview(env["api_pane"], env["tests_pane"], review_id)
+    handoff.approve(
+        preview["handoff_id"], preview["snapshot_fingerprint"],
+        env["api_pane"], env["tests_pane"],
+    )
+    assert handoff.transfer(preview["handoff_id"])["status"] == "TRANSFERRED"
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plans SET status='DRAFT' WHERE id=?", (plan_id,))
+    with pytest.raises(DevServiceError) as error:
+        coordinator.resume(plan_id)
+    assert error.value.code == "RESUME_AUTHORIZATION_INVALID"
+    assert len(turns) == 1
+    assert workspace_handoff.latest_transfer(
+        "codex_native", review_id, env["tests_pane"]
+    )["status"] == "TRANSFERRED"
 
 
 def test_claim_resume_refuses_a_handoff_recorded_for_the_wrong_pane(coord_env):
