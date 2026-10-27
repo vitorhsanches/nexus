@@ -16,6 +16,7 @@ nexus/storage/programs/
 # Local test/run artifacts
 .pytest_cache/
 .pytest-tmp*/
+pytest-cache-files*/
 %SystemDrive%/
 nexus/storage/.fuse_hidden*
 *.log

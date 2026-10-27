@@ -259,10 +259,13 @@ def test_interrupting_a_turn_cancels_its_pending_approval(isolated_registry):
     assert result["status"] == "INTERRUPT_REQUESTED"
     assert NativeFake.responses == [(7, {"decision": "cancel"})]
     assert _wait_until(lambda: _turn_status(turn_id) == "CANCELLED")
-    assert approvals.list_for_session(session_id)[0]["status"] == "CANCELLED"
+    cancelled = approvals.list_for_session(session_id)[0]
+    assert cancelled["status"] == "CANCELLED"
+    assert "turn ended" in cancelled["status_detail"]
     with pytest.raises(DevServiceError) as excinfo:
         approvals.decide(session_id, pending["approval_id"], "accept")
-    assert excinfo.value.code == "APPROVAL_NOT_PENDING"
+    assert excinfo.value.code == "APPROVAL_CANCELLED"
+    assert "turn ended" in str(excinfo.value)
 
 
 def test_revoked_authorization_turns_an_accept_into_a_decline(isolated_registry):
@@ -279,7 +282,9 @@ def test_an_unanswered_request_expires_as_a_decline(isolated_registry):
     session_id, turn_id, pending = _start_turn_waiting_for_approval(isolated_registry)
     approvals._expire(pending["approval_id"])
     assert NativeFake.responses == [(7, {"decision": "decline"})]
-    assert approvals.list_for_session(session_id)[0]["status"] == "EXPIRED"
+    expired = approvals.list_for_session(session_id)[0]
+    assert expired["status"] == "EXPIRED"
+    assert "a human decision" in expired["status_detail"]
     assert _wait_until(lambda: _turn_status(turn_id) == "COMPLETED")
 
 
@@ -291,10 +296,13 @@ def test_a_pending_row_without_a_live_request_is_expired_after_a_restart(isolate
             "VALUES ('APPROVAL-OLD', ?, 'DEVTURN-X', 'command', ?, 'PENDING', 'then')",
             (session["session_id"], json.dumps({"kind": "command"})),
         )
-    assert approvals.list_for_session(session["session_id"])[0]["status"] == "EXPIRED"
+    expired = approvals.list_for_session(session["session_id"])[0]
+    assert expired["status"] == "EXPIRED"
+    assert "no requested action was executed" in expired["status_detail"]
     with pytest.raises(DevServiceError) as excinfo:
         approvals.decide(session["session_id"], "APPROVAL-OLD", "accept")
-    assert excinfo.value.code == "APPROVAL_NOT_PENDING"
+    assert excinfo.value.code == "APPROVAL_EXPIRED"
+    assert "no requested action was executed" in str(excinfo.value)
 
 
 def test_a_decision_must_target_the_owning_session(isolated_registry):

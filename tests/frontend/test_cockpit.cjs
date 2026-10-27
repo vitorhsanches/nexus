@@ -8,96 +8,7 @@ const root = path.resolve(__dirname, '../..');
 const script = fs.readFileSync(path.join(root, 'nexus/web/static/js/cockpit.js'), 'utf8');
 const template = fs.readFileSync(path.join(root, 'nexus/web/templates/cockpit.html'), 'utf8');
 
-class TextNode {
-  constructor(value) { this.value = String(value); this.parentNode = null; }
-  get textContent() { return this.value; }
-  set textContent(value) { this.value = String(value); }
-  cloneNode() { return new TextNode(this.value); }
-}
-
-class Element {
-  constructor(tag = 'div', className = '') {
-    this.tagName = tag.toUpperCase(); this.className = className; this.id = '';
-    this.children = []; this.parentNode = null; this.dataset = {}; this.attributes = {};
-    this.listeners = {}; this.hidden = false; this.disabled = false; this.scrollTop = 0;
-    this.value = ''; this.checked = false;
-    this.style = { removeProperty(name) { delete this[name]; } };
-    this.clientWidth = 1200; this.clientHeight = 600;
-    this._text = '';
-    this.classList = {
-      contains: name => this.className.split(/\s+/).includes(name),
-      add: (...names) => { this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(' '); },
-      remove: (...names) => { this.className = this.className.split(/\s+/).filter(name => name && !names.includes(name)).join(' '); },
-      toggle: (name, force) => {
-        const enabled = force === undefined ? !this.classList.contains(name) : force;
-        if (enabled) this.classList.add(name); else this.classList.remove(name);
-        return enabled;
-      },
-    };
-  }
-  get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
-  set textContent(value) { this._text = String(value); this.children = []; }
-  get lastChild() { return this.children.at(-1) || null; }
-  setAttribute(name, value) { this.attributes[name] = String(value); }
-  removeAttribute(name) { delete this.attributes[name]; }
-  append(...nodes) {
-    for (const node of nodes) {
-      const child = typeof node === 'string' ? new TextNode(node) : node;
-      if (child.parentNode) child.parentNode.children = child.parentNode.children.filter(item => item !== child);
-      child.parentNode = this; this.children.push(child);
-    }
-  }
-  replaceChildren(...nodes) { this.children.forEach(child => { child.parentNode = null; }); this.children = []; this._text = ''; this.append(...nodes); }
-  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(item => item !== this); this.parentNode = null; }
-  cloneNode(deep) {
-    const copy = new Element(this.tagName, this.className);
-    copy.id = this.id; copy.dataset = { ...this.dataset }; copy.attributes = { ...this.attributes };
-    copy.hidden = this.hidden; copy._text = this._text; copy.value = this.value; copy.checked = this.checked;
-    if (deep) copy.append(...this.children.map(child => child.cloneNode(true)));
-    return copy;
-  }
-  addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
-  dispatch(name, target = this, extra = {}) {
-    const event = { target, currentTarget: this, button: 0, preventDefault() {}, stopPropagation() {}, ...extra };
-    for (const callback of this.listeners[name] || []) callback(event);
-  }
-  requestSubmit() { this.dispatch('submit'); }
-  focus() {}
-  scrollIntoView() {}
-  matches(selector) {
-    if (selector === ':last-child') return this.parentNode?.children.at(-1) === this;
-    const attribute = selector.match(/\[data-pane="([^"]+)"\]/);
-    if (attribute && this.dataset.pane !== attribute[1]) return false;
-    const withoutAttribute = selector.replace(/\[data-pane="[^"]+"\]/, '');
-    const classes = [...withoutAttribute.matchAll(/\.([\w-]+)/g)].map(match => match[1]);
-    if (classes.some(name => !this.classList.contains(name))) return false;
-    const tag = withoutAttribute.split(/[.:[\s]/)[0];
-    return !tag || this.tagName === tag.toUpperCase();
-  }
-  descendants() { return this.children.filter(child => child instanceof Element).flatMap(child => [child, ...child.descendants()]); }
-  querySelectorAll(selector) {
-    if (selector.startsWith(':scope > ')) return this.children.filter(child => child instanceof Element && child.matches(selector.slice(9)));
-    if (selector.includes(' > ')) {
-      const [parent, child] = selector.split(' > ');
-      return this.querySelectorAll(parent).flatMap(node => node.children.filter(item => item instanceof Element && item.matches(child.replace(':last-child', ''))
-        && (!child.endsWith(':last-child') || node.children.at(-1) === item)));
-    }
-    if (selector.includes(' ')) {
-      const [parent, child] = selector.split(' ');
-      return this.querySelectorAll(parent).flatMap(node => node.querySelectorAll(child));
-    }
-    return this.descendants().filter(node => node.matches(selector));
-  }
-  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
-  closest(selector) { for (let node = this; node; node = node.parentNode) if (node instanceof Element && node.matches(selector)) return node; return null; }
-}
-
-const el = (tag, className = '', text) => {
-  const node = new Element(tag, className);
-  if (text !== undefined) node.textContent = text;
-  return node;
-};
-const nodeWith = (tag, className, ...children) => { const node = el(tag, className); node.append(...children); return node; };
+const { TextNode, Element, el, nodeWith } = require('./fake_dom.cjs');
 
 function buildPane(kind) {
   const pane = el('article', `pane${kind === 'maestro' ? ' selected' : ''}`);
@@ -111,20 +22,21 @@ function buildPane(kind) {
   let body;
   if (kind === 'maestro') body = nodeWith('div', 'pane-body maestro-body', kicker, nodeWith('div', 'maestro-copy', el('h3'), el('p')));
   else if (kind === 'review') body = nodeWith('div', 'pane-body', kicker, el('div', 'review-steps'));
+  else if (kind === 'native') body = nodeWith('div', 'pane-body terminal-body', kicker);
   else body = nodeWith('div', 'pane-body terminal-body', kicker);
   const footer = nodeWith('div', 'pane-footer', el('span', 'foot-path'), el('span'));
   pane.append(header, meta, body, footer);
   return pane;
 }
 
-function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null } = {}) {
+function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null, withNative = false } = {}) {
   const rootNode = el('body');
   const ids = [...template.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
   const byId = Object.fromEntries(ids.map(id => [id, el('div')]));
   for (const [id, node] of Object.entries(byId)) { node.id = id; rootNode.append(node); }
   const grid = byId['pane-grid'];
   grid.clientWidth = gridWidth;
-  grid.append(buildPane('maestro'), buildPane('agent-a'), buildPane('agent-b'), buildPane('review'));
+  grid.append(buildPane('maestro'), ...(withNative ? [buildPane('native')] : []), buildPane('agent-a'), buildPane('agent-b'), buildPane('review'));
   const overview = el('div');
   for (let index = 0; index < 3; index++) overview.append(nodeWith('div', 'overview-stat', el('strong')));
   rootNode.append(overview);
@@ -299,8 +211,81 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
     frames.clear();
     frame?.();
   };
-  return { byId, grid, box, calls, settle, refresh, sources, tick, resize };
+  return { byId, grid, box, calls, settle, refresh, sources, tick, resize, context };
 }
+
+test('compact cockpit header keeps project counts and actions above the grid', () => {
+  const header = template.match(/<header class="topbar">([\s\S]*?)<\/header>/)?.[1];
+  assert.ok(header);
+  for (const id of ['breadcrumb-title', 'workspace-id', 'execution-count', 'data-status', 'focus-maestro']) {
+    assert.match(header, new RegExp(`id="${id}"`));
+  }
+  assert.equal((header.match(/class="overview-stat"/g) || []).length, 3);
+  assert.doesNotMatch(template, /<section class="mission-bar"|<section class="overview"/);
+});
+
+test('pane dividers still resize both axes and restore the automatic layout', () => {
+  const app = harness([], { gridWidth: 700, withNative: true });
+  const columns = app.grid.style.gridTemplateColumns;
+  const rows = app.grid.style.gridTemplateRows;
+  const vertical = app.grid.querySelector('.grid-divider.vertical');
+  const horizontal = app.grid.querySelector('.grid-divider.horizontal');
+  assert.ok(vertical);
+  assert.ok(horizontal);
+  assert.equal(app.grid.querySelector('[data-pane="maestro"]').classList.contains('featured'), true);
+  assert.match(horizontal.style.left, /px$/);
+  assert.notEqual(horizontal.style.left, '0px', 'the row divider does not cross the tall pane');
+  vertical.dispatch('keydown', vertical, { key: 'ArrowRight' });
+  horizontal.dispatch('keydown', horizontal, { key: 'ArrowDown' });
+  assert.notEqual(app.grid.style.gridTemplateColumns, columns);
+  assert.notEqual(app.grid.style.gridTemplateRows, rows);
+  const keyboardColumns = app.grid.style.gridTemplateColumns;
+  vertical.setPointerCapture = () => {};
+  vertical.removeEventListener = (name, callback) => {
+    vertical.listeners[name] = (vertical.listeners[name] || []).filter(listener => listener !== callback);
+  };
+  vertical.dispatch('pointerdown', vertical, { pointerId: 1, clientX: 0 });
+  vertical.dispatch('pointermove', vertical, { pointerId: 1, clientX: 24 });
+  vertical.dispatch('pointerup', vertical, { pointerId: 1, clientX: 24 });
+  assert.notEqual(app.grid.style.gridTemplateColumns, keyboardColumns);
+  app.byId['restore-layout'].dispatch('click');
+  assert.equal(app.grid.style.gridTemplateColumns, columns);
+  assert.equal(app.grid.style.gridTemplateRows, rows);
+});
+
+test('five visible panes form a tall lead pane and a two-by-two companion grid', async () => {
+  const app = harness([agent(1), agent(2)], { withNative: true });
+  await app.settle();
+  assert.equal(app.grid.dataset.visible, '5');
+  assert.equal(app.grid.dataset.columns, '3');
+  assert.equal(app.grid.dataset.rows, '2');
+  assert.equal(app.grid.querySelector('[data-pane="maestro"]').classList.contains('featured'), true);
+  const divider = app.grid.querySelector('.grid-divider.horizontal');
+  assert.ok(divider);
+  assert.notEqual(divider.style.left, '0px');
+});
+
+test('two panes can switch to vertical rows, resize their heights, and fit the viewport', () => {
+  const app = harness([], { gridWidth: 700 });
+  assert.equal(app.grid.dataset.columns, '2');
+  assert.equal(app.grid.dataset.rows, '1');
+  assert.equal(app.byId['toggle-layout'].hidden, false);
+  app.byId['toggle-layout'].dispatch('click');
+  assert.equal(app.grid.dataset.columns, '1');
+  assert.equal(app.grid.dataset.rows, '2');
+  const before = app.grid.style.gridTemplateRows;
+  const divider = app.grid.querySelector('.grid-divider.horizontal');
+  assert.ok(divider);
+  divider.dispatch('keydown', divider, { key: 'ArrowDown' });
+  assert.notEqual(app.grid.style.gridTemplateRows, before);
+  app.resize(700, 400);
+  assert.equal(app.grid.dataset.rows, '1');
+  assert.equal(app.byId['toggle-layout'].hidden, true);
+  app.resize(700, 600);
+  assert.equal(app.grid.dataset.rows, '2');
+  app.byId['restore-layout'].dispatch('click');
+  assert.equal(app.grid.dataset.rows, '1');
+});
 
 test('persistent cost authorization captures bounded consent and can be revoked', async () => {
   const app = harness([]);
@@ -381,7 +366,7 @@ test('agent and mission offer only confirmed efforts for the exact cc route', as
   await app.settle();
   const form = app.grid.querySelector('[data-pane="PANE-1"]').querySelector('.cockpit-composer');
   const effort = form.querySelector('.cockpit-compose-controls').children[0];
-  assert.deepEqual(effort.children.map(item => item.value).filter(Boolean), ['low']);
+  assert.deepEqual([...effort.children].map(item => item.value).filter(Boolean), ['low']);
   assert.equal(form.querySelector('.cockpit-send').disabled, true);
   effort.value = 'low'; effort.dispatch('change');
   form.querySelector('.cockpit-input').value = 'Executar';
@@ -555,7 +540,7 @@ test('sidebar selection jumps to a hidden active agent and minimization releases
   const app = harness(agents, { gridWidth: 1600 });
   await app.settle();
   const firstGroup = app.sources.slice();
-  const link = app.byId['pane-nav'].children.find(button => button.dataset.paneTarget === 'PANE-8');
+  const link = [...app.byId['pane-nav'].children].find(button => button.dataset.paneTarget === 'PANE-8');
   app.byId['pane-nav'].dispatch('click', link);
   const pane = app.grid.querySelector('[data-pane="PANE-8"]');
   assert.equal(pane.hidden, false);
@@ -626,7 +611,7 @@ test('dynamic catalog shows discovered approval states while selectors remain ap
   assert.match(catalog.textContent, /inferência não verificada/);
   const planning = app.grid.querySelector('[data-pane="maestro"]')
     .querySelector('.cockpit-composer').querySelector('.cockpit-model-select');
-  assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['free/planning', 'approved/model']);
+  assert.deepEqual([...planning.children].filter(option => option.value).map(option => option.value), ['free/planning', 'approved/model']);
 
   app.box.discoveredCatalog = {
     models: [{ id: 'approved/new', name: 'Refreshed Model', provider: 'provider-d', availability: 'listed', cost_status: 'standard', approval_status: 'approved', approval_reason: 'Qualified', can_execute: true }],
@@ -636,7 +621,7 @@ test('dynamic catalog shows discovered approval states while selectors remain ap
   await app.settle();
   assert.match(catalog.textContent, /Refreshed Model/);
   assert.ok(app.calls.some(call => call.url === '/api/dev/model-catalog?refresh=true' && call.method === 'GET'));
-  assert.deepEqual(planning.children.filter(option => option.value).map(option => option.value), ['free/planning', 'approved/new']);
+  assert.deepEqual([...planning.children].filter(option => option.value).map(option => option.value), ['free/planning', 'approved/new']);
 });
 
 test('model settings filter discovered models and keep candidates non-executable', async () => {
@@ -651,7 +636,7 @@ test('model settings filter discovered models and keep candidates non-executable
   await app.settle();
   const cards = app.byId['model-catalog-list'];
   assert.match(cards.textContent, /Ativo/);
-  const markCandidate = cards.children.find(card => card.textContent.includes('New')).querySelector('button');
+  const markCandidate = [...cards.children].find(card => card.textContent.includes('New')).querySelector('button');
   markCandidate.dispatch('click');
   await app.settle();
   assert.ok(app.calls.some(call => call.url === '/api/dev/model-management/candidate' && call.body.model_id === 'new/model'));
@@ -664,7 +649,7 @@ test('model settings filter discovered models and keep candidates non-executable
   assert.doesNotMatch(cards.textContent, /New/);
   app.byId['model-filter-provider'].value = '';
   app.byId['model-filter-provider'].dispatch('change');
-  const deactivate = cards.children.find(card => card.textContent.includes('Qualified')).querySelector('button');
+  const deactivate = [...cards.children].find(card => card.textContent.includes('Qualified')).querySelector('button');
   deactivate.dispatch('click');
   await app.settle();
   assert.ok(app.calls.some(call => call.url === '/api/dev/model-management/activation' && call.body.model_id === 'qualified/model' && call.body.active === false));
@@ -682,12 +667,12 @@ test('model qualification requires an explicit admin token and starts inactive',
   const unlock = app.byId['model-admin-token']; unlock.value = 'a'.repeat(32);
   app.byId['model-admin-unlock'].dispatch('click'); await app.settle();
   assert.match(app.byId['model-admin-status'].textContent, /desbloqueadas/);
-  const inputs = card.querySelectorAll('input');
+  const inputs = [...card.querySelectorAll('input')];
   inputs.find(input => input.value === 'standard-coding').checked = true;
   inputs.find(input => input.value === 'standard-coding').dispatch('change');
   inputs.find(input => input.value === 'low').checked = true;
   inputs.find(input => input.value === 'low').dispatch('change');
-  const qualify = card.querySelectorAll('button').find(button => button.textContent.includes('qualificar'));
+  const qualify = [...card.querySelectorAll('button')].find(button => button.textContent.includes('qualificar'));
   qualify.dispatch('click'); await app.settle();
   const request = app.calls.find(call => call.url === '/api/dev/model-management/qualifications');
   assert.equal(request.authorization, `Bearer ${'a'.repeat(32)}`);
@@ -708,7 +693,7 @@ test('catalog failure fails closed and missing authorized projects are stated', 
   await app.settle();
   assert.match(app.byId['model-catalog-status'].textContent, /OmniRoute indisponível/);
   assert.match(app.byId['model-catalog-list'].textContent, /Atualize o catálogo/);
-  assert.equal(planning.children.filter(option => option.value).length, 0);
+  assert.equal([...planning.children].filter(option => option.value).length, 0);
   assert.equal(app.grid.querySelector('[data-pane="maestro"]').querySelector('.cockpit-authorize').disabled, true);
 });
 
@@ -1045,4 +1030,40 @@ test('ambiguous mission failure preserves the draft and never retries automatica
   assert.match(form.querySelector('.cockpit-mission-error').textContent, /resultado pode ser incerto/i);
   assert.equal(app.calls.filter(call => call.url === '/api/workspace/panes/PANE-1/missions' && call.method === 'POST').length, 1);
   assert.ok(app.calls.filter(call => call.method === 'GET').length > 4);
+});
+
+test('regression: cost authorization model list renders and keeps its selection with real HTMLCollection semantics', async () => {
+  const app = harness([]);
+  await app.settle();
+  const select = app.byId['cost-auth-model'];
+  // A real HTMLCollection has no Array methods; this is what threw
+  // "costAuthModel.children.some is not a function" and aborted every refresh.
+  assert.equal(typeof select.children.some, 'undefined');
+  assert.equal(typeof select.children.map, 'undefined');
+  assert.match(app.byId['data-status'].textContent, /atualização automática/);
+  select.value = 'paid/model';
+  select.dispatch('change');
+  await app.refresh();
+  assert.doesNotMatch(app.byId['data-status'].textContent, /Falha ao carregar/);
+  assert.equal(select.value, 'paid/model', 'the chosen model survives a re-render');
+  assert.deepEqual([...select.children].map(option => option.value), ['', 'paid/model']);
+});
+
+test('the Codex Native pane is a system pane: kept across refreshes and project switches, never closable, and the host API reaches add-ons', async () => {
+  const app = harness([{ pane_id: 'PANE-1', title: 'Agente A', role: 'dev', model: 'free/model', brief: null,
+    session: { session_id: 'DEV-1', status: 'ACTIVE', branch: 'b' }, messages: [], dependencies: [], latest_mission: null }], { withNative: true });
+  await app.settle();
+  const nativeFor = () => app.grid.querySelector('[data-pane="native"]');
+  assert.ok(nativeFor(), 'the native pane is part of the grid');
+  assert.equal(nativeFor().querySelector('.close'), null, 'the Codex Native pane has no close control');
+  assert.equal(nativeFor().dataset.title, 'Codex Native');
+  const seen = [];
+  const host = app.context.window.NexusCockpit;
+  assert.equal(host.projectId(), 'demo');
+  host.onProject(projectId => seen.push(projectId));
+  assert.deepEqual(seen, ['demo'], 'a late add-on is told the current project immediately');
+  await app.refresh();
+  assert.ok(nativeFor(), 'refresh never removes the native pane');
+  assert.deepEqual([...app.byId['pane-nav'].children].map(button => button.dataset.paneTarget).includes('native'), true);
+  assert.equal(Object.isFrozen(host), true, 'add-ons cannot replace the host API');
 });

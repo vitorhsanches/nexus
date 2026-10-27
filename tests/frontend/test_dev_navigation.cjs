@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const root = path.resolve(__dirname, "../..");
 const devSource = fs.readFileSync(path.join(root, "nexus/web/static/js/dev.js"), "utf8");
 const nexusTemplateSource = fs.readFileSync(path.join(root, "nexus/web/templates/nexus.html"), "utf8");
+const devStylesheetSource = fs.readFileSync(path.join(root, "nexus/web/static/css/dev.css"), "utf8");
 
 class Element {
   constructor(id) {
@@ -233,6 +234,16 @@ test("nav entry and ws-dev section exist in the template", () => {
   assert.match(nexusTemplateSource, /id="nav-dev"[^>]*data-target="dev-view"/);
   assert.match(nexusTemplateSource, /id="ws-dev"/);
   assert.match(nexusTemplateSource, /id="dev-mission-start"/);
+});
+
+test("Development review remains reachable through its own scroll owner", () => {
+  assert.match(devStylesheetSource, /body\[data-view="dev"\] #dev-layout\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s);
+  assert.match(devStylesheetSource, /body\[data-view="dev"\] #dev-layout > \.chat-conversation\s*\{[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s);
+  assert.match(nexusTemplateSource, /id="dev-mission-panel"|class="dev-mission-panel"/);
+  assert.match(nexusTemplateSource, /id="dev-create-review"/);
+  assert.match(nexusTemplateSource, /id="dev-integration-preflight"/);
+  assert.match(nexusTemplateSource, /id="dev-reject-review"/);
+  assert.match(nexusTemplateSource, /id="dev-apply-review"/);
 });
 
 test("autonomous mission posts bounded model and trusted profile then stops for review", async () => {
@@ -856,6 +867,24 @@ test("a pending Codex approval is shown with its reason and decided only by an e
   const decision = ui.calls.find((call) => call.method === "POST" && call.path === "/api/dev/sessions/DEV-1/approvals/APPROVAL-1");
   assert.deepEqual(decision.body, { decision: "accept" });
   assert.match(ui.elements["dev-approvals"].children[0].children[0].textContent, /APPROVED/);
+});
+
+test("expired approvals explain that no human decision was recorded", async () => {
+  const ui = setup({
+    sessions: [{ session_id: "DEV-1", project_id: "demo", backend: "codex_native", status: "ACTIVE" }],
+  });
+  ui.backend.approvals = [
+    { approval_id: "APPROVAL-EXPIRED", kind: "command", status: "EXPIRED", summary: { command: "pytest" } },
+    { approval_id: "APPROVAL-DECLINED", kind: "command", status: "DECLINED", summary: { command: "git push" } },
+  ];
+  await selectDevelopmentSession(ui);
+
+  const text = allText(ui.elements["dev-approvals"]);
+  assert.match(text, /Command · EXPIRED · pytest · Expired before a human decision/);
+  assert.match(text, /action was denied and no requested action was executed/);
+  assert.match(text, /Command · DECLINED · git push · Declined by a human/);
+  assert.equal(ui.elements["dev-approvals"].children.some((row) => allText(row).includes("Approve once")), false);
+  assert.equal(ui.calls.filter((call) => call.method === "POST" && /\/approvals\//.test(call.path)).length, 0);
 });
 
 test("approval fetch failure is visible and never presented as an empty approval list", async () => {

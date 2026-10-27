@@ -271,3 +271,170 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .settings-advanced>summary{cursor:pointer;color:var(--accent);font:11px 'Cascadia Code',Consolas,monospace}
 .settings-advanced .model-catalog{margin:12px 0 0}
 @media(prefers-reduced-motion:reduce){.ai-settings{animation:none}}
+
+/* Codex Native Development pane: same tokens and terminal type as the other panes. */
+.native-body{display:grid;align-content:start;gap:8px;padding:0 0 34px;color:var(--text);font:10px/1.55 'Cascadia Code',Consolas,monospace}
+.native-body .cockpit-conversation,.native-body .cockpit-event,.native-body .cockpit-message,.native-body .cockpit-response{font:inherit}
+.native-body .cockpit-message p,.native-body .cockpit-response p{margin:3px 0}
+.native-body>*:not(.terminal-kicker){margin-left:12px;margin-right:12px}
+.native-note{margin:0;color:var(--text-muted);font:10px/1.5 'Cascadia Code',Consolas,monospace;overflow-wrap:anywhere}
+.native-note.is-error{color:var(--warning)}
+.native-block,.native-section{display:grid;gap:5px}
+.native-block label,.native-section label{color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace;letter-spacing:.06em;text-transform:uppercase}
+.native-section{border:1px solid var(--border-soft);background:var(--surface);padding:6px 8px}
+.native-section>summary{cursor:pointer;color:var(--accent);font:11px 'Cascadia Code',Consolas,monospace}
+.native-section>summary b{color:var(--accent-strong)}
+.native-actions{display:flex;flex-wrap:wrap;gap:6px}
+.native-text{white-space:pre-wrap;overflow-wrap:anywhere}
+.native-files{display:grid;gap:2px}
+.native-file{text-align:left;padding:3px 6px;border:1px solid transparent;background:transparent;color:var(--text);font:10px 'Cascadia Code',Consolas,monospace;cursor:pointer}
+.native-file.is-selected,.native-file:hover{border-color:var(--accent-border);color:var(--accent)}
+.native-approval{display:grid;gap:4px;padding:6px 0;border-bottom:1px solid var(--border-soft);font:10px/1.5 'Cascadia Code',Consolas,monospace}
+.native-approval.is-pending{border-left:2px solid var(--warning);padding-left:7px}
+.native-approval-detail{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text)}
+.native-link{color:var(--accent);font:10px 'Cascadia Code',Consolas,monospace}
+.native-composer{display:grid;gap:6px}
+
+/* Codex Native has one vertical scroll region inside its pane. */
+.native-pane .pane-header,.native-pane .pane-meta,.native-pane .pane-footer{flex:none;min-width:0}
+.native-pane .pane-identity{flex:1 1 auto;overflow:hidden}
+.native-pane .pane-identity>div,.native-pane .pane-tools{min-width:0}
+.native-pane .pane-identity strong,.native-pane .pane-identity div>span{overflow:hidden;text-overflow:ellipsis}
+.native-pane .pane-tools{flex:0 1 auto;max-width:56%;gap:4px}
+.native-pane .pane-tools .pane-tool{flex:none}
+.native-pane .pane-status{min-width:0;max-width:100%;overflow:hidden}
+.native-status-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.native-pane .pane-meta{height:auto;min-height:33px;flex-wrap:wrap;gap:3px 12px;padding-top:5px;padding-bottom:5px;overflow:visible;white-space:normal}
+.native-pane .pane-meta span{min-width:0;overflow-wrap:anywhere}
+.native-pane .pane-meta b{overflow-wrap:anywhere}
+.native-pane .pane-footer{height:auto;min-height:29px;padding-top:5px;padding-bottom:5px;white-space:normal}
+.native-pane .pane-footer span{min-width:0;overflow-wrap:anywhere}
+.native-pane .pane-footer span:last-child{text-align:right}
+.native-body{grid-template-columns:minmax(0,1fr);min-width:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
+.native-body>*{min-width:0}
+.native-body .terminal-kicker{height:auto;min-height:29px;flex-wrap:wrap;gap:4px 8px;padding-top:5px;padding-bottom:5px;line-height:1.4}
+.native-body .cockpit-conversation{padding:0}
+.native-body .cockpit-composer{max-height:none;overflow:visible}
+.native-body .cockpit-mission-diff{max-height:none;overflow:visible}
+.native-body .cockpit-model-select{width:100%;min-width:0}
+.native-body .native-section,.native-body .native-block,.native-body .native-approval,.native-body .native-actions{min-width:0}
+.native-body .native-actions{align-items:stretch}
+.native-body .cockpit-send{max-width:100%;min-width:0;min-height:28px;white-space:normal;line-height:1.35;text-align:center;overflow-wrap:anywhere}
+.native-body .native-file,.native-body .native-link,.native-body .native-approval-detail{max-width:100%;overflow-wrap:anywhere}
+@media(max-width:650px){.native-body{overflow:visible;padding-bottom:12px}.native-pane .pane-footer span:last-child{max-width:48%}}
+
+/* Keep the project summary in the workspace line so the panes get the freed height. */
+.topbar{height:auto;min-height:43px;gap:12px;min-width:0}
+.topbar-left,.topbar-right{flex:none;min-width:0;gap:8px}
+.topbar-project{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim);font:9px 'Cascadia Code',Consolas,monospace}
+.topbar-summary{display:flex;align-items:center;justify-content:center;gap:12px;flex:1 1 auto;min-width:0}
+.topbar-summary .overview-stat{gap:4px;min-width:0}
+.topbar-summary .overview-stat strong{font:600 11px 'Cascadia Code',Consolas,monospace;color:var(--text)}
+.topbar-summary .overview-stat span{font:9px 'Cascadia Code',Consolas,monospace;color:var(--text-muted)}
+.topbar-data-status{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace}
+.topbar-maestro{border:1px solid var(--accent-border);border-radius:2px;background:var(--surface);color:var(--accent);padding:4px 7px;white-space:nowrap;font:9px 'Cascadia Code',Consolas,monospace}
+.topbar-maestro:hover{background:var(--accent-tint)}
+@media(max-width:1370px){.topbar-data-status{display:none}}
+@media(max-width:1110px){.topbar{flex-wrap:wrap;padding-top:6px;padding-bottom:6px}.topbar-summary{order:3;flex:1 0 100%;justify-content:flex-start;gap:14px}}
+@media(max-width:650px){.topbar{gap:5px 8px}.topbar-project{max-width:72px}.topbar-summary{gap:8px;justify-content:space-between}.topbar-summary .overview-stat{display:flex;align-items:baseline;gap:3px}.topbar-summary .overview-stat strong{font-size:10px}.topbar-summary .overview-stat span{font-size:8px}.topbar-right{gap:5px}.topbar-maestro{padding:3px 5px}.section-heading{margin-top:10px}}
+@media(max-width:420px){.topbar-summary .overview-stat{display:block}.topbar-summary .overview-stat span{display:block;font-size:7px}.topbar-summary{align-items:start}}
+
+/* Native pane: an uncluttered transcript with configuration expanded in place. */
+.native-pane .native-body{gap:6px;padding-bottom:12px;background:var(--terminal)}
+.native-pane .pane-header{background:var(--surface)}
+.native-pane .native-body .terminal-kicker{border-bottom:1px solid var(--border-soft);color:var(--text-muted)}
+.native-pane .native-body .terminal-kicker>span:first-child{color:var(--accent)}
+.native-pane .native-section,.native-pane .native-session-menu{display:block;min-width:0;border:0;border-top:1px solid var(--border-soft);border-radius:0;background:transparent;padding:5px 0}
+.native-pane .native-session-menu{border-top:0;border-bottom:1px solid var(--border-soft)}
+.native-pane .native-section>summary,.native-pane .native-session-menu>summary{display:flex;align-items:center;gap:6px;min-height:24px;list-style:none;cursor:pointer;color:var(--text-muted);font:10px 'Cascadia Code',Consolas,monospace}
+.native-pane .native-section>summary::-webkit-details-marker,.native-pane .native-session-menu>summary::-webkit-details-marker{display:none}
+.native-pane .native-section>summary::before,.native-pane .native-session-menu>summary::before{content:'▸';color:var(--accent);font-size:11px}
+.native-pane .native-section[open]>summary::before,.native-pane .native-session-menu[open]>summary::before{content:'▾'}
+.native-pane .native-section:not([open])>:not(summary),.native-pane .native-session-menu:not([open])>:not(summary){display:none}
+.native-pane .native-section[open]>summary,.native-pane .native-session-menu[open]>summary{margin-bottom:6px;color:var(--text)}
+.native-pane .native-section>label{display:block;margin:7px 0 4px}
+.native-pane .native-section>.cockpit-model-select{display:block}
+.native-pane .native-section>.cockpit-send{margin-top:7px}
+.native-pane .native-section>.native-note{margin-top:5px}
+.native-session-list{display:grid;gap:2px}
+.native-session-option{display:block;width:100%;padding:6px 8px;border:0;border-left:2px solid transparent;background:transparent;color:var(--text-muted);text-align:left;font:10px/1.4 'Cascadia Code',Consolas,monospace;overflow-wrap:anywhere}
+.native-session-option:hover,.native-session-option:focus-visible,.native-session-option.is-selected{background:var(--surface-raised);border-left-color:var(--accent);color:var(--text)}
+.native-pane .native-details .pane-meta{display:flex;height:auto;min-height:0;padding:4px 0;flex-wrap:wrap;gap:5px 12px;border:0;background:transparent}
+.native-pane .native-details .pane-meta span{font-size:8px}
+.native-pane .cockpit-conversation{min-height:64px}
+.native-pane .cockpit-composer{border-top:1px solid var(--border-soft);padding-top:8px}
+.pane-grid .pane.featured{grid-row:1/-1}
+
+/* Keep the task prompt visible while output scrolls above it. */
+.native-pane .native-body{display:flex;flex-direction:column;min-height:0;overflow:hidden;padding:0}
+.native-pane .native-body>*{min-width:0;margin-left:0;margin-right:0}
+.native-console{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;padding:0 12px 8px;scrollbar-color:var(--border-strong) transparent;scrollbar-width:thin}
+.native-console>*{min-width:0}
+.native-console>.native-note:empty{display:none}
+.native-pane .native-console .terminal-kicker{margin:0 -12px 8px;padding-left:12px;padding-right:12px}
+.native-pane .native-console .cockpit-conversation{min-height:0}
+.native-pane .native-composer{display:block;flex:0 0 auto;max-height:45%;overflow-y:auto;margin:0;padding:7px 12px;border-top:1px solid var(--border-strong);background:var(--terminal)}
+.native-entry{display:flex;align-items:flex-end;gap:7px;min-width:0}
+.native-entry-prompt{flex:none;align-self:center;color:var(--accent);font:700 16px 'Cascadia Code',Consolas,monospace}
+.native-pane .native-entry .cockpit-input{display:block;flex:1 1 auto;width:100%;min-width:0;min-height:38px;max-height:110px;resize:vertical;padding:7px 8px;border-color:var(--border-soft);background:var(--surface);line-height:1.4}
+.native-pane .native-entry .cockpit-input:focus{outline:1px solid var(--accent-border);border-color:var(--accent-border)}
+.native-pane .native-entry .cockpit-send{flex:none;min-height:38px;padding:5px 9px;white-space:nowrap}
+.native-pane .native-composer .native-note,.native-pane .native-composer .cockpit-compose-error{margin:5px 0 0}
+.native-pane .native-composer .native-note:empty,.native-pane .native-composer .cockpit-compose-error:empty{display:none}
+.native-settings{flex:0 0 auto;min-width:0;max-height:40%;overflow-x:hidden;overflow-y:auto;border-top:1px solid var(--border-soft);background:var(--surface);padding:0 12px;scrollbar-color:var(--border-strong) transparent;scrollbar-width:thin}
+.native-settings>summary{display:flex;align-items:center;gap:7px;min-height:28px;list-style:none;cursor:pointer;color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace}
+.native-settings>summary::-webkit-details-marker{display:none}
+.native-settings>summary::before{content:'▸';color:var(--accent)}
+.native-settings[open]>summary::before{content:'▾'}
+.native-settings>summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:auto;color:var(--text-dim)}
+.native-settings:not([open])>:not(summary){display:none}
+.native-settings[open]{padding-bottom:6px}
+@media(max-width:650px){.pane-grid .native-pane{height:min(72dvh,640px);min-height:min(360px,72dvh)}.native-pane .native-entry .cockpit-send{padding:5px 7px}}
+
+/* Compact terminal panes: a narrow title bar and an uninterrupted output area. */
+.pane-grid .pane-header{height:34px;min-height:34px;padding:0 8px;background:var(--bg)}
+.pane-grid .pane-identity{gap:6px}
+.pane-grid .pane-icon{width:19px;height:19px;font-size:10px;border-radius:2px}
+.pane-grid .pane-identity strong{font:700 10px 'Cascadia Code',Consolas,monospace}
+.pane-grid .pane-identity div>span{display:none}
+.pane-grid .pane-status{padding:3px 5px;font-size:8px;background:transparent;border:1px solid var(--border-soft)}
+.pane-grid .pane-tools{gap:2px}
+.pane-grid .pane-tool{width:19px;height:21px;color:var(--text-muted);font-size:15px}
+.pane-grid .pane-meta{height:21px;min-height:21px;padding:0 8px;background:var(--bg);gap:10px}
+.pane-grid .pane-meta span{font-size:8px}
+.pane-grid .pane-footer{height:23px;min-height:23px;padding:0 8px;background:var(--bg);font-size:8px}
+.pane-grid .pane-body{background:var(--terminal)}
+
+/* The live Codex pane reads as a transcript, with its prompt and controls docked below. */
+.native-pane .native-console{display:flex;flex-direction:column;padding:0 11px 8px}
+.native-runtime{display:flex;align-items:flex-start;gap:9px;flex:none;padding:11px 0 8px;min-width:0}
+.native-runtime-mark{display:grid;place-items:center;flex:none;width:32px;height:28px;color:var(--accent);background:var(--accent-tint);font:700 11px 'Cascadia Code',Consolas,monospace}
+.native-runtime-copy{display:grid;gap:2px;min-width:0;color:var(--text-muted);font:9px/1.4 'Cascadia Code',Consolas,monospace}
+.native-runtime-copy strong{color:var(--text);font-size:10px}
+.native-runtime-copy strong span{margin-left:4px;color:var(--text-dim);font-size:8px;font-weight:400}
+.native-runtime-copy>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.native-pane .native-console>.native-note{flex:none;margin:0 0 6px}
+.native-pane .native-console>.native-note:empty{display:none}
+.native-pane .native-console .cockpit-conversation{display:grid;align-content:end;gap:10px;margin-top:auto;padding:0 0 5px;min-height:0}
+.native-pane .cockpit-conversation .cockpit-event{color:var(--text-muted);border:0}
+.native-pane .cockpit-message{padding:0;border:0;background:transparent;font:10px/1.5 'Cascadia Code',Consolas,monospace}
+.native-pane .cockpit-message>strong{display:block;color:var(--text-dim);font-size:8px;font-weight:500}
+.native-pane .cockpit-message>p{margin:3px 0 7px;padding:3px 6px;background:var(--surface-raised);border-left:2px solid var(--accent);color:var(--text)}
+.native-pane .cockpit-response{margin:0;padding:0;border:0}
+.native-pane .cockpit-response strong{color:var(--text-muted);font-size:9px}
+.native-pane .cockpit-response p{margin:3px 0 0;color:var(--text)}
+.native-pane .cockpit-live{flex:none;margin:4px 0 6px;background:transparent;border-left-color:var(--accent-border)}
+.native-pane .native-composer{max-height:38%;padding:5px 10px 6px;border-top:1px solid var(--border-soft);background:var(--terminal)}
+.native-pane .native-entry{align-items:center;gap:5px}
+.native-pane .native-entry .cockpit-input{min-height:28px;max-height:96px;padding:5px 6px;border:0;border-bottom:1px solid var(--border-strong);border-radius:0;background:transparent}
+.native-pane .native-entry .cockpit-input:focus{outline:0;border-color:var(--accent)}
+.native-pane .native-entry .cockpit-send{min-height:27px;padding:3px 6px;border-color:var(--border-soft);background:transparent}
+.native-pane .native-entry-prompt{font-size:15px}
+.native-pane .native-settings{max-height:45%;padding:0 10px;background:var(--bg)}
+.native-pane .native-settings>summary{min-height:24px;font-size:8px}
+.native-pane .native-settings.has-approvals>summary{color:var(--warning)}
+.native-pane .native-settings.has-approvals>summary::before{color:var(--warning)}
+.native-pane .native-settings .native-section,.native-pane .native-settings .native-session-menu{padding:5px 0}
+.native-pane .pane-footer{white-space:nowrap}
+.native-pane .pane-footer span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:650px){.pane-grid .pane-header{height:36px;min-height:36px}.native-pane .native-runtime{padding-top:9px}.native-pane .native-settings>summary span{max-width:45%}}

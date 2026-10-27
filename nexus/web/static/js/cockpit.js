@@ -20,13 +20,17 @@
   const costAuthCreate = document.getElementById('cost-auth-create');
   const groupControls = document.getElementById('group-controls');
   const savedLayouts = new Map();
+  const preferredColumns = new Map();
   const gap = 6;
   const minimumWidth = 300;
   const minimumHeight = 210;
   const agentTemplate = grid.querySelector('[data-pane="agent-a"]').cloneNode(true);
   grid.querySelector('[data-pane="agent-a"]').remove();
   grid.querySelector('[data-pane="agent-b"]').remove();
+  // Panes owned by the cockpit itself (not per-agent): never created or removed from agent data.
+  const systemPanes = ['maestro', 'native', 'review'];
   const knownAgents = new Map();
+  const projectListeners = new Set();
   const closedAgents = new Set();
   const pending = new Set();
   const streams = new Map();
@@ -73,7 +77,7 @@
   };
 
   panes().forEach(pane => {
-    pane.dataset.title = ({ maestro: 'Maestro', review: 'Revisão' })[pane.dataset.pane];
+    pane.dataset.title = ({ maestro: 'Maestro', native: 'Codex Native', review: 'Revisão' })[pane.dataset.pane];
   });
   const paneTitle = pane => pane.dataset.title;
 
@@ -130,9 +134,11 @@
       if (divider.dataset.axis === 'columns') {
         const x = layout.columnPixels.slice(0, index + 1).reduce((a, b) => a + b, 0) + gap * index + gap / 2;
         divider.style.left = `${x}px`;
+        divider.style.bottom = '0px';
       } else {
         const y = layout.rowPixels.slice(0, index + 1).reduce((a, b) => a + b, 0) + gap * index + gap / 2;
         divider.style.top = `${y}px`;
+        divider.style.left = layout.featured ? `${layout.columnPixels[0] + gap}px` : '0px';
       }
     });
   };
@@ -209,12 +215,13 @@
   const updateLayout = () => {
     const all = panes();
     if (mobileLayout()) {
-      all.forEach(pane => { pane.hidden = false; });
+      all.forEach(pane => { pane.hidden = false; pane.classList.remove('featured'); });
       groupControls.hidden = true;
       grid.style.removeProperty('grid-template-columns');
       grid.style.removeProperty('grid-template-rows');
       grid.dataset.visible = String(all.length);
       document.getElementById('grid-layout-label').textContent = '▦  Empilhado';
+      document.getElementById('toggle-layout').hidden = true;
       layout = null;
       clearDividers();
       return;
@@ -227,8 +234,16 @@
     const visible = all.slice(groupIndex * groupCapacity, (groupIndex + 1) * groupCapacity);
     const visibleSet = new Set(visible);
     all.forEach(pane => { pane.hidden = !visibleSet.has(pane); });
-    const columns = visible.length === 4 && maxRows === 2 && maxColumns >= 2 ? 2 : Math.min(maxColumns, visible.length);
+    const firstColumnCount = Math.ceil(visible.length / maxRows);
+    const lastColumnCount = Math.min(maxColumns, visible.length);
+    const columnOptions = Array.from({ length: lastColumnCount - firstColumnCount + 1 }, (_, index) => firstColumnCount + index);
+    const preferenceKey = `${groupIndex}:${visible.length}`;
+    const automaticColumns = visible.length >= 3 && maxRows === 2 ? firstColumnCount : lastColumnCount;
+    const columns = columnOptions.includes(preferredColumns.get(preferenceKey))
+      ? preferredColumns.get(preferenceKey) : automaticColumns;
     const rows = Math.ceil(visible.length / columns);
+    const featured = rows === 2 && ((visible.length === 3 && columns === 2) || (visible.length === 5 && columns === 3));
+    all.forEach(pane => pane.classList.toggle('featured', featured && pane === visible[0]));
     grid.dataset.visible = String(visible.length);
     grid.dataset.columns = String(columns);
     grid.dataset.rows = String(rows);
@@ -237,6 +252,7 @@
     document.getElementById('previous-group').disabled = groupIndex === 0;
     document.getElementById('next-group').disabled = groupIndex === groupCount - 1;
     document.getElementById('grid-layout-label').textContent = `▦  Grade ${columns} × ${rows}`;
+    document.getElementById('toggle-layout').hidden = columnOptions.length < 2 || grid.classList.contains('has-maximized');
     if (grid.classList.contains('has-maximized')) {
       grid.style.gridTemplateColumns = 'minmax(0, 1fr)';
       grid.style.gridTemplateRows = 'minmax(0, 1fr)';
@@ -249,7 +265,7 @@
     const columnFractions = stored?.columns || Array(columns).fill(1 / columns);
     const rowFractions = stored?.rows || Array(rows).fill(1 / rows);
     layout = {
-      key, columns, rows,
+      key, columns, rows, featured, columnOptions, preferenceKey,
       columnPixels: fitTracks(columnFractions, grid.clientWidth - gap * (columns - 1), minimumWidth),
       rowPixels: fitTracks(rowFractions, grid.clientHeight - gap * (rows - 1), minimumHeight)
     };
@@ -310,7 +326,7 @@
   };
 
   const addCloseControl = pane => {
-    if (pane.dataset.pane === 'maestro' || pane.dataset.pane === 'review') return;
+    if (systemPanes.includes(pane.dataset.pane)) return;
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'pane-tool close';
@@ -436,9 +452,17 @@
   });
   document.getElementById('restore-layout').addEventListener('click', () => {
     savedLayouts.clear();
+    preferredColumns.clear();
     updateLayout();
     syncStreams();
     notify('Layout automático restaurado');
+  });
+  document.getElementById('toggle-layout').addEventListener('click', () => {
+    if (!layout || layout.columnOptions.length < 2) return;
+    const index = layout.columnOptions.indexOf(layout.columns);
+    preferredColumns.set(layout.preferenceKey, layout.columnOptions[(index + 1) % layout.columnOptions.length]);
+    updateLayout();
+    syncStreams();
   });
   let resizeFrame = 0;
   const scheduleLayout = () => {
@@ -657,7 +681,7 @@
       option.value = model.id;
       costAuthModel.append(option);
     });
-    if (costAuthModel.children.some(option => option.value === selected)) costAuthModel.value = selected;
+    if ([...costAuthModel.children].some(option => option.value === selected)) costAuthModel.value = selected;
     costAuthCreate.disabled = !projectId || !costAuthModel.value || !document.getElementById('cost-auth-confirm').checked || pending.has('cost-auth');
     if (!projectId) {
       costAuthList.textContent = 'Selecione um projeto autorizado para consultar autorizações.';
@@ -1590,7 +1614,7 @@
       const agents = (workspace.panes || []).slice().sort((a, b) => (a.layout?.position || 0) - (b.layout?.position || 0));
       knownAgents.clear();
       agents.forEach(agent => knownAgents.set(agent.pane_id, agent));
-      panes().filter(pane => !['maestro', 'review'].includes(pane.dataset.pane) && !knownAgents.has(pane.dataset.pane)).forEach(pane => pane.remove());
+      panes().filter(pane => !systemPanes.includes(pane.dataset.pane) && !knownAgents.has(pane.dataset.pane)).forEach(pane => pane.remove());
       if (!panes().some(pane => pane.classList.contains('selected'))) selectPane(grid.querySelector('[data-pane="maestro"]'));
       const histories = await Promise.all(agents.map(agent => api(`/api/workspace/panes/${encodeURIComponent(agent.pane_id)}/history`).catch(() => null)));
       if (generation !== refreshGeneration || request !== refreshRequest) return;
@@ -1632,10 +1656,13 @@
     testProfilesError = '';
     workspaceState = null;
     maestroState = null;
-    panes().filter(pane => !['maestro', 'review'].includes(pane.dataset.pane)).forEach(pane => pane.remove());
+    panes().filter(pane => !systemPanes.includes(pane.dataset.pane)).forEach(pane => pane.remove());
     renderProjects();
     syncUI();
     selectPane(grid.querySelector('[data-pane="maestro"]'));
+    projectListeners.forEach(listener => {
+      try { listener(projectId); } catch (error) { notify(`Falha no painel do projeto: ${error.message}`); }
+    });
     if (projectId) {
       const selectedProject = projectId;
       api(`/api/dev/test-profiles?project_id=${encodeURIComponent(selectedProject)}`)
@@ -1659,6 +1686,12 @@
   document.getElementById('project-toggle').addEventListener('click', () => {
     const nav = document.getElementById('project-nav');
     nav.hidden = !nav.hidden;
+  });
+  // Small surface for add-on panes (cockpit-native.js): the selected project and a toast.
+  window.NexusCockpit = Object.freeze({
+    projectId: () => projectId,
+    notify,
+    onProject: listener => { projectListeners.add(listener); if (projectId) listener(projectId); },
   });
   syncUI();
   void refreshModelCatalog();

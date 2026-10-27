@@ -37,6 +37,20 @@ _lock = threading.Lock()
 _pending: dict[str, "_Pending"] = {}
 
 
+_STATUS_DETAILS = {
+    "PENDING": "Waiting for an explicit human decision.",
+    "APPROVED": "Approved once by a human; no standing permission was granted.",
+    "DECLINED": "Declined by a human; the action was not executed.",
+    "EXPIRED": (
+        "Expired before a human decision; the action was denied and "
+        "no requested action was executed."
+    ),
+    "CANCELLED": (
+        "Cancelled because the turn ended before a decision; no requested action was executed."
+    ),
+}
+
+
 class _Pending:
     def __init__(self, approval_id: str, dev_session_id: str, turn_id: str, client, request_id: Any) -> None:
         self.approval_id = approval_id
@@ -78,13 +92,17 @@ def _summary(kind: str, params: dict) -> dict:
 
 
 def _row_dict(row) -> dict:
+    status = row["status"]
     return {
         "approval_id": row["id"],
         "dev_session_id": row["dev_session_id"],
         "turn_id": row["turn_id"],
         "kind": row["kind"],
         "summary": json.loads(row["summary_json"]),
-        "status": row["status"],
+        "status": status,
+        "status_detail": _STATUS_DETAILS.get(
+            status, "No additional status detail is available."
+        ),
         "created_at": row["created_at"],
         "decided_at": row["decided_at"],
     }
@@ -195,6 +213,31 @@ def decide(dev_session_id: str, approval_id: str, decision: str) -> dict:
     with _lock:
         pending = _pending.pop(approval_id, None)
     if pending is None:
+        status = row["status"]
+        if status == "EXPIRED":
+            raise DevServiceError(
+                "APPROVAL_EXPIRED",
+                (
+                    "Approval expired before a human decision; the action was denied "
+                    "and no requested action was executed."
+                ),
+                http_status=409,
+            )
+        if status == "CANCELLED":
+            raise DevServiceError(
+                "APPROVAL_CANCELLED",
+                (
+                    "Approval was cancelled because the turn ended; "
+                    "no requested action was executed."
+                ),
+                http_status=409,
+            )
+        if status in {"APPROVED", "DECLINED"}:
+            raise DevServiceError(
+                "APPROVAL_ALREADY_DECIDED",
+                f"Approval was already recorded as {status.lower()}.",
+                http_status=409,
+            )
         _set_status(approval_id, "EXPIRED")
         raise DevServiceError("APPROVAL_NOT_PENDING", "This approval request is no longer pending.", http_status=409)
 
