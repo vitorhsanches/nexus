@@ -58,12 +58,32 @@ def assert_session_execution_allowed(connection, session_id: str, *, turn: bool 
                        and execution["lease_renewed_at"] > workspace_execution._cutoff()
                        and step is not None)
             if turn:
-                active_mission = connection.execute(
-                    """SELECT 1 FROM dev_autonomous_missions WHERE dev_session_id=?
-                       AND status IN ('PENDING','RUNNING','TESTING','REPAIRING') LIMIT 1""",
-                    (session_id,),
+                backend_row = connection.execute(
+                    "SELECT backend FROM dev_sessions WHERE id=?", (session_id,)
                 ).fetchone()
-                allowed = allowed and step["status"] in {"STARTING", "RUNNING"} and active_mission is not None
+                if backend_row is not None and backend_row["backend"] == "codex_native":
+                    # Codex Native has no mission row to prove a legitimate
+                    # coordinator launch (mission_runner is never involved),
+                    # so the durable proof is instead: this step was marked
+                    # STARTING by the coordinator (checked above against the
+                    # live owner_token/lease) and this session has never had
+                    # a turn before. Native has no repair-turn loop, so
+                    # unlike OmniRoute's mission there is exactly one launch
+                    # opportunity, ever, per step -- the moment a dev_turns
+                    # row exists for this session (whatever its outcome),
+                    # this condition is permanently false and a replay is
+                    # refused, with no extra column needed to track it.
+                    no_prior_turn = connection.execute(
+                        "SELECT 1 FROM dev_turns WHERE dev_session_id = ? LIMIT 1", (session_id,)
+                    ).fetchone() is None
+                    allowed = allowed and step["status"] == "STARTING" and step["mission_id"] is None and no_prior_turn
+                else:
+                    active_mission = connection.execute(
+                        """SELECT 1 FROM dev_autonomous_missions WHERE dev_session_id=?
+                           AND status IN ('PENDING','RUNNING','TESTING','REPAIRING') LIMIT 1""",
+                        (session_id,),
+                    ).fetchone()
+                    allowed = allowed and step["status"] in {"STARTING", "RUNNING"} and active_mission is not None
             else:
                 allowed = allowed and step["status"] == "STARTING" and step["mission_id"] is None
             if not allowed:

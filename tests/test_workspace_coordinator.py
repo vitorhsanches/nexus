@@ -195,6 +195,119 @@ def test_durable_token_gates_mission_and_internal_turn_in_one_transaction(coord_
                                     allowed_models=["free/model"], test_profile="unit")
 
 
+# P5.2A: Codex Native has no mission row -- the gate must prove a legitimate
+# coordinated launch a different way, without a generic bypass and without
+# weakening the OmniRoute path above.
+
+
+def _set_backend(session_id: str, backend: str) -> None:
+    with database.get_connection() as connection:
+        connection.execute("UPDATE dev_sessions SET backend=? WHERE id=?", (backend, session_id))
+
+
+def test_native_turn_launch_is_gated_without_any_mission_row(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    _authorize(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    executions.update_step(plan_id, "api", "STARTING", owner_token=token)
+
+    # Manual, uncoordinated attempt: still blocked, exactly like OmniRoute.
+    with pytest.raises(workspace_handoff.HandoffBlocked):
+        dev_sessions.create_turn("DEV-API", "manual", requested_model="free/model")
+
+    # No mission row was ever created for this native session -- the old
+    # gate required `active_mission is not None`, which is always False for
+    # Codex Native. The fix must allow the coordinated launch anyway.
+    with database.get_connection() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM dev_autonomous_missions WHERE dev_session_id='DEV-API'"
+        ).fetchone() is None
+    with executions.coordinated_launch(plan_id, "api", token):
+        turn_id = dev_sessions.create_turn("DEV-API", "coordinated", requested_model="free/model")
+    assert turn_id
+
+
+def test_native_turn_launch_refuses_replay_after_the_first_turn(coord_env):
+    """Codex Native has no repair-turn loop: exactly one launch per step, ever."""
+    _set_backend("DEV-API", "codex_native")
+    _authorize(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    executions.update_step(plan_id, "api", "STARTING", owner_token=token)
+    with executions.coordinated_launch(plan_id, "api", token):
+        turn_id = dev_sessions.create_turn("DEV-API", "coordinated", requested_model="free/model")
+    # The turn reaches a terminal state; nothing has advanced the step yet
+    # (that is P5.2C's job), so it is still durably STARTING with no mission_id.
+    dev_sessions.update_turn_status(turn_id, "COMPLETED")
+    with database.get_connection() as connection:
+        step = connection.execute(
+            "SELECT status, mission_id FROM workspace_plan_execution_steps WHERE plan_id=? AND agent_key='api'",
+            (plan_id,),
+        ).fetchone()
+    assert step["status"] == "STARTING" and step["mission_id"] is None
+    # A second attempt, even with a live, correctly fenced coordinated
+    # launch for the exact same step, must still be refused: this session
+    # already had a turn, and a native step is a one-time launch.
+    with executions.coordinated_launch(plan_id, "api", token):
+        with pytest.raises(workspace_handoff.HandoffBlocked):
+            dev_sessions.create_turn("DEV-API", "replay", requested_model="free/model")
+
+
+def test_native_turn_launch_requires_a_live_owner_token(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    _authorize(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    executions.update_step(plan_id, "api", "STARTING", owner_token=token)
+    _stale(plan_id)
+    new = executions.claim_recovery(plan_id)
+    assert new and new != token
+    with executions.coordinated_launch(plan_id, "api", token), pytest.raises(workspace_handoff.HandoffBlocked):
+        dev_sessions.create_turn("DEV-API", "old owner", requested_model="free/model")
+    with executions.coordinated_launch(plan_id, "api", new):
+        turn_id = dev_sessions.create_turn("DEV-API", "new owner", requested_model="free/model")
+    assert turn_id
+
+
+def test_native_and_omniroute_panes_are_gated_independently_in_one_plan(coord_env):
+    """Backend selection is read per session, never a blanket flag.
+
+    "tests" is freed of its fixture dependency on "api" here on purpose:
+    the dependency-readiness check elsewhere in this module is itself
+    mission-coupled (a separate, known P5.2C gap -- see the P5.2A report),
+    and exercising it is not this test's concern.
+    """
+    _set_backend("DEV-API", "codex_native")
+    # "tests" keeps the fixture's default backend, 'omniroute'.
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE workspace_panes SET brief_json=? WHERE plan_id=? AND plan_agent_key='tests'",
+            (json.dumps({"task": "tests", "acceptance_criteria": ["ok"], "depends_on": [],
+                        "authorization": {"model": "free/model", "cost_status": "free",
+                                          "max_turns": 1, "mission_timeout_seconds": 60}}),
+             coord_env["plan_id"]),
+        )
+    _authorize(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    executions.update_step(plan_id, "api", "STARTING", owner_token=token)
+    executions.update_step(plan_id, "tests", "STARTING", owner_token=token)
+
+    with executions.coordinated_launch(plan_id, "api", token):
+        turn_id = dev_sessions.create_turn("DEV-API", "native step", requested_model="free/model")
+    assert turn_id
+
+    # The OmniRoute step is unaffected: it still needs an active mission
+    # row, not a turn -- the native fix must not have loosened that.
+    with executions.coordinated_launch(plan_id, "tests", token):
+        with pytest.raises(workspace_handoff.HandoffBlocked):
+            dev_sessions.create_turn("DEV-TESTS", "no mission yet", requested_model="free/model")
+        mission_id = dev_missions.create_mission("DEV-TESTS", "tests", requested_model="free/model",
+                                                 allowed_models=["free/model"], test_profile="unit")
+    assert mission_id
+
+
 def test_sequential_execution_reuses_mission_runner_and_completes_for_review(coord_env, monkeypatch):
     env = coord_env
     calls = env["calls"]
