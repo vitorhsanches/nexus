@@ -279,16 +279,36 @@ def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) 
                 or not isinstance(approval, dict)
                 or len(steps) != len(keys) or index < 1 or index >= len(steps)
                 or [step["agent_key"] for step in steps] != keys
-                or set(profiles) != set(keys)
                 or approval.get("max_turns_per_agent") != row["max_turns_per_agent"]
                 or approval.get("mission_timeout_seconds") != row["mission_timeout_seconds"]):
             return None
+        # P5.3B: a Codex Native agent is authorized with an empty test
+        # profile (authorize_execution stores "" for it, test_profiles_json
+        # still has an entry for every agent key) -- queried fresh here,
+        # never inferred from a step's own evidence columns, which are empty
+        # before that step has launched. A completed step's own recorded
+        # evidence type is the actual backend-consistency signal.
+        native_keys = {
+            step["agent_key"] for step in steps
+            if (connection.execute(
+                """SELECT ds.backend FROM workspace_panes wp
+                   JOIN dev_sessions ds ON ds.id = wp.dev_session_id WHERE wp.id = ?""",
+                (step["pane_id"],),
+            ).fetchone() or {"backend": "omniroute"})["backend"] == "codex_native"
+        }
+        if (set(profiles) != set(keys)
+                or any(step["mission_id"] and step["agent_key"] in native_keys
+                       or step["native_review_id"] and step["agent_key"] not in native_keys
+                       for step in steps)):
+            return None
         pending = steps[index]
         if (pending["status"] != "BLOCKED" or pending["error_code"] != row["error_code"]
-                or pending["mission_id"] or pending["started_at"] or pending["result_json"]
-                or any(step["status"] != "READY_FOR_REVIEW" or not step["mission_id"] or step["error_code"]
+                or pending["mission_id"] or pending["native_review_id"] or pending["native_turn_id"]
+                or pending["started_at"] or pending["result_json"]
+                or any(step["status"] != "READY_FOR_REVIEW" or not (step["mission_id"] or step["native_review_id"]) or step["error_code"]
                        for step in steps[:index])
-                or any(step["status"] != "PENDING" or step["mission_id"] for step in steps[index + 1:])):
+                or any(step["status"] != "PENDING" or step["mission_id"] or step["native_review_id"] or step["native_turn_id"]
+                       for step in steps[index + 1:])):
             return None
         previous = steps[index - 1]
         source = connection.execute("SELECT * FROM workspace_panes WHERE id=?", (previous["pane_id"],)).fetchone()
@@ -304,7 +324,7 @@ def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) 
                 or any((connection.execute(
                     "SELECT model FROM workspace_panes WHERE id=?", (step["pane_id"],)
                 ).fetchone() or {"model": None})["model"] != (selected.get(step["agent_key"]) or {}).get("model")
-                    or step["test_profile"] != profiles[step["agent_key"]] for step in steps)):
+                    or step["test_profile"] != (profiles.get(step["agent_key"]) or "") for step in steps)):
             return None
         try:
             dependencies = json.loads(target["brief_json"] or "{}").get("depends_on") or []
@@ -312,11 +332,14 @@ def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) 
             return None
         if dependencies != [previous["agent_key"]]:
             return None
+        previous_backend = "codex_native" if previous["agent_key"] in native_keys else "omniroute"
+        previous_evidence_id = previous["native_review_id"] or previous["mission_id"]
         handoff = connection.execute("SELECT * FROM workspace_handoffs WHERE id=?", (handoff_id,)).fetchone()
         if (handoff is None or handoff["status"] != "TRANSFERRED"
                 or handoff["plan_id"] != plan_id or handoff["project_id"] != row["project_id"]
                 or handoff["source_pane_id"] != source["id"] or handoff["target_pane_id"] != target["id"]
-                or handoff["source_mission_id"] != previous["mission_id"]
+                or handoff["source_backend"] != previous_backend
+                or (handoff["source_mission_id"] or handoff["source_native_review_id"]) != previous_evidence_id
                 or connection.execute(
                     """SELECT 1 FROM workspace_handoffs WHERE target_session_id=?
                        AND status IN ('TRANSFERRING','RESULT_UNCERTAIN') LIMIT 1""",
@@ -335,7 +358,8 @@ def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) 
         connection.execute(
             """UPDATE workspace_plan_execution_steps SET status='PENDING', error_code=NULL,
                error_message=NULL, finished_at=NULL, updated_at=?
-               WHERE plan_id=? AND agent_key=? AND status='BLOCKED' AND mission_id IS NULL""",
+               WHERE plan_id=? AND agent_key=? AND status='BLOCKED'
+                 AND mission_id IS NULL AND native_review_id IS NULL""",
             (now, plan_id, pending["agent_key"]),
         )
         connection.execute(
