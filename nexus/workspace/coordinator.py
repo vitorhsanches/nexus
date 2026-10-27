@@ -250,6 +250,34 @@ def resume(plan_id: str) -> dict:
     return state(plan_id)
 
 
+# P5.2C: Codex Native has no mission to launch through mission_runner --
+# it has one turn, gated by the P5.2A launch check, followed by a human-
+# bound review instead of an auto-signalled READY_FOR_REVIEW.
+
+
+def _is_native_pane(pane) -> bool:
+    if pane is None:
+        return False
+    from nexus.chat.appserver_client import BACKEND_CODEX_NATIVE
+    from nexus.dev.executor import session_backend
+    from nexus.registry import dev_sessions
+
+    session = dev_sessions.get_session(pane["dev_session_id"])
+    return session is not None and session_backend(session) == BACKEND_CODEX_NATIVE
+
+
+def _native_prompt(pane) -> str:
+    from nexus.workspace import service
+
+    return service._agent_context(pane) + "Execute the planned task above and satisfy every acceptance criterion."
+
+
+def _start_native_turn(pane) -> dict:
+    from nexus.dev.executor import run_dev_turn
+
+    return run_dev_turn(pane["dev_session_id"], _native_prompt(pane), model=pane["model"])
+
+
 def _heartbeat(plan_id: str, token: str, stop: threading.Event, lost: threading.Event) -> None:
     while not stop.wait(2):
         try:
@@ -262,6 +290,7 @@ def _heartbeat(plan_id: str, token: str, stop: threading.Event, lost: threading.
 
 
 def _run(plan_id: str, token: str) -> None:
+    from nexus.registry import dev_sessions
     from nexus.workspace import service
 
     stop = threading.Event()
@@ -287,15 +316,21 @@ def _run(plan_id: str, token: str) -> None:
             persisted = execution_store.get_steps(plan_id)[index]
             if persisted["status"] == "READY_FOR_REVIEW":
                 continue
+            if persisted["status"] == "AWAITING_NATIVE_REVIEW":
+                message = "Turn completed; bind a confirmed human review to this step to resume."
+                update("BLOCKED", current_index=index, error_code="AWAITING_NATIVE_REVIEW", error_message=message)
+                return
             if persisted["status"] in {"BLOCKED", "FAILED", "INTERRUPTED", "RESULT_UNCERTAIN"}:
                 update(persisted["status"], current_index=index)
                 return
-            mission_id = persisted["mission_id"]
-            # A durable mission id is authoritative even if the step status
+            pane = store.get_pane(persisted["pane_id"])
+            is_native = _is_native_pane(pane)
+            evidence_id = persisted["native_turn_id"] if is_native else persisted["mission_id"]
+            # A durable evidence id is authoritative even if the step status
             # lags. Recovery only observes it and never calls the launcher.
-            if not mission_id:
+            if not evidence_id:
                 if persisted["status"] != "PENDING":
-                    message = "Launch was interrupted before its mission id was recorded; it was not replayed."
+                    message = "Launch was interrupted before its evidence id was recorded; it was not replayed."
                     step_update(step["agent_key"], "RESULT_UNCERTAIN", error_code="COORDINATOR_START_INTERRUPTED", error_message=message)
                     update("RESULT_UNCERTAIN", current_index=index, error_code="COORDINATOR_START_INTERRUPTED", error_message=message)
                     return
@@ -307,6 +342,17 @@ def _run(plan_id: str, token: str) -> None:
                     previous = execution_store.get_steps(plan_id)[index - 1]
                     if previous["status"] != "READY_FOR_REVIEW":
                         update("BLOCKED", current_index=index, error_code="DEPENDENCY_PENDING")
+                        return
+                    previous_pane = store.get_pane(previous["pane_id"])
+                    if is_native or _is_native_pane(previous_pane):
+                        # handoff.py and its dependency evidence are mission-
+                        # based only (P5.2/P5.3 contract, acoplamento #4);
+                        # never silently treat an unreadable native source as
+                        # "no changes to hand off".
+                        message = ("Coordinated execution supports exactly one Codex Native agent per "
+                                   "plan today; handoff into or out of a native step is not implemented.")
+                        step_update(step["agent_key"], "BLOCKED", error_code="NATIVE_HANDOFF_NOT_SUPPORTED", error_message=message)
+                        update("BLOCKED", current_index=index, error_code="NATIVE_HANDOFF_NOT_SUPPORTED", error_message=message)
                         return
                     if _changed_files(_mission_for(previous)):
                         from nexus.workspace import handoff
@@ -324,47 +370,92 @@ def _run(plan_id: str, token: str) -> None:
                 # uncertain and the old token cannot write or advance again.
                 step_update(step["agent_key"], "STARTING")
                 check_owner()
-                try:
-                    with execution_store.coordinated_launch(plan_id, step["agent_key"], token):
-                        result = service.start_pane_mission(
-                            step["pane_id"], None, confirm_model=None,
-                            test_profile=step["test_profile"], timeout_seconds=None,
-                        )
-                except DevServiceError as error:
-                    status = "BLOCKED" if error.code in {"DEPENDENCY_PENDING", "PANE_BUSY", "TEST_PROFILE_NOT_FOUND"} else "FAILED"
-                    step_update(step["agent_key"], status, error_code=error.code, error_message=str(error))
-                    update(status, current_index=index, error_code=error.code, error_message=str(error))
-                    return
-                mission_id = result["mission"]["mission_id"]
-                step_update(step["agent_key"], "RUNNING", mission_id=mission_id)
-            while True:
-                check_owner()
-                mission = dev_missions.get_mission(mission_id)
-                if mission is None:
-                    step_update(step["agent_key"], "RESULT_UNCERTAIN", error_code="MISSION_RECORD_MISSING")
-                    update("RESULT_UNCERTAIN", current_index=index, error_code="MISSION_RECORD_MISSING")
-                    return
-                if _is_interrupted(plan_id) and mission["status"] in ACTIVE_MISSION_STATUSES:
+                if is_native:
                     try:
-                        from nexus.dev import mission_runner
-                        check_owner()
-                        mission_runner.interrupt_mission(mission["dev_session_id"], mission_id)
-                    except DevServiceError:
-                        pass
-                if mission["status"] in ACTIVE_MISSION_STATUSES:
-                    time.sleep(0.2)
-                    continue
-                status = mission["status"]
-                if status == "READY_FOR_REVIEW":
-                    step_update(step["agent_key"], status, result=_step_result(mission))
-                    if _is_interrupted(plan_id):
-                        update("INTERRUPTED", current_index=index + 1)
+                        with execution_store.coordinated_launch(plan_id, step["agent_key"], token):
+                            turn = _start_native_turn(pane)
+                    except DevServiceError as error:
+                        status = ("BLOCKED" if error.code in {
+                            "DEPENDENCY_WORKTREE_NOT_TRANSFERRED", "SESSION_BUSY", "TOO_MANY_CONCURRENT_DEV_TURNS",
+                        } else "FAILED")
+                        step_update(step["agent_key"], status, error_code=error.code, error_message=str(error))
+                        update(status, current_index=index, error_code=error.code, error_message=str(error))
                         return
-                    break
-                terminal = "INTERRUPTED" if status in {"CANCELLED", "INTERRUPTED"} else "RESULT_UNCERTAIN" if status == "OUTCOME_UNKNOWN" else "FAILED"
-                step_update(step["agent_key"], terminal, result=_step_result(mission), error_code=mission["error_code"], error_message=mission["error_message"])
-                update(terminal, current_index=index, error_code=mission["error_code"] or f"MISSION_{terminal}", error_message=mission["error_message"])
-                return
+                    evidence_id = turn["turn_id"]
+                    step_update(step["agent_key"], "RUNNING", native_turn_id=evidence_id)
+                else:
+                    try:
+                        with execution_store.coordinated_launch(plan_id, step["agent_key"], token):
+                            result = service.start_pane_mission(
+                                step["pane_id"], None, confirm_model=None,
+                                test_profile=step["test_profile"], timeout_seconds=None,
+                            )
+                    except DevServiceError as error:
+                        status = "BLOCKED" if error.code in {"DEPENDENCY_PENDING", "PANE_BUSY", "TEST_PROFILE_NOT_FOUND"} else "FAILED"
+                        step_update(step["agent_key"], status, error_code=error.code, error_message=str(error))
+                        update(status, current_index=index, error_code=error.code, error_message=str(error))
+                        return
+                    evidence_id = result["mission"]["mission_id"]
+                    step_update(step["agent_key"], "RUNNING", mission_id=evidence_id)
+            if is_native:
+                while True:
+                    check_owner()
+                    turn = dev_sessions.get_turn(evidence_id)
+                    if turn is None:
+                        step_update(step["agent_key"], "RESULT_UNCERTAIN", error_code="TURN_RECORD_MISSING")
+                        update("RESULT_UNCERTAIN", current_index=index, error_code="TURN_RECORD_MISSING")
+                        return
+                    if _is_interrupted(plan_id) and turn["status"] in {"PENDING", "RUNNING"}:
+                        try:
+                            from nexus.dev.executor import interrupt_dev_turn
+                            check_owner()
+                            interrupt_dev_turn(turn["dev_session_id"], evidence_id)
+                        except DevServiceError:
+                            pass
+                    if turn["status"] in {"PENDING", "RUNNING"}:
+                        time.sleep(0.2)
+                        continue
+                    status = turn["status"]
+                    if status == "COMPLETED":
+                        step_update(step["agent_key"], "AWAITING_NATIVE_REVIEW")
+                        message = "Turn completed; create and confirm a human review for this session, then bind it to resume."
+                        update("BLOCKED", current_index=index, error_code="AWAITING_NATIVE_REVIEW", error_message=message)
+                        return
+                    terminal = ("INTERRUPTED" if status == "CANCELLED"
+                               else "RESULT_UNCERTAIN" if turn["error_code"] == "TURN_OUTCOME_UNKNOWN"
+                               else "FAILED")
+                    step_update(step["agent_key"], terminal, error_code=turn["error_code"], error_message=turn["error_message"])
+                    update(terminal, current_index=index, error_code=turn["error_code"] or f"TURN_{terminal}", error_message=turn["error_message"])
+                    return
+            else:
+                while True:
+                    check_owner()
+                    mission = dev_missions.get_mission(evidence_id)
+                    if mission is None:
+                        step_update(step["agent_key"], "RESULT_UNCERTAIN", error_code="MISSION_RECORD_MISSING")
+                        update("RESULT_UNCERTAIN", current_index=index, error_code="MISSION_RECORD_MISSING")
+                        return
+                    if _is_interrupted(plan_id) and mission["status"] in ACTIVE_MISSION_STATUSES:
+                        try:
+                            from nexus.dev import mission_runner
+                            check_owner()
+                            mission_runner.interrupt_mission(mission["dev_session_id"], evidence_id)
+                        except DevServiceError:
+                            pass
+                    if mission["status"] in ACTIVE_MISSION_STATUSES:
+                        time.sleep(0.2)
+                        continue
+                    status = mission["status"]
+                    if status == "READY_FOR_REVIEW":
+                        step_update(step["agent_key"], status, result=_step_result(mission))
+                        if _is_interrupted(plan_id):
+                            update("INTERRUPTED", current_index=index + 1)
+                            return
+                        break
+                    terminal = "INTERRUPTED" if status in {"CANCELLED", "INTERRUPTED"} else "RESULT_UNCERTAIN" if status == "OUTCOME_UNKNOWN" else "FAILED"
+                    step_update(step["agent_key"], terminal, result=_step_result(mission), error_code=mission["error_code"], error_message=mission["error_message"])
+                    update(terminal, current_index=index, error_code=mission["error_code"] or f"MISSION_{terminal}", error_message=mission["error_message"])
+                    return
         update("AWAITING_REVIEW", current_index=len(execution["steps"]), result={"human_approval_required": True, "integration_applied": False})
     except execution_store.OwnershipLost:
         # No unfenced cleanup: the new owner is solely responsible for state.
@@ -417,6 +508,55 @@ def recover(plan_id: str) -> dict:
     if token:
         _spawn(plan_id, token)
     return execution_store.view(plan_id)
+
+
+def bind_native_review(plan_id: str, agent_key: str, review_id: str) -> dict:
+    """Explicit operator action: attach a confirmed human review as the
+    durable evidence that the current Codex Native step is done, then
+    resume the sequence -- the native sibling of resume() for an approved
+    handoff. Never creates, decides or re-validates the review itself
+    (that stays entirely in nexus.dev.integration); only checks that the
+    exact review named applies to the exact session, turn and step that
+    is actually awaiting one, immediately before claiming the transition.
+    """
+    from nexus.dev import integration
+    from nexus.registry import dev_integrations, dev_sessions
+
+    execution = state(plan_id)
+    if execution["status"] != "BLOCKED" or execution["error_code"] != "AWAITING_NATIVE_REVIEW":
+        _fail("NATIVE_REVIEW_NOT_AWAITED", "This plan is not blocked awaiting a native review.")
+    index = execution["current_index"]
+    steps = execution["steps"]
+    if not isinstance(index, int) or index < 0 or index >= len(steps) or steps[index]["agent_key"] != agent_key:
+        _fail("NATIVE_REVIEW_NOT_AWAITED", "This agent is not the step currently awaiting a native review.")
+    step = steps[index]
+    if step["status"] != "AWAITING_NATIVE_REVIEW" or not step["native_turn_id"] or step["native_review_id"]:
+        _fail("NATIVE_REVIEW_NOT_AWAITED", "This step is not awaiting a native review to be bound.")
+    pane = store.get_pane(step["pane_id"])
+    if pane is None:
+        _fail("PANE_NOT_FOUND", "The agent's pane no longer exists.", 404)
+    session = dev_sessions.get_session(pane["dev_session_id"])
+    if session is None:
+        _fail("SESSION_NOT_FOUND", "The agent's development session no longer exists.", 404)
+    turn = dev_sessions.get_turn_for_session(session["id"], step["native_turn_id"])
+    if turn is None or turn["status"] != "COMPLETED":
+        _fail("NATIVE_REVIEW_TURN_NOT_READY", "The step's own turn is not durably COMPLETED.")
+    # get_review() itself refuses a review that does not belong to this
+    # exact session -- not re-checked here.
+    review = integration.get_review(session["id"], review_id)
+    if review["status"] != "REVIEWED":
+        _fail("NATIVE_REVIEW_NOT_READY", f"Review is {review['status']}; it cannot be bound.")
+    if not review["snapshot"].get("approval_ready"):
+        _fail("NATIVE_REVIEW_INCOMPLETE", "This review snapshot cannot be completely reviewed.")
+    latest = dev_integrations.list_reviews(session["id"])
+    if not latest or latest[0]["review_id"] != review_id:
+        _fail("NATIVE_REVIEW_STALE", "Only the most recent review for this session can be bound.")
+
+    token = execution_store.claim_native_review(plan_id, agent_key, review_id)
+    if token is None:
+        _fail("NATIVE_REVIEW_CONCURRENT", "The plan, step or review changed before this claim.")
+    _spawn(plan_id, token)
+    return state(plan_id)
 
 
 def state(plan_id: str) -> dict:

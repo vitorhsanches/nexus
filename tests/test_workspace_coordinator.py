@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import json
 import multiprocessing
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -716,3 +718,335 @@ def test_api_uses_exact_persisted_approval_limits(coord_env, monkeypatch):
         assert accepted.json()["max_turns_per_agent"] == 2
         assert accepted.json()["mission_timeout_seconds"] == 1800
         assert accepted.json()["status"] == "AWAITING_EXECUTION"
+
+
+# P5.2C: a simulated Codex Native agent through the coordinator -- launch
+# via the P5.2A gate, poll a turn instead of a mission, park at
+# AWAITING_NATIVE_REVIEW, and resume only once a confirmed human review is
+# explicitly bound. No real Codex/App-Server call is ever made: the turn
+# itself is created for real (through dev_sessions.create_turn, so the
+# gate and fencing are exercised exactly as in production), but nothing
+# drives it to completion except the test itself.
+
+
+def _review_id(label: str) -> str:
+    return hashlib.sha256(label.encode()).hexdigest()
+
+
+def _save_review(session_id, review_id, *, approval_ready=True, status="REVIEWED"):
+    from nexus.registry import dev_integrations
+
+    record = dev_integrations.save_review(
+        review_id=review_id, dev_session_id=session_id, project_id="demo",
+        base_sha="base", target_head="base", target_branch="main",
+        snapshot={"diff": {"files": [], "truncated": False, "review_id": "fingerprint"},
+                 "approval_ready": approval_ready},
+    )
+    if status != "REVIEWED":
+        dev_integrations.update_review(review_id, status=status)
+        record = dev_integrations.get_review(review_id)
+    return record
+
+
+def _fake_run_dev_turn(calls):
+    def run(dev_session_id, prompt, *, model=None, effort=None):
+        turn_id = dev_sessions.create_turn(dev_session_id, prompt, requested_model=model)
+        calls.append(turn_id)
+        return {"turn_id": turn_id, "dev_session_id": dev_session_id, "status": "PENDING"}
+    return run
+
+
+def _allow_review_lookup(monkeypatch, session_id: str) -> None:
+    """nexus.dev.integration._authorized_session() requires a real, Git-
+    verified worktree. These tests fabricate review rows directly (see
+    _save_review) and only need that check to pass, never a real diff."""
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE dev_sessions SET worktree_path=?, base_sha='base' WHERE id=?",
+            (f"C:/fake-worktree/{session_id}", session_id),
+        )
+    monkeypatch.setattr("nexus.dev.integration.verify_dev_worktree", lambda *args, **kwargs: Path(args[1]))
+
+
+def _single_native_plan(env) -> str:
+    """An independent, genuinely one-agent plan (coord_env's own plan always
+    has a second, dependent OmniRoute agent) -- for the true single-native-
+    agent happy path the P5.2C scope describes."""
+    proposal = {
+        "schema_version": "maestro-plan/1", "source": "llm", "complexity": "simple",
+        "summary": "one agent", "explanation": "one", "needs_clarification": None,
+        "agents": [{"key": "solo", "role": "implementer", "title": "Solo", "model": "free/model",
+                    "task": "solo", "acceptance_criteria": ["ok"], "depends_on": [], "touches": ["solo.py"]}],
+        "execution": {"mode": "sequential", "order": ["solo"]}, "limit": 3, "fallback_reason": None,
+    }
+    plan_id = store.create_plan("demo", "one agent", policy_version="maestro-plan/1", complexity="simple",
+                                proposal=proposal, source="llm")
+    approval = {"agent_models": {"solo": {"model": "free/model", "cost_status": "free"}},
+               "max_turns_per_agent": 1, "mission_timeout_seconds": 60, "cost_confirmed_for": []}
+    brief = {"task": "solo", "acceptance_criteria": ["ok"], "depends_on": [],
+             "authorization": {"model": "free/model", "cost_status": "free", "max_turns": 1, "mission_timeout_seconds": 60}}
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plans SET status='APPROVED', approval_json=? WHERE id=?",
+                          (json.dumps(approval), plan_id))
+        connection.execute(
+            "INSERT INTO dev_sessions (id, project_id, branch, status, backend) VALUES "
+            "('DEV-SOLO', 'demo', 'nexus/solo', 'ACTIVE', 'codex_native')",
+        )
+        connection.execute(
+            """INSERT INTO workspace_panes
+               (id, project_id, dev_session_id, plan_id, origin, role, title, model, position, plan_agent_key, brief_json)
+               VALUES ('PANE-SOLO', 'demo', 'DEV-SOLO', ?, 'maestro', 'implementer', 'Solo', 'free/model', 0, 'solo', ?)""",
+            (plan_id, json.dumps(brief)),
+        )
+    return plan_id
+
+
+def _launch_native_step(env, monkeypatch):
+    _set_backend("DEV-API", "codex_native")
+    _allow_review_lookup(monkeypatch, "DEV-API")
+    turns = []
+    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    _authorize_with_native_api(env)
+    plan_id = env["plan_id"]
+    coordinator.start(plan_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not turns:
+        time.sleep(0.02)
+    assert turns, "the native turn was never launched"
+    return plan_id, turns[0]
+
+
+def test_native_step_launches_a_real_turn_through_the_gate(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    turn = dev_sessions.get_turn(turn_id)
+    assert turn["dev_session_id"] == "DEV-API"
+    state = _wait(plan_id, {"RUNNING"})
+    assert state["steps"][0]["status"] == "RUNNING"
+    assert state["steps"][0]["native_turn_id"] == turn_id
+    assert state["steps"][0]["mission_id"] is None
+    # Let the still-polling worker finish so it does not outlive this test.
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+
+
+def test_native_turn_completion_parks_at_awaiting_native_review(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    state = _wait(plan_id, {"BLOCKED"})
+    assert state["status"] == "BLOCKED"
+    assert state["error_code"] == "AWAITING_NATIVE_REVIEW"
+    assert state["steps"][0]["status"] == "AWAITING_NATIVE_REVIEW"
+    assert state["steps"][0]["native_turn_id"] == turn_id
+    assert state["steps"][0]["native_review_id"] is None
+
+
+def test_native_turn_failure_is_a_plain_failed_step(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "FAILED", error_code="APP_SERVER_ERROR", error_message="boom")
+    state = _wait(plan_id, {"FAILED"})
+    assert state["status"] == "FAILED"
+    assert state["error_code"] == "APP_SERVER_ERROR"
+    assert state["steps"][0]["status"] == "FAILED"
+
+
+def test_native_turn_outcome_unknown_becomes_result_uncertain(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "FAILED", error_code="TURN_OUTCOME_UNKNOWN", error_message="orphaned")
+    state = _wait(plan_id, {"RESULT_UNCERTAIN"})
+    assert state["status"] == "RESULT_UNCERTAIN"
+    assert state["steps"][0]["status"] == "RESULT_UNCERTAIN"
+
+
+def test_interrupting_a_running_native_step_cancels_its_turn(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    calls = []
+    monkeypatch.setattr("nexus.dev.executor.interrupt_dev_turn", lambda session_id, tid: calls.append((session_id, tid)))
+    coordinator.interrupt(plan_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not calls:
+        time.sleep(0.02)
+    assert calls == [("DEV-API", turn_id)]
+    dev_sessions.update_turn_status(turn_id, "CANCELLED", error_code="INTERRUPTED")
+    state = _wait(plan_id, {"INTERRUPTED"})
+    assert state["status"] == "INTERRUPTED"
+    assert state["steps"][0]["status"] == "INTERRUPTED"
+
+
+def test_bind_native_review_requires_a_matching_pending_step(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review = _save_review("DEV-API", _review_id("ok-1"))
+    with pytest.raises(DevServiceError) as error:
+        coordinator.bind_native_review(plan_id, "tests", review["review_id"])
+    assert error.value.code == "NATIVE_REVIEW_NOT_AWAITED"
+
+
+def test_bind_native_review_rejects_a_review_from_another_session(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review = _save_review("DEV-TESTS", _review_id("wrong-session"))
+    with pytest.raises(DevServiceError) as error:
+        coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    assert error.value.code == "REVIEW_NOT_FOUND"
+
+
+def test_bind_native_review_rejects_incomplete_snapshot(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review = _save_review("DEV-API", _review_id("not-ready"), approval_ready=False)
+    with pytest.raises(DevServiceError) as error:
+        coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    assert error.value.code == "NATIVE_REVIEW_INCOMPLETE"
+
+
+def test_bind_native_review_rejects_a_superseded_review(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    stale = _save_review("DEV-API", _review_id("first"))
+    _save_review("DEV-API", _review_id("second"))
+    with pytest.raises(DevServiceError) as error:
+        coordinator.bind_native_review(plan_id, "api", stale["review_id"])
+    assert error.value.code == "NATIVE_REVIEW_STALE"
+
+
+def test_bind_native_review_rejects_a_rejected_review(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review = _save_review("DEV-API", _review_id("rejected"), status="REJECTED")
+    with pytest.raises(DevServiceError) as error:
+        coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    assert error.value.code == "NATIVE_REVIEW_NOT_READY"
+
+
+def test_bind_native_review_rejects_when_the_turn_is_not_durably_completed(coord_env, monkeypatch):
+    """Defense in depth: even if a step were ever marked AWAITING_NATIVE_REVIEW
+    without its turn genuinely COMPLETED (a corrupted or raced state), binding
+    must still refuse rather than trust the step status alone."""
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    with executions.coordinated_launch(plan_id, "api", token):
+        executions.update_step(plan_id, "api", "STARTING", owner_token=token)
+        turn_id = dev_sessions.create_turn("DEV-API", "task", requested_model="free/model")
+    executions.update_step(plan_id, "api", "AWAITING_NATIVE_REVIEW", native_turn_id=turn_id, owner_token=token)
+    executions.update_execution(plan_id, "BLOCKED", current_index=0, error_code="AWAITING_NATIVE_REVIEW", owner_token=token)
+    review = _save_review("DEV-API", _review_id("premature"))
+    with pytest.raises(DevServiceError) as error:
+        coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    assert error.value.code == "NATIVE_REVIEW_TURN_NOT_READY"
+
+
+def test_bind_native_review_resumes_and_still_refuses_to_hand_off_into_omniroute(coord_env, monkeypatch):
+    """coord_env's plan has a second, OmniRoute "tests" step depending on
+    "api". Binding must still advance the sequence (not just mark the step
+    done and stop) -- but the second step must stay refused by the same
+    NATIVE_HANDOFF_NOT_SUPPORTED guard, never silently proceed as if "api"
+    had produced no changes to hand off."""
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review = _save_review("DEV-API", _review_id("final"))
+    result = coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    assert result["steps"][0]["status"] == "READY_FOR_REVIEW"
+    assert result["steps"][0]["native_review_id"] == review["review_id"]
+    final = _wait(plan_id, {"BLOCKED"})
+    assert final["status"] == "BLOCKED"
+    assert final["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
+    assert final["steps"][1]["status"] == "BLOCKED"
+
+
+def test_single_native_agent_plan_reaches_awaiting_review_after_a_bound_review(coord_env, monkeypatch):
+    plan_id = _single_native_plan(coord_env)
+    _allow_review_lookup(monkeypatch, "DEV-SOLO")
+    turns = []
+    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    coordinator.authorize_execution(plan_id, agent_keys=["solo"], test_profiles={},
+                                    max_turns_per_agent=1, mission_timeout_seconds=60)
+    coordinator.start(plan_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not turns:
+        time.sleep(0.02)
+    assert turns, "the native turn was never launched"
+    turn_id = turns[0]
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review = _save_review("DEV-SOLO", _review_id("solo-final"))
+    result = coordinator.bind_native_review(plan_id, "solo", review["review_id"])
+    assert result["steps"][0]["status"] == "READY_FOR_REVIEW"
+    final = _wait(plan_id, {"AWAITING_REVIEW"})
+    assert final["status"] == "AWAITING_REVIEW"
+    assert final["result"]["human_approval_required"] is True
+    assert final["result"]["integration_applied"] is False
+
+
+def test_bind_native_review_cannot_be_replayed(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    first = _save_review("DEV-API", _review_id("bound"))
+    coordinator.bind_native_review(plan_id, "api", first["review_id"])
+    _wait(plan_id, {"AWAITING_REVIEW"})
+    second = _save_review("DEV-API", _review_id("replay-attempt"))
+    with pytest.raises(DevServiceError) as error:
+        coordinator.bind_native_review(plan_id, "api", second["review_id"])
+    assert error.value.code == "NATIVE_REVIEW_NOT_AWAITED"
+
+
+def test_bind_native_review_is_fenced_against_a_concurrent_recovery(coord_env, monkeypatch):
+    plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review = _save_review("DEV-API", _review_id("raced"))
+    # Simulate another process having already reclaimed this plan between
+    # the human's read of its state and this call.
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plan_executions SET status='RUNNING' WHERE plan_id=?", (plan_id,))
+    with pytest.raises(DevServiceError) as error:
+        coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    assert error.value.code == "NATIVE_REVIEW_NOT_AWAITED"
+
+
+def test_crash_before_native_turn_id_is_recorded_is_uncertain_not_replayed(coord_env):
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    # The launch barrier was written, but the process died before the
+    # turn id came back -- exactly like the OmniRoute mission case.
+    executions.update_step(plan_id, "api", "STARTING", owner_token=token)
+    coordinator._run(plan_id, token)
+    state = coordinator.state(plan_id)
+    assert state["status"] == "RESULT_UNCERTAIN"
+    assert state["error_code"] == "COORDINATOR_START_INTERRUPTED"
+    assert state["steps"][0]["status"] == "RESULT_UNCERTAIN"
+    assert dev_sessions.get_active_turn_for_session("DEV-API") is None, "a crash must never be replayed as a new turn"
+
+
+def test_native_predecessor_blocks_the_next_step_instead_of_skipping_handoff(coord_env):
+    """_changed_files(_mission_for(previous)) returns [] for a native
+    predecessor (it has no mission_id to look up) -- which would otherwise
+    silently skip handoff verification entirely. This must be refused."""
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    now = datetime.now(UTC).isoformat()
+    with database.get_connection() as connection:
+        connection.execute(
+            """UPDATE workspace_plan_execution_steps
+               SET status='READY_FOR_REVIEW', native_turn_id=?, native_review_id=?, finished_at=?
+               WHERE plan_id=? AND agent_key='api'""",
+            ("DEVTURN-SIM", _review_id("simulated-bound"), now, plan_id),
+        )
+    coordinator._run(plan_id, token)
+    state = coordinator.state(plan_id)
+    assert state["status"] == "BLOCKED"
+    assert state["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
+    assert state["steps"][1]["status"] == "BLOCKED"
+    assert state["steps"][1]["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"

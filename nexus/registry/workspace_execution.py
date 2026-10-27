@@ -79,7 +79,7 @@ EXECUTION_STATUSES = frozenset({
     "RESULT_UNCERTAIN",
 })
 STEP_STATUSES = frozenset({
-    "PENDING", "STARTING", "RUNNING", "READY_FOR_REVIEW", "BLOCKED",
+    "PENDING", "STARTING", "RUNNING", "AWAITING_NATIVE_REVIEW", "READY_FOR_REVIEW", "BLOCKED",
     "FAILED", "INTERRUPTED", "RESULT_UNCERTAIN",
 })
 
@@ -330,6 +330,55 @@ def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) 
                WHERE plan_id=? AND status='BLOCKED'""",
             (socket.gethostname(), os.getpid(), now, token, now, now,
              json.dumps(history, ensure_ascii=False), plan_id),
+        )
+    return token
+
+
+def claim_native_review(plan_id: str, agent_key: str, review_id: str) -> str | None:
+    """Fence one explicit, human-confirmed AWAITING_NATIVE_REVIEW -> RUNNING
+    transition, mirroring claim_resume()'s shape for the handoff case.
+
+    Purely mechanical: the caller (coordinator.bind_native_review) has
+    already validated the review's identity, freshness and approval_ready
+    state against the exact session and turn before calling this. This
+    function only re-checks the durable preconditions that must hold at
+    the moment of the claim, under one write reservation, and never
+    inspects the review itself.
+    """
+    now = _now()
+    token = uuid4().hex
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        execution = connection.execute(
+            "SELECT * FROM workspace_plan_executions WHERE plan_id=?", (plan_id,)
+        ).fetchone()
+        if (execution is None or execution["status"] != "BLOCKED"
+                or execution["error_code"] != "AWAITING_NATIVE_REVIEW"):
+            return None
+        steps = connection.execute(
+            "SELECT * FROM workspace_plan_execution_steps WHERE plan_id=? ORDER BY ordinal", (plan_id,)
+        ).fetchall()
+        index = execution["current_index"]
+        if not isinstance(index, int) or index < 0 or index >= len(steps):
+            return None
+        step = steps[index]
+        if (step["agent_key"] != agent_key or step["status"] != "AWAITING_NATIVE_REVIEW"
+                or not step["native_turn_id"] or step["native_review_id"] or step["mission_id"]):
+            return None
+        connection.execute(
+            """UPDATE workspace_plan_execution_steps
+               SET status='READY_FOR_REVIEW', native_review_id=?,
+                   finished_at=COALESCE(finished_at, ?), updated_at=?
+               WHERE plan_id=? AND agent_key=? AND status='AWAITING_NATIVE_REVIEW'
+                 AND native_review_id IS NULL""",
+            (review_id, now, now, plan_id, agent_key),
+        )
+        connection.execute(
+            """UPDATE workspace_plan_executions SET status='RUNNING', owner_host=?, owner_pid=?,
+               owner_acquired_at=?, owner_token=?, lease_renewed_at=?, updated_at=?,
+               error_code=NULL, error_message=NULL, finished_at=NULL
+               WHERE plan_id=? AND status='BLOCKED'""",
+            (socket.gethostname(), os.getpid(), now, token, now, now, plan_id),
         )
     return token
 
