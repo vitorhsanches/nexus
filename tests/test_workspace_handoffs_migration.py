@@ -7,6 +7,10 @@ No model calls; this is pure SQLite schema/data verification.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import sqlite3
+from threading import Barrier
+
 import pytest
 
 from nexus.registry import database
@@ -77,6 +81,34 @@ def _seed_legacy_row(connection, plan_id: str, *, handoff_id="HANDOFF-OLD", stat
     )
 
 
+def _legacy_execution_schema(connection) -> None:
+    """The pre-P5.2B execution tables, with the P2B.1 columns retained."""
+    connection.executescript(
+        """
+        CREATE TABLE workspace_plan_executions (
+            plan_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, status TEXT NOT NULL,
+            agent_keys_json TEXT NOT NULL, test_profiles_json TEXT NOT NULL,
+            max_turns_per_agent INTEGER NOT NULL,
+            mission_timeout_seconds INTEGER NOT NULL,
+            current_index INTEGER NOT NULL DEFAULT 0,
+            interrupt_requested INTEGER NOT NULL DEFAULT 0,
+            owner_host TEXT, owner_pid INTEGER, owner_acquired_at TEXT, error_code TEXT,
+            error_message TEXT, result_json TEXT, created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT, updated_at TEXT NOT NULL, owner_token TEXT,
+            lease_renewed_at TEXT, resume_history_json TEXT
+        );
+        CREATE TABLE workspace_plan_execution_steps (
+            plan_id TEXT NOT NULL, agent_key TEXT NOT NULL, ordinal INTEGER NOT NULL,
+            pane_id TEXT NOT NULL, test_profile TEXT NOT NULL, status TEXT NOT NULL,
+            mission_id TEXT, result_json TEXT, error_code TEXT, error_message TEXT,
+            started_at TEXT, finished_at TEXT, updated_at TEXT NOT NULL,
+            PRIMARY KEY (plan_id, agent_key), UNIQUE (plan_id, ordinal)
+        );
+        """
+    )
+
+
 def test_migration_preserves_legacy_handoffs_and_adds_native_columns(db_env):
     database.initialize_database()
     with database.get_connection() as connection:
@@ -125,7 +157,7 @@ def test_migration_preserves_legacy_handoffs_and_adds_native_columns(db_env):
         )
         connection.commit()
         # ...but never with both kinds of evidence at once.
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 """INSERT INTO workspace_handoffs
                    (id, project_id, plan_id, source_agent_key, target_agent_key, source_pane_id, target_pane_id,
@@ -138,6 +170,20 @@ def test_migration_preserves_legacy_handoffs_and_adds_native_columns(db_env):
                 (plan_id, "b" * 64),
             )
             connection.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """INSERT INTO workspace_handoffs
+                   (id, project_id, plan_id, source_agent_key, target_agent_key,
+                    source_pane_id, target_pane_id, source_backend, source_session_id,
+                   target_session_id, source_base_sha, source_head_sha,
+                   target_base_sha, target_head_sha, snapshot_fingerprint,
+                   files_json, status, created_at)
+                   VALUES ('HANDOFF-NO-EVIDENCE','demo',?,'api','tests',
+                           'PANE-A','PANE-T','codex_native','DEV-A','DEV-T',
+                           'base','base','base','base','fp-empty','[]',
+                           'PREVIEWED','now')""",
+                (plan_id,),
+            )
 
 
 def test_migration_is_idempotent_across_repeated_startups(db_env):
@@ -196,3 +242,80 @@ def test_database_reopens_after_migration_with_data_intact(db_env):
         row = dict(connection.execute("SELECT * FROM workspace_handoffs WHERE id='HANDOFF-OLD'").fetchone())
         assert row["status"] == "TRANSFERRED"
         assert row["source_backend"] == "omniroute"
+
+
+def test_p52b_and_p53a_migrations_are_safe_during_concurrent_startup(db_env):
+    database.initialize_database()
+    with database.get_connection() as connection:
+        connection.execute(
+            "INSERT INTO projects (id, name, path, enabled, dev_enabled) "
+            "VALUES ('demo','Demo','.',1,1)"
+        )
+        connection.execute(
+            "INSERT INTO dev_sessions (id, project_id, branch, status) "
+            "VALUES ('DEV-A','demo','b1','ACTIVE')"
+        )
+        connection.execute(
+            "INSERT INTO dev_sessions (id, project_id, branch, status) "
+            "VALUES ('DEV-T','demo','b2','ACTIVE')"
+        )
+    plan_id = store.create_plan(
+        "demo", "t", policy_version="v1", complexity="simple",
+        proposal={"agents": []}, source="llm",
+    )
+    with database.get_connection() as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP INDEX idx_workspace_plan_execution_steps_status")
+        connection.execute("DROP TABLE workspace_plan_execution_steps")
+        connection.execute("DROP TABLE workspace_plan_executions")
+        _legacy_execution_schema(connection)
+        connection.execute(
+            """INSERT INTO workspace_panes
+               (id, project_id, dev_session_id, plan_id, origin, role, title,
+                position, plan_agent_key)
+               VALUES ('PANE-A','demo','DEV-A',?, 'maestro','implementer',
+                       'A',0,'api')""",
+            (plan_id,),
+        )
+        connection.execute(
+            """INSERT INTO workspace_panes
+               (id, project_id, dev_session_id, plan_id, origin, role, title,
+                position, plan_agent_key)
+               VALUES ('PANE-T','demo','DEV-T',?, 'maestro','tester',
+                       'T',1,'tests')""",
+            (plan_id,),
+        )
+        _legacy_schema(connection)
+        _seed_legacy_row(connection, plan_id)
+        connection.commit()
+
+    barrier = Barrier(2)
+
+    def initialize_together():
+        barrier.wait(timeout=20)
+        database.initialize_database()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(initialize_together) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=60)
+
+    with database.get_connection() as connection:
+        execution_columns = {
+            row[1] for row in connection.execute(
+                "PRAGMA table_info(workspace_plan_execution_steps)"
+            )
+        }
+        assert {"native_turn_id", "native_review_id"} <= execution_columns
+        handoff = connection.execute(
+            "SELECT * FROM workspace_handoffs WHERE id='HANDOFF-OLD'"
+        ).fetchone()
+        assert handoff["source_backend"] == "omniroute"
+        assert handoff["source_mission_id"] == "DEVMISSION-OLD"
+        assert handoff["source_native_review_id"] is None
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workspace_handoffs"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='workspace_handoffs_pre_p53a'"
+        ).fetchone() is None

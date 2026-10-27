@@ -1250,6 +1250,49 @@ def test_native_predecessor_blocks_the_next_step_instead_of_skipping_handoff(coo
     assert state["steps"][1]["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
 
 
+def test_native_dependency_status_keeps_missing_review_unknown(coord_env):
+    from nexus.workspace import service
+
+    _set_backend("DEV-API", "codex_native")
+    _authorize_with_native_api(coord_env)
+    dependencies = service.get_pane("PANE-TESTS")["dependencies"]
+    source = dependencies[0]
+    assert source["source_backend"] == "codex_native"
+    assert source["evidence_known"] is False
+    assert source["changed_files"] is None
+    assert source["handoff_required"] is None
+    assert source["ready"] is False
+    assert source["blocked_reason"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
+
+
+def test_native_dependency_status_uses_bound_review_without_claiming_coordinator_ready(
+    coord_env,
+):
+    from nexus.workspace import service
+
+    _set_backend("DEV-API", "codex_native")
+    turn_id = dev_sessions.create_turn(
+        "DEV-API", "simulated", requested_model="free/model",
+    )
+    dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
+    review = _save_review("DEV-API", _review_id("dependency-status"))
+    _authorize_with_native_api(coord_env)
+    with database.get_connection() as connection:
+        connection.execute(
+            """UPDATE workspace_plan_execution_steps
+               SET status='READY_FOR_REVIEW', native_turn_id=?, native_review_id=?
+               WHERE plan_id=? AND agent_key='api'""",
+            (turn_id, review["review_id"], coord_env["plan_id"]),
+        )
+    source = service.get_pane("PANE-TESTS")["dependencies"][0]
+    assert source["source_backend"] == "codex_native"
+    assert source["evidence_known"] is True
+    assert source["changed_files"] is False
+    assert source["handoff_required"] is False
+    assert source["ready"] is False
+    assert source["blocked_reason"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
+
+
 # P5.3A: assert_session_execution_allowed's dependency-readiness check (the
 # "achado da P5.2A" the task names explicitly) -- a native source has no
 # mission row, so the evidence is the source step's own bound

@@ -15,6 +15,7 @@ import pytest
 from nexus.dev.service import DevServiceError, create_dev_session
 from nexus.dev.worktree import read_worktree_diff
 from nexus.registry import database, dev_integrations
+from nexus.registry import workspace_handoff as handoff_records
 from nexus.registry import workspace as panes
 from nexus.workspace import handoff
 
@@ -252,6 +253,22 @@ def test_native_handoff_approve_rejects_wrong_fingerprint(native_env):
     with pytest.raises(DevServiceError) as error:
         handoff.approve(preview["handoff_id"], "0" * 64, native_env["source_pane"], native_env["target_pane"])
     assert error.value.code == "HANDOFF_APPROVAL_MISMATCH"
+
+
+def test_claim_rejects_session_backend_drift_from_typed_handoff(native_env):
+    source = native_env["source"]["worktree_path"]
+    (Path(source) / "calc.py").write_text(
+        "def multiply(a, b):\n    return a * b\n", encoding="utf-8",
+    )
+    review_id = _ready(native_env)
+    preview = _preview(native_env, review_id)
+    _approve(native_env, preview)
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE dev_sessions SET backend='omniroute' WHERE id=?",
+            (native_env["source"]["session_id"],),
+        )
+    assert handoff_records.claim(preview["handoff_id"]) is None
 
 
 def test_native_preview_never_writes_to_the_target_worktree(native_env):

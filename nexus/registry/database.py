@@ -650,6 +650,11 @@ def initialize_database() -> None:
                 ON workspace_plan_execution_steps(plan_id, status, ordinal);
             """
         )
+        # P5.2B: serialize additive execution migrations as well as the P5.3A
+        # handoff rebuild below. Re-read columns only after acquiring the
+        # SQLite write lock so concurrent process startup cannot race an
+        # ALTER TABLE against a stale schema snapshot.
+        connection.execute("BEGIN IMMEDIATE")
         execution_cols = {row[1] for row in connection.execute("PRAGMA table_info(workspace_plan_executions)")}
         for column in ("owner_token", "lease_renewed_at", "resume_history_json"):
             if column not in execution_cols:
@@ -662,6 +667,7 @@ def initialize_database() -> None:
         for column in ("native_turn_id", "native_review_id"):
             if column not in step_cols:
                 connection.execute(f"ALTER TABLE workspace_plan_execution_steps ADD COLUMN {column} TEXT")
+        connection.commit()
 
         # P2B.2A: an approved, immutable snapshot and a durable write barrier.
         # A TRANSFERRING row is deliberately never reclaimed automatically.

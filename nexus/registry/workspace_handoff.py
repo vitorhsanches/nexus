@@ -228,7 +228,8 @@ def _claim_identity_valid(connection, row) -> bool:
     immediately before and after this transaction.
     """
     source = connection.execute(
-        """SELECT p.*, s.status AS session_status, s.base_sha AS session_base_sha
+        """SELECT p.*, s.status AS session_status, s.base_sha AS session_base_sha,
+                  COALESCE(s.backend, 'omniroute') AS session_backend
            FROM workspace_panes p JOIN dev_sessions s ON s.id = p.dev_session_id
            WHERE p.id = ?""", (row["source_pane_id"],),
     ).fetchone()
@@ -263,6 +264,7 @@ def _claim_identity_valid(connection, row) -> bool:
             or target["plan_agent_key"] != row["target_agent_key"]
             or source["dev_session_id"] != row["source_session_id"]
             or target["dev_session_id"] != row["target_session_id"]
+            or source["session_backend"] != row["source_backend"]
             or source["session_status"] != "ACTIVE" or target["session_status"] != "ACTIVE"
             or source["session_base_sha"] != row["source_base_sha"]
             or target["session_base_sha"] != row["target_base_sha"]):

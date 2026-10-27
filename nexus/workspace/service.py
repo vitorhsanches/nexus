@@ -252,7 +252,12 @@ def _brief_view(row) -> dict | None:
 
 
 def _dependency_status(row) -> list[dict]:
-    from nexus.registry import workspace_handoff
+    from nexus.registry import (
+        dev_integrations,
+        dev_sessions,
+        workspace_execution,
+        workspace_handoff,
+    )
 
     brief = _brief(row)
     if not brief or not brief.get("depends_on") or not row["plan_id"]:
@@ -261,18 +266,76 @@ def _dependency_status(row) -> list[dict]:
     status = []
     for key in brief["depends_on"]:
         pane = by_key.get(key)
+        title = pane["title"] if pane is not None else key
+        if pane is None:
+            status.append({"key": key, "title": title, "ready": False,
+                           "evidence_known": False, "changed_files": None})
+            continue
+        session = dev_sessions.get_session(pane["dev_session_id"])
+        if session is None:
+            status.append({"key": key, "title": title, "ready": False,
+                           "source_backend": "unknown", "evidence_known": False,
+                           "changed_files": None})
+            continue
+        from nexus.dev.executor import session_backend
+
+        backend = session_backend(session)
+        if backend == "codex_native":
+            step = next((item for item in workspace_execution.get_steps(row["plan_id"])
+                         if item["agent_key"] == key), None)
+            review_id = step["native_review_id"] if step is not None else None
+            changed = None
+            handoff = None
+            if (step is not None and step["status"] == "READY_FOR_REVIEW"
+                    and step["mission_id"] is None
+                    and step["native_turn_id"] and review_id):
+                try:
+                    turn = dev_sessions.get_turn_for_session(
+                        session["id"], step["native_turn_id"],
+                    )
+                    review = dev_integrations.get_review(review_id)
+                    latest_reviews = dev_integrations.list_reviews(session["id"])
+                    snapshot = review["snapshot"] if review is not None else None
+                    diff = snapshot.get("diff") if isinstance(snapshot, dict) else None
+                    files = diff.get("files") if isinstance(diff, dict) else None
+                    known = (
+                        turn is not None and turn["status"] == "COMPLETED"
+                        and review is not None
+                        and review["dev_session_id"] == session["id"]
+                        and review["status"] == "REVIEWED" and not review["error_code"]
+                        and bool(snapshot.get("approval_ready"))
+                        and isinstance(files, list) and not diff.get("truncated")
+                        and latest_reviews
+                        and latest_reviews[0]["review_id"] == review_id
+                    )
+                except (TypeError, ValueError, AttributeError, KeyError):
+                    known = False
+                if known:
+                    changed = bool(files)
+                    if changed:
+                        handoff = workspace_handoff.latest_transfer(
+                            "codex_native", review_id, row["id"],
+                        )
+            status.append({
+                "key": key,
+                "title": title,
+                "ready": False,  # P5.3B still owns coordinator advancement.
+                "source_backend": "codex_native",
+                "evidence_known": changed is not None,
+                "changed_files": changed,
+                "handoff_required": changed,
+                "handoff_status": handoff["status"] if handoff else None,
+                "handoff_id": handoff["handoff_id"] if handoff else None,
+                "blocked_reason": "NATIVE_HANDOFF_NOT_SUPPORTED",
+            })
+            continue
         latest = _latest_mission(_missions(pane["dev_session_id"])) if pane is not None else None
         changed = bool(latest and latest["changed_files"])
-        # P5.3A: this status display still only reads OmniRoute missions
-        # (via _missions/_latest_mission above); it did not know about a
-        # native dependency before this change either -- latest_transfer()
-        # now requires the evidence backend, and "omniroute" here keeps
-        # this helper's existing behavior exactly, not a regression.
         handoff = (workspace_handoff.latest_transfer("omniroute", latest["mission_id"], row["id"])
                    if changed and pane is not None else None)
         item = {
             "key": key,
-            "title": pane["title"] if pane is not None else key,
+            "title": title,
             "ready": bool(latest and latest["status"] == "READY_FOR_REVIEW" and (not changed or handoff)),
         }
         if changed:
