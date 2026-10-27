@@ -66,6 +66,14 @@ def _require_approved_model(model: str, backend: str = "omniroute") -> dict:
     raise DevServiceError("MODEL_NOT_ALLOWED", message, http_status=403)
 
 
+def _require_backend_model(model: str, backend: str) -> dict:
+    # Keep the historical one-argument call shape for OmniRoute integrations
+    # and tests that replace the legacy validator.
+    if backend == "omniroute":
+        return _require_approved_model(model)
+    return _require_approved_model(model, backend)
+
+
 def _require_pane(pane_id: str):
     row = store.get_pane(pane_id)
     if row is None:
@@ -201,7 +209,11 @@ def _plan_cost_confirmed(row, model: str) -> bool:
 def _pane_backend(row) -> str:
     from nexus.registry import dev_sessions
 
-    session = dev_sessions.get_session(row["dev_session_id"])
+    try:
+        dev_session_id = row["dev_session_id"]
+    except (KeyError, IndexError):
+        return "omniroute"
+    session = dev_sessions.get_session(dev_session_id)
     return (
         session["backend"]
         if session is not None and "backend" in session.keys() and session["backend"]
@@ -396,7 +408,7 @@ def create_pane(
             # authorize a turn, a mission, or a paid use.
             model = ai_settings.require_saved(project_id, "development")["model_id"]
     if model is not None:
-        _require_approved_model(model, backend)
+        _require_backend_model(model, backend)
     # Authorization, worktree isolation and persistence of the session all
     # come from the existing Development service.
     session = (
@@ -470,7 +482,7 @@ def approve_plan(
     chosen = {}
     for agent in agents:
         model = agent_models[agent["key"]]
-        row = _require_approved_model(model, backend)
+        row = _require_backend_model(model, backend)
         chosen[agent["key"]] = {
             "model": model,
             "cost_status": row.get("cost_status") or "unknown",
@@ -550,7 +562,7 @@ def update_pane(pane_id: str, *, title: str | None = None, model: str | None = N
         clean = _clean_title(title, row["role"])
         store.update_pane(pane_id, event_kind="RENAMED", event_detail={"from": row["title"], "to": clean}, title=clean)
     if model is not None and model != row["model"]:
-        _require_approved_model(model, _pane_backend(row))
+        _require_backend_model(model, _pane_backend(row))
         latest = _latest_mission(_missions(row["dev_session_id"]))
         active = latest["mission_id"] if latest and latest["status"] in ACTIVE_MISSION_STATUSES else None
         store.update_pane(
@@ -585,7 +597,7 @@ def _authorize_use(row, confirm_model: str | None, confirm_cost: bool = False) -
     if not row["model"]:
         raise DevServiceError("MODEL_REQUIRED", "Choose a model for this pane first.", http_status=400)
     backend = _pane_backend(row)
-    current = _require_approved_model(row["model"], backend)
+    current = _require_backend_model(row["model"], backend)
     brief = _brief_view(row)
     if brief and brief["authorization"]["applies"] and confirm_model in (None, row["model"]):
         return True

@@ -167,6 +167,7 @@ def test_codex_native_invalid_model_and_session_failure_do_not_persist_panes(ws_
     assert invalid.value.code == "MODEL_NOT_ALLOWED"
     assert service.list_panes("demo") == []
 
+    native_catalog["models"] = [NATIVE]
     monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
 
     def fail_session(*args, **kwargs):
