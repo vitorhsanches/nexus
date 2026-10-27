@@ -241,6 +241,7 @@ def _brief_view(row) -> dict | None:
         "summary": brief.get("summary"),
         "authorization": {
             "model": authorization.get("model"),
+            "effort": authorization.get("effort"),
             "cost_status": authorization.get("cost_status"),
             "max_turns": authorization.get("max_turns"),
             "turns_used": used,
@@ -509,6 +510,7 @@ def approve_plan(
     agent_models: dict[str, str],
     backend: str = "omniroute",
     agent_backends: dict[str, str] | None = None,
+    agent_efforts: dict[str, str] | None = None,
     max_turns_per_agent: int,
     mission_timeout_seconds: int,
     confirm_costs: bool,
@@ -521,7 +523,11 @@ def approve_plan(
     The approval also records an execution authorization per pane -- that exact
     model, at most ``max_turns_per_agent`` missions/messages and the mission
     timeout -- so later actions inside those limits need no extra
-    confirmation. Nothing starts executing here.
+    confirmation. A supplied Native effort is validated and stored per agent.
+    If omitted (for compatibility with approvals created before effort was
+    configurable), the persisted value remains absent and App-Server uses its
+    selected model's own default; NEXUS does not choose or assume ``high``.
+    Nothing starts executing here.
     """
     plan_row = store.get_plan(plan_id)
     if plan_row is None:
@@ -550,6 +556,20 @@ def approve_plan(
             "Confirm the exact backend for every planned agent.",
             http_status=400,
         )
+    native_agent_keys = {
+        key for key in agent_models
+        if (agent_backends or {}).get(key, backend) == "codex_native"
+    }
+    if agent_efforts is not None and (
+        not isinstance(agent_efforts, dict)
+        or not set(agent_efforts) <= native_agent_keys
+        or any(not isinstance(value, str) or not value.strip() for value in agent_efforts.values())
+    ):
+        raise DevServiceError(
+            "EFFORTS_NOT_CONFIRMED",
+            "Choose reasoning efforts only for Codex Native agents.",
+            http_status=400,
+        )
     if not MIN_PLAN_TURNS <= max_turns_per_agent <= MAX_PLAN_TURNS:
         raise DevServiceError("INVALID_LIMITS", f"max_turns_per_agent must be {MIN_PLAN_TURNS}..{MAX_PLAN_TURNS}.", http_status=400)
     if not MIN_MISSION_TIMEOUT <= mission_timeout_seconds <= MAX_MISSION_TIMEOUT:
@@ -569,13 +589,21 @@ def approve_plan(
             agent_backends[agent["key"]] if agent_backends is not None else backend
         )
         row = _require_backend_model(model, agent_backend)
-        chosen[agent["key"]] = {
+        choice = {
             "model": model,
             "backend": agent_backend,
             "cost_status": row.get("cost_status") or "unknown",
             "recommended": agent.get("model"),
             "changed_by_user": model != agent.get("model"),
         }
+        if agent_backend == "codex_native":
+            effort = (agent_efforts or {}).get(agent["key"])
+            if effort is not None:
+                from nexus.dev.executor import validate_native_choice
+
+                validate_native_choice(model, effort)
+                choice["effort"] = effort
+        chosen[agent["key"]] = choice
     paid = sorted({item["model"] for item in chosen.values() if item["cost_status"] != "free"})
     if paid and not confirm_costs:
         raise DevServiceError(
@@ -606,6 +634,7 @@ def approve_plan(
             "authorization": {
                 "plan_id": plan_id,
                 "model": choice["model"],
+                **({"effort": choice["effort"]} if "effort" in choice else {}),
                 "cost_status": choice["cost_status"],
                 "max_turns": max_turns_per_agent,
                 "mission_timeout_seconds": mission_timeout_seconds,

@@ -105,6 +105,13 @@ def authorize_execution(
             )
         if actual_backend == "codex_native":
             native_keys.add(key)
+            brief = service._brief_view(pane)
+            pane_effort = (brief or {}).get("authorization", {}).get("effort")
+            if pane_effort != selected[key].get("effort"):
+                _fail(
+                    "EFFORT_AUTHORIZATION_CHANGED",
+                    "The approved Native effort no longer matches the pane authorization.",
+                )
         elif actual_backend != "omniroute":
             _fail("UNSUPPORTED_BACKEND", "Persisted backend is not supported.")
     if set(test_profiles) & native_keys:
@@ -133,6 +140,12 @@ def authorize_execution(
         backend = "codex_native" if key in native_keys else "omniroute"
         try:
             live = service._require_backend_model(model, backend)
+            if backend == "codex_native":
+                # Existing approvals without effort remain compatible: None
+                # leaves the model's App-Server default in effect.
+                from nexus.dev.executor import validate_native_choice
+
+                validate_native_choice(model, selected[key].get("effort"))
         except DevServiceError:
             _fail("MODEL_NOT_AVAILABLE", "Approved model is unavailable.", 409)
         if live.get("cost_status") != "free":
@@ -329,6 +342,10 @@ def _resume_evidence(plan_id: str, execution: dict) -> dict:
             )
         try:
             live_model = service._require_backend_model(model, backend)
+            if backend == "codex_native":
+                from nexus.dev.executor import validate_native_choice
+
+                validate_native_choice(model, choice.get("effort"))
         except DevServiceError:
             _fail(
                 "RESUME_AUTHORIZATION_INVALID",
@@ -338,6 +355,14 @@ def _resume_evidence(plan_id: str, execution: dict) -> dict:
                 or pane["plan_agent_key"] != step["agent_key"] or pane["model"] != model
                 or (live_model.get("cost_status") != "free" and model not in confirmed_ids)):
             _fail("RESUME_AUTHORIZATION_INVALID", "An exact model or its cost consent is invalid.")
+        if backend == "codex_native":
+            try:
+                brief = service._brief_view(pane)
+                brief_effort = (brief or {}).get("authorization", {}).get("effort")
+            except (TypeError, ValueError, KeyError):
+                _fail("RESUME_AUTHORIZATION_INVALID", "Native effort authorization is invalid.")
+            if brief_effort != choice.get("effort"):
+                _fail("RESUME_AUTHORIZATION_INVALID", "Native effort authorization changed.")
     pending_pane = store.get_pane(pending["pane_id"])
     try:
         brief = service._brief_view(pending_pane)
@@ -398,10 +423,13 @@ def _native_prompt(pane) -> str:
     return service._agent_context(pane) + "Execute the planned task above and satisfy every acceptance criterion."
 
 
-def _start_native_turn(pane) -> dict:
+def _start_native_turn(pane, effort: str | None = None) -> dict:
     from nexus.dev.executor import run_dev_turn
 
-    return run_dev_turn(pane["dev_session_id"], _native_prompt(pane), model=pane["model"])
+    return run_dev_turn(
+        pane["dev_session_id"], _native_prompt(pane),
+        model=pane["model"], effort=effort,
+    )
 
 
 def _heartbeat(plan_id: str, token: str, stop: threading.Event, lost: threading.Event) -> None:
@@ -475,6 +503,30 @@ def _run(plan_id: str, token: str) -> None:
                 )
                 return
             is_native = _is_native_pane(pane)
+            approved_effort = choice.get("effort") if is_native else None
+            if is_native:
+                try:
+                    brief = service._brief_view(pane)
+                    brief_effort = (brief or {}).get("authorization", {}).get("effort")
+                    if brief_effort != approved_effort:
+                        raise DevServiceError(
+                            "EXECUTION_AUTHORIZATION_CHANGED",
+                            "Approved Native effort no longer matches the pane authorization.",
+                            http_status=409,
+                        )
+                    from nexus.dev.executor import validate_native_choice
+
+                    validate_native_choice(pane["model"], approved_effort)
+                except DevServiceError as error:
+                    step_update(
+                        step["agent_key"], "BLOCKED",
+                        error_code=error.code, error_message=str(error),
+                    )
+                    update(
+                        "BLOCKED", current_index=index,
+                        error_code=error.code, error_message=str(error),
+                    )
+                    return
             evidence_id = persisted["native_turn_id"] if is_native else persisted["mission_id"]
             # A durable evidence id is authoritative even if the step status
             # lags. Recovery only observes it and never calls the launcher.
@@ -549,7 +601,7 @@ def _run(plan_id: str, token: str) -> None:
                 if is_native:
                     try:
                         with execution_store.coordinated_launch(plan_id, step["agent_key"], token):
-                            turn = _start_native_turn(pane)
+                            turn = _start_native_turn(pane, approved_effort)
                     except DevServiceError as error:
                         status = ("BLOCKED" if error.code in {
                             "DEPENDENCY_WORKTREE_NOT_TRANSFERRED", "SESSION_BUSY", "TOO_MANY_CONCURRENT_DEV_TURNS",

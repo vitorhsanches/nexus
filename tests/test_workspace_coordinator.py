@@ -885,6 +885,84 @@ def test_authorized_native_step_refuses_backend_change_before_launch(
     assert result["steps"][0]["native_turn_id"] is None
 
 
+def test_native_effort_change_after_plan_approval_is_rejected_before_authorization(
+    two_native_env,
+):
+    env = two_native_env
+    with database.get_connection() as connection:
+        row = connection.execute(
+            "SELECT approval_json FROM workspace_plans WHERE id=?", (env["plan_id"],)
+        ).fetchone()
+        approval = json.loads(row["approval_json"])
+        approval["agent_models"]["api"]["effort"] = "low"
+        connection.execute(
+            "UPDATE workspace_plans SET approval_json=? WHERE id=?",
+            (json.dumps(approval), env["plan_id"]),
+        )
+    with pytest.raises(DevServiceError) as error:
+        _authorize_both_native(env)
+    assert error.value.code == "EFFORT_AUTHORIZATION_CHANGED"
+    assert executions.get_execution(env["plan_id"]) is None
+
+
+def test_native_model_revoked_before_execution_authorization_is_rejected(
+    two_native_env, monkeypatch,
+):
+    env = two_native_env
+    monkeypatch.setattr(
+        "nexus.chat.service.list_models",
+        lambda **kwargs: {
+            "backend": "codex_native", "models": [], "catalog_error": None,
+        },
+    )
+    with pytest.raises(DevServiceError) as error:
+        _authorize_both_native(env)
+    assert error.value.code == "MODEL_NOT_AVAILABLE"
+    assert executions.get_execution(env["plan_id"]) is None
+
+
+def test_resume_refuses_when_an_approved_native_effort_is_no_longer_supported(
+    two_native_env, monkeypatch,
+):
+    env = two_native_env
+    plan_id = env["plan_id"]
+    turns = []
+    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    _authorize_both_native(env)
+    coordinator.start(plan_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not turns:
+        time.sleep(0.02)
+    assert len(turns) == 1
+    (Path(env["source"]["worktree_path"]) / "api.py").write_text(
+        "def api():\n    return 2\n", encoding="utf-8"
+    )
+    dev_sessions.update_turn_status(turns[0], "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review_id = _native_review(env, "source", "resume-invalid-effort")
+    coordinator.bind_native_review(plan_id, "api", review_id)
+    _wait(plan_id, {"BLOCKED"})
+    preview = handoff.preview(env["api_pane"], env["tests_pane"], review_id)
+    handoff.approve(
+        preview["handoff_id"], preview["snapshot_fingerprint"],
+        env["api_pane"], env["tests_pane"],
+    )
+    assert handoff.transfer(preview["handoff_id"])["status"] == "TRANSFERRED"
+
+    def revoked_effort(_model, effort):
+        if effort == "low":
+            raise DevServiceError("EFFORT_NOT_SUPPORTED", "revoked", http_status=422)
+
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", revoked_effort)
+    eligibility = coordinator.resume_eligibility(plan_id)
+    assert eligibility["eligible"] is False
+    assert eligibility["code"] == "RESUME_AUTHORIZATION_INVALID"
+    with pytest.raises(DevServiceError) as error:
+        coordinator.resume(plan_id)
+    assert error.value.code == "RESUME_AUTHORIZATION_INVALID"
+    assert len(turns) == 1
+
+
 def test_native_authorization_rejects_model_disappearing_from_native_catalog(
     coord_env, monkeypatch,
 ):
@@ -945,10 +1023,12 @@ def _save_review(session_id, review_id, *, approval_ready=True, status="REVIEWED
     return record
 
 
-def _fake_run_dev_turn(calls):
+def _fake_run_dev_turn(calls, effort_calls=None):
     def run(dev_session_id, prompt, *, model=None, effort=None):
         turn_id = dev_sessions.create_turn(dev_session_id, prompt, requested_model=model)
         calls.append(turn_id)
+        if effort_calls is not None:
+            effort_calls.append((dev_session_id, model, effort))
         return {"turn_id": turn_id, "dev_session_id": dev_session_id, "status": "PENDING"}
     return run
 
@@ -1509,8 +1589,8 @@ def two_native_env(tmp_path, monkeypatch):
                                 complexity="multi", proposal=proposal, source="llm")
     approval = {
         "agent_models": {
-            key: {"model": "free/model", "backend": "codex_native", "cost_status": "known"}
-            for key in ("api", "tests")
+            "api": {"model": "free/model", "backend": "codex_native", "cost_status": "known", "effort": "high"},
+            "tests": {"model": "free/model", "backend": "codex_native", "cost_status": "known", "effort": "low"},
         },
         "max_turns_per_agent": 1,
         "mission_timeout_seconds": 60,
@@ -1522,7 +1602,7 @@ def two_native_env(tmp_path, monkeypatch):
     source = create_dev_session("demo", backend="codex_native")
     target = create_dev_session("demo", backend="codex_native")
     authorization = {
-        "model": "free/model", "cost_status": "known", "max_turns": 1,
+        "model": "free/model", "effort": "high", "cost_status": "known", "max_turns": 1,
         "mission_timeout_seconds": 60,
     }
     api_pane = store.create_pane(project_id="demo", dev_session_id=source["session_id"], origin="maestro",
@@ -1533,6 +1613,15 @@ def two_native_env(tmp_path, monkeypatch):
                                    role="tester", title="Tests", model="free/model", plan_id=plan_id,
                                    plan_agent_key="tests", brief={"task": "tests", "acceptance_criteria": ["ok"],
                                                                   "depends_on": ["api"], "authorization": authorization})
+    with database.get_connection() as connection:
+        target_brief = json.loads(connection.execute(
+            "SELECT brief_json FROM workspace_panes WHERE id=?", (tests_pane,)
+        ).fetchone()["brief_json"])
+        target_brief["authorization"]["effort"] = "low"
+        connection.execute(
+            "UPDATE workspace_panes SET brief_json=? WHERE id=?",
+            (json.dumps(target_brief), tests_pane),
+        )
     yield {"plan_id": plan_id, "repo": repo, "source": source, "target": target,
            "api_pane": api_pane, "tests_pane": tests_pane}
     for worker in list(coordinator._workers.values()):
@@ -1566,7 +1655,11 @@ def test_two_native_agents_sequence_with_no_changes_in_the_first(two_native_env,
     env = two_native_env
     plan_id = env["plan_id"]
     turns = []
-    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    effort_calls = []
+    monkeypatch.setattr(
+        "nexus.dev.executor.run_dev_turn",
+        _fake_run_dev_turn(turns, effort_calls),
+    )
     _authorize_both_native(env)
     coordinator.start(plan_id)
     deadline = time.monotonic() + 3
@@ -1601,15 +1694,24 @@ def test_two_native_agents_sequence_with_approved_handoff_of_changes(two_native_
     original_status = _git_output(env["repo"], "status", "--porcelain")
     original_content = (Path(env["repo"]) / "api.py").read_text(encoding="utf-8")
     turns = []
-    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    effort_calls = []
+    monkeypatch.setattr(
+        "nexus.dev.executor.run_dev_turn",
+        _fake_run_dev_turn(turns, effort_calls),
+    )
     _authorize_both_native(env)
     coordinator.start(plan_id)
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and not turns:
         time.sleep(0.02)
     assert turns, "the first native turn was never launched"
+    assert effort_calls == [
+        (env["source"]["session_id"], "free/model", "high")
+    ]
     first_turn = turns[0]
-    (Path(env["source"]["worktree_path"]) / "api.py").write_text("def api():\n    return 2\n", encoding="utf-8")
+    (Path(env["source"]["worktree_path"]) / "api.py").write_text(
+        "def api():\n    return 2\n", encoding="utf-8"
+    )
     dev_sessions.update_turn_status(first_turn, "COMPLETED", response_text="done")
     _wait(plan_id, {"BLOCKED"})
     review_id = _native_review(env, "source", "api-done")
@@ -1619,7 +1721,9 @@ def test_two_native_agents_sequence_with_approved_handoff_of_changes(two_native_
     blocked = _wait(plan_id, {"BLOCKED"})
     assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
     assert blocked["steps"][1]["status"] == "BLOCKED"
-    assert len(turns) == 1, "the second agent must not launch before a verified transfer"
+    assert len(turns) == 1, (
+        "the second agent must not launch before a verified transfer"
+    )
     # The human-gated handoff protocol -- never automatic, never via the
     # coordinator itself.
     eligibility = coordinator.resume_eligibility(plan_id)
@@ -1627,16 +1731,28 @@ def test_two_native_agents_sequence_with_approved_handoff_of_changes(two_native_
     assert eligibility["code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
     preview = handoff.preview(env["api_pane"], env["tests_pane"], review_id)
     assert preview["source_backend"] == "codex_native"
-    handoff.approve(preview["handoff_id"], preview["snapshot_fingerprint"], env["api_pane"], env["tests_pane"])
+    handoff.approve(
+        preview["handoff_id"], preview["snapshot_fingerprint"],
+        env["api_pane"], env["tests_pane"],
+    )
     transferred = handoff.transfer(preview["handoff_id"])
     assert transferred["status"] == "TRANSFERRED"
-    assert (Path(env["target"]["worktree_path"]) / "api.py").read_text(encoding="utf-8") == "def api():\n    return 2\n"
+    transferred_content = (Path(env["target"]["worktree_path"]) / "api.py").read_text(
+        encoding="utf-8"
+    )
+    assert transferred_content == "def api():\n    return 2\n"
     resumed = coordinator.resume(plan_id)
     assert resumed["status"] == "RUNNING"
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and len(turns) < 2:
         time.sleep(0.02)
-    assert len(turns) == 2, "the second native turn was never launched after the proven transfer"
+    assert len(turns) == 2, (
+        "the second native turn was never launched after the proven transfer"
+    )
+    assert effort_calls == [
+        (env["source"]["session_id"], "free/model", "high"),
+        (env["target"]["session_id"], "free/model", "low"),
+    ]
     second_turn = turns[1]
     assert dev_sessions.get_turn(second_turn)["dev_session_id"] == env["target"]["session_id"]
     dev_sessions.update_turn_status(second_turn, "COMPLETED", response_text="done")

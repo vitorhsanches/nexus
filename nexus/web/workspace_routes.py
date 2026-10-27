@@ -97,6 +97,7 @@ class PlanApproveRequest(BaseModel):
     agent_backends: dict[str, Literal["omniroute", "codex_native"]] | None = Field(
         default=None, max_length=8,
     )
+    agent_efforts: dict[str, str] | None = Field(default=None, max_length=8)
     max_turns_per_agent: int = Field(ge=1, le=6)
     mission_timeout_seconds: int = Field(ge=60, le=3600)
     confirm_costs: bool = False
@@ -284,6 +285,7 @@ def approve_plan(plan_id: str, request: PlanApproveRequest):
         agent_models=request.agent_models,
         backend=request.backend,
         agent_backends=request.agent_backends,
+        agent_efforts=request.agent_efforts,
         max_turns_per_agent=request.max_turns_per_agent,
         mission_timeout_seconds=request.mission_timeout_seconds,
         confirm_costs=request.confirm_costs,

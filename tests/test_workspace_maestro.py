@@ -369,9 +369,79 @@ def test_planned_panes_can_be_approved_on_codex_native_with_explicit_cost_consen
     assert result["plan"]["approval"]["backend"] == "codex_native"
     assert pane["backend"] == pane["session"]["backend"] == "codex_native"
     assert pane["model"] == "gpt-native" and pane["brief"]["authorization"]["applies"] is True
+    assert result["plan"]["approval"]["agent_models"]["impl"].get("effort") is None
     with database.get_connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM dev_autonomous_missions").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM dev_turns").fetchone()[0] == 0
+
+
+def test_native_plan_persists_per_agent_efforts_and_survives_database_reinitialization(
+    env, monkeypatch,
+):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "gpt-native", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+    def validate(_model, effort):
+        if effort is not None and effort not in {"low", "high"}:
+            raise DevServiceError(
+                "EFFORT_NOT_SUPPORTED", "unsupported", http_status=422
+            )
+
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", validate)
+    plan = _llm_plan(env, MULTI)
+    result = service.approve_plan(
+        plan["plan_id"],
+        agent_models={"api": "gpt-native", "ui": "gpt-native", "qa": "gpt-native"},
+        agent_backends={key: "codex_native" for key in ("api", "ui", "qa")},
+        agent_efforts={"api": "high", "ui": "low", "qa": "high"},
+        max_turns_per_agent=1, mission_timeout_seconds=600, confirm_costs=True,
+    )
+    efforts = {
+        key: value["effort"]
+        for key, value in result["plan"]["approval"]["agent_models"].items()
+    }
+    assert efforts == {"api": "high", "ui": "low", "qa": "high"}
+    pane_efforts = {
+        pane["plan_agent_key"]: pane["brief"]["authorization"]["effort"]
+        for pane in result["panes"]
+    }
+    assert pane_efforts == efforts
+    database.initialize_database()
+    persisted = service.plan_view(store.get_plan(plan["plan_id"]))
+    persisted_efforts = {
+        key: value["effort"]
+        for key, value in persisted["approval"]["agent_models"].items()
+    }
+    assert persisted_efforts == efforts
+
+
+def test_native_plan_rejects_effort_unsupported_by_selected_model(env, monkeypatch):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "gpt-native", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+
+    def validate(_model, effort):
+        if effort != "high":
+            raise DevServiceError(
+                "EFFORT_NOT_SUPPORTED", "unsupported", http_status=422
+            )
+
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", validate)
+    plan = _llm_plan(env, SIMPLE)
+    with pytest.raises(DevServiceError) as error:
+        service.approve_plan(
+            plan["plan_id"], agent_models={"impl": "gpt-native"},
+            backend="codex_native",
+            agent_efforts={"impl": "ultra"}, max_turns_per_agent=1,
+            mission_timeout_seconds=600, confirm_costs=True,
+        )
+    assert error.value.code == "EFFORT_NOT_SUPPORTED"
+    assert service.plan_view(store.get_plan(plan["plan_id"]))["status"] == "PROPOSED"
+    assert service.list_panes("demo") == []
 
 
 def test_mixed_plan_persists_each_agent_backend_and_rejects_incomplete_mapping(
@@ -426,11 +496,16 @@ def test_created_native_plan_authorizes_execution_without_omniroute(env, monkeyp
         "nexus.dev.executor.validate_native_choice", lambda model, effort: None,
     )
     plan = _llm_plan(env, SIMPLE)
-    approved = service.approve_plan(
-        plan["plan_id"], agent_models={"impl": "gpt-native"},
-                                    backend="codex_native", max_turns_per_agent=1,
-        mission_timeout_seconds=600, confirm_costs=True,
-    )
+    response = _client().post(f"/api/workspace/plans/{plan['plan_id']}/approve", json={
+        "agent_models": {"impl": "gpt-native"},
+        "backend": "codex_native",
+        "agent_efforts": {"impl": "high"},
+        "max_turns_per_agent": 1,
+        "mission_timeout_seconds": 600,
+        "confirm_costs": True,
+    })
+    assert response.status_code == 200, response.text
+    approved = response.json()
     monkeypatch.setattr(
         "nexus.dev.models.list_dev_models",
         lambda: pytest.fail("OmniRoute catalog called"),
@@ -441,6 +516,7 @@ def test_created_native_plan_authorizes_execution_without_omniroute(env, monkeyp
     )
     assert authorized["status"] == "AWAITING_EXECUTION"
     assert approved["panes"][0]["session"]["backend"] == "codex_native"
+    assert approved["plan"]["approval"]["agent_models"]["impl"]["effort"] == "high"
     assert authorized["steps"][0]["test_profile"] == ""
 
 
