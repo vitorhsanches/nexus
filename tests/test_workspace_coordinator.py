@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import multiprocessing
+import subprocess
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -14,11 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from nexus.dev.service import DevServiceError
-from nexus.registry import database, dev_missions, dev_sessions, workspace_handoff
+from nexus.dev.service import DevServiceError, create_dev_session
+from nexus.dev.worktree import read_worktree_diff
+from nexus.registry import database, dev_integrations, dev_missions, dev_sessions, workspace_handoff
 from nexus.registry import workspace as store
 from nexus.registry import workspace_execution as executions
-from nexus.workspace import coordinator
+from nexus.workspace import coordinator, handoff
 
 FREE = {"id": "free/model", "cost_status": "free"}
 
@@ -945,9 +947,10 @@ def test_bind_native_review_rejects_when_the_turn_is_not_durably_completed(coord
 def test_bind_native_review_resumes_and_still_refuses_to_hand_off_into_omniroute(coord_env, monkeypatch):
     """coord_env's plan has a second, OmniRoute "tests" step depending on
     "api". Binding must still advance the sequence (not just mark the step
-    done and stop) -- but the second step must stay refused by the same
-    NATIVE_HANDOFF_NOT_SUPPORTED guard, never silently proceed as if "api"
-    had produced no changes to hand off."""
+    done and stop) -- but the second step must stay refused: P5.3B allows a
+    Codex Native agent to depend on another Codex Native agent, never a
+    mixed native/OmniRoute pair, and must never silently proceed as if
+    "api" had produced no changes to hand off."""
     plan_id, turn_id = _launch_native_step(coord_env, monkeypatch)
     dev_sessions.update_turn_status(turn_id, "COMPLETED", response_text="done")
     _wait(plan_id, {"BLOCKED"})
@@ -957,7 +960,7 @@ def test_bind_native_review_resumes_and_still_refuses_to_hand_off_into_omniroute
     assert result["steps"][0]["native_review_id"] == review["review_id"]
     final = _wait(plan_id, {"BLOCKED"})
     assert final["status"] == "BLOCKED"
-    assert final["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
+    assert final["error_code"] == "MIXED_BACKEND_HANDOFF_NOT_SUPPORTED"
     assert final["steps"][1]["status"] == "BLOCKED"
 
 
@@ -1028,10 +1031,14 @@ def test_crash_before_native_turn_id_is_recorded_is_uncertain_not_replayed(coord
     assert dev_sessions.get_active_turn_for_session("DEV-API") is None, "a crash must never be replayed as a new turn"
 
 
-def test_native_predecessor_blocks_the_next_step_instead_of_skipping_handoff(coord_env):
+def test_native_predecessor_blocks_a_mixed_backend_next_step_instead_of_skipping_handoff(coord_env):
     """_changed_files(_mission_for(previous)) returns [] for a native
     predecessor (it has no mission_id to look up) -- which would otherwise
-    silently skip handoff verification entirely. This must be refused."""
+    silently skip handoff verification entirely for a mixed native/
+    OmniRoute pair ("tests" is OmniRoute in coord_env's fixture plan).
+    This must still be refused, now under the more specific
+    MIXED_BACKEND_HANDOFF_NOT_SUPPORTED code (P5.3B allows native-to-native,
+    never a mixed pair)."""
     _set_backend("DEV-API", "codex_native")
     _authorize_with_native_api(coord_env)
     plan_id = coord_env["plan_id"]
@@ -1047,9 +1054,9 @@ def test_native_predecessor_blocks_the_next_step_instead_of_skipping_handoff(coo
     coordinator._run(plan_id, token)
     state = coordinator.state(plan_id)
     assert state["status"] == "BLOCKED"
-    assert state["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
+    assert state["error_code"] == "MIXED_BACKEND_HANDOFF_NOT_SUPPORTED"
     assert state["steps"][1]["status"] == "BLOCKED"
-    assert state["steps"][1]["error_code"] == "NATIVE_HANDOFF_NOT_SUPPORTED"
+    assert state["steps"][1]["error_code"] == "MIXED_BACKEND_HANDOFF_NOT_SUPPORTED"
 
 
 # P5.3A: assert_session_execution_allowed's dependency-readiness check (the
@@ -1168,3 +1175,358 @@ def test_dependency_gate_blocks_native_source_with_a_rejected_review(coord_env):
     _bind_native_review_to_step(plan_id, "api", review["review_id"])
     with pytest.raises(workspace_handoff.HandoffBlocked, match="invalid or no longer current"):
         _attempt_tests_launch(plan_id, token)
+
+
+# P5.3B: two Codex Native agents in sequence through the coordinator itself
+# -- the seam handoff.verified_dependency already proved correct (P5.3A),
+# now actually driven by _run's dependency check and resume()/claim_resume().
+
+
+def _authorize_both_native(env):
+    return coordinator.authorize_execution(
+        env["plan_id"], agent_keys=["api", "tests"], test_profiles={},
+        max_turns_per_agent=1, mission_timeout_seconds=60,
+    )
+
+
+def _launch_first_native_step(env, monkeypatch):
+    _allow_review_lookup(monkeypatch, "DEV-API")
+    turns = []
+    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    _authorize_both_native(env)
+    plan_id = env["plan_id"]
+    coordinator.start(plan_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not turns:
+        time.sleep(0.02)
+    assert turns, "the first native turn was never launched"
+    return plan_id, turns
+
+
+def _git(root, *args):
+    subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
+
+
+@pytest.fixture
+def two_native_env(tmp_path, monkeypatch):
+    original_db, original_storage = database.DATABASE_PATH, database.STORAGE_DIR
+    database.STORAGE_DIR = tmp_path / "storage"
+    database.DATABASE_PATH = database.STORAGE_DIR / "nexus.db"
+    monkeypatch.setenv("NEXUS_DEV_WORKTREE_ROOT", str(tmp_path / "worktrees"))
+    database.initialize_database()
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: {"models": [FREE], "catalog_error": None})
+    repo = tmp_path / "project"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "api.py").write_text("def api():\n    return 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    with database.get_connection() as connection:
+        connection.execute(
+            "INSERT INTO projects (id, name, path, enabled, dev_enabled) VALUES ('demo', 'Demo', ?, 1, 1)",
+            (str(repo),),
+        )
+    proposal = {
+        "schema_version": "maestro-plan/1", "source": "llm", "complexity": "multi",
+        "summary": "two native agents", "explanation": "two", "needs_clarification": None,
+        "agents": [
+            {"key": "api", "role": "backend", "title": "API", "model": "free/model",
+             "task": "API", "acceptance_criteria": ["ok"], "depends_on": [], "touches": ["api.py"]},
+            {"key": "tests", "role": "tester", "title": "Tests", "model": "free/model",
+             "task": "tests", "acceptance_criteria": ["ok"], "depends_on": ["api"], "touches": ["tests.py"]},
+        ],
+        "execution": {"mode": "sequential", "order": ["api", "tests"]}, "limit": 3,
+        "fallback_reason": None,
+    }
+    plan_id = store.create_plan("demo", "two native agents", policy_version="maestro-plan/1",
+                                complexity="multi", proposal=proposal, source="llm")
+    approval = {"agent_models": {key: {"model": "free/model", "cost_status": "free"} for key in ("api", "tests")},
+               "max_turns_per_agent": 1, "mission_timeout_seconds": 60, "cost_confirmed_for": []}
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plans SET status='APPROVED', approval_json=? WHERE id=?",
+                          (json.dumps(approval), plan_id))
+    source = create_dev_session("demo", backend="codex_native")
+    target = create_dev_session("demo", backend="codex_native")
+    authorization = {"model": "free/model", "cost_status": "free", "max_turns": 1, "mission_timeout_seconds": 60}
+    api_pane = store.create_pane(project_id="demo", dev_session_id=source["session_id"], origin="maestro",
+                                 role="backend", title="API", model="free/model", plan_id=plan_id,
+                                 plan_agent_key="api", brief={"task": "API", "acceptance_criteria": ["ok"],
+                                                              "depends_on": [], "authorization": authorization})
+    tests_pane = store.create_pane(project_id="demo", dev_session_id=target["session_id"], origin="maestro",
+                                   role="tester", title="Tests", model="free/model", plan_id=plan_id,
+                                   plan_agent_key="tests", brief={"task": "tests", "acceptance_criteria": ["ok"],
+                                                                  "depends_on": ["api"], "authorization": authorization})
+    yield {"plan_id": plan_id, "repo": repo, "source": source, "target": target,
+           "api_pane": api_pane, "tests_pane": tests_pane}
+    for worker in list(coordinator._workers.values()):
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "simulated worker leaked past fixture teardown"
+    with coordinator._workers_lock:
+        coordinator._workers.clear()
+    database.DATABASE_PATH, database.STORAGE_DIR = original_db, original_storage
+
+
+def _native_review(env, session_key: str, label: str) -> str:
+    """Build a review from the session's own real, current worktree diff,
+    exactly as nexus.dev.integration.create_review would."""
+    session = env[session_key]
+    diff = read_worktree_diff(session["worktree_path"], session["base_sha"])
+    snapshot = {"session_id": session["session_id"], "project_id": "demo",
+               "base_sha": session["base_sha"], "target_head": session["base_sha"], "target_branch": "master",
+               "diff": diff, "approval_ready": bool(diff.get("approval_ready"))}
+    review_id = _review_id(f"{session['session_id']}-{label}")
+    dev_integrations.save_review(
+        review_id=review_id, dev_session_id=session["session_id"], project_id="demo",
+        base_sha=session["base_sha"], target_head=session["base_sha"], target_branch="master", snapshot=snapshot,
+    )
+    return review_id
+
+
+def test_two_native_agents_sequence_with_no_changes_in_the_first(two_native_env, monkeypatch):
+    """Scenario 1: an empty diff never requires a transfer, but a valid,
+    bound, currently-REVIEWED review is still mandatory before the second
+    native agent may launch."""
+    env = two_native_env
+    plan_id = env["plan_id"]
+    turns = []
+    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    _authorize_both_native(env)
+    coordinator.start(plan_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not turns:
+        time.sleep(0.02)
+    assert turns
+    dev_sessions.update_turn_status(turns[0], "COMPLETED", response_text="done")
+    blocked = _wait(plan_id, {"BLOCKED"})
+    assert blocked["error_code"] == "AWAITING_NATIVE_REVIEW"
+    review_id = _native_review(env, "source", "api-clean")
+    coordinator.bind_native_review(plan_id, "api", review_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and len(turns) < 2:
+        time.sleep(0.02)
+    assert len(turns) == 2, "the second native agent must launch immediately -- no changes, no handoff needed"
+    state = coordinator.state(plan_id)
+    assert state["status"] == "RUNNING"
+    assert state["steps"][0]["status"] == "READY_FOR_REVIEW"
+    assert state["steps"][1]["status"] == "RUNNING"
+    assert not workspace_handoff.list_for_plan(plan_id), "no handoff should ever be created when there is nothing to transfer"
+    dev_sessions.update_turn_status(turns[1], "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+
+
+def test_two_native_agents_sequence_with_approved_handoff_of_changes(two_native_env, monkeypatch):
+    """Scenario 2 (the PASS golden path): Agent A -> native turn -> review ->
+    human checkpoint -> approved handoff -> transfer -> explicit resume ->
+    Agent B. The second agent must never launch before every step is proven."""
+    env = two_native_env
+    plan_id = env["plan_id"]
+    turns = []
+    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", _fake_run_dev_turn(turns))
+    _authorize_both_native(env)
+    coordinator.start(plan_id)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not turns:
+        time.sleep(0.02)
+    assert turns, "the first native turn was never launched"
+    first_turn = turns[0]
+    (Path(env["source"]["worktree_path"]) / "api.py").write_text("def api():\n    return 2\n", encoding="utf-8")
+    dev_sessions.update_turn_status(first_turn, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review_id = _native_review(env, "source", "api-done")
+    result = coordinator.bind_native_review(plan_id, "api", review_id)
+    assert result["steps"][0]["status"] == "READY_FOR_REVIEW"
+    assert result["steps"][0]["native_review_id"] == review_id
+    blocked = _wait(plan_id, {"BLOCKED"})
+    assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+    assert blocked["steps"][1]["status"] == "BLOCKED"
+    assert len(turns) == 1, "the second agent must not launch before a verified transfer"
+    # The human-gated handoff protocol -- never automatic, never via the
+    # coordinator itself.
+    eligibility = coordinator.resume_eligibility(plan_id)
+    assert eligibility["eligible"] is False
+    assert eligibility["code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+    preview = handoff.preview(env["api_pane"], env["tests_pane"], review_id)
+    assert preview["source_backend"] == "codex_native"
+    handoff.approve(preview["handoff_id"], preview["snapshot_fingerprint"], env["api_pane"], env["tests_pane"])
+    transferred = handoff.transfer(preview["handoff_id"])
+    assert transferred["status"] == "TRANSFERRED"
+    assert (Path(env["target"]["worktree_path"]) / "api.py").read_text(encoding="utf-8") == "def api():\n    return 2\n"
+    resumed = coordinator.resume(plan_id)
+    assert resumed["status"] == "RUNNING"
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and len(turns) < 2:
+        time.sleep(0.02)
+    assert len(turns) == 2, "the second native turn was never launched after the proven transfer"
+    second_turn = turns[1]
+    assert dev_sessions.get_turn(second_turn)["dev_session_id"] == env["target"]["session_id"]
+    dev_sessions.update_turn_status(second_turn, "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review_b = _native_review(env, "target", "tests-done")
+    coordinator.bind_native_review(plan_id, "tests", review_b)
+    done = _wait(plan_id, {"AWAITING_REVIEW"})
+    assert done["status"] == "AWAITING_REVIEW"
+    assert done["result"]["human_approval_required"] is True
+    assert done["result"]["integration_applied"] is False
+
+
+def test_second_native_agent_never_launches_without_a_bound_review(coord_env, monkeypatch):
+    """Scenario 3: the first agent's turn is durably COMPLETED, but no
+    review was ever bound -- the sequence must stay parked, never
+    advancing to the second agent."""
+    _set_backend("DEV-API", "codex_native")
+    _set_backend("DEV-TESTS", "codex_native")
+    plan_id, turns = _launch_first_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turns[0], "COMPLETED", response_text="done")
+    state = _wait(plan_id, {"BLOCKED"})
+    assert state["status"] == "BLOCKED"
+    assert state["error_code"] == "AWAITING_NATIVE_REVIEW"
+    assert state["steps"][1]["status"] == "PENDING"
+    time.sleep(0.1)
+    assert coordinator.state(plan_id)["steps"][1]["status"] == "PENDING", \
+        "the second agent must never launch while the first is unreviewed"
+
+
+def test_dependency_check_blocks_a_rejected_native_review_in_a_native_native_sequence(coord_env):
+    """Scenario 5 (rejected review): a review bound to the step is no
+    longer REVIEWED -- the dependency check inside _run's own native branch
+    must refuse, exactly like the registry-level gate does for a manual
+    launch attempt."""
+    _set_backend("DEV-API", "codex_native")
+    _set_backend("DEV-TESTS", "codex_native")
+    _authorize_both_native(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    review = _save_review("DEV-API", _review_id("rejected-in-sequence"), status="REJECTED")
+    _bind_native_review_to_step(plan_id, "api", review["review_id"])
+    coordinator._run(plan_id, token)
+    state = coordinator.state(plan_id)
+    assert state["status"] == "BLOCKED"
+    assert state["error_code"] == "NATIVE_REVIEW_EVIDENCE_INVALID"
+    assert state["steps"][1]["status"] == "BLOCKED"
+
+
+def test_resume_requires_a_transferred_handoff_not_merely_approved(coord_env):
+    """Scenario 6: a handoff that only reached APPROVED (never TRANSFERRED)
+    must not let resume() advance the sequence -- never conflate "approved
+    for transfer" with "the human checkpoint that authorizes resuming"."""
+    _set_backend("DEV-API", "codex_native")
+    _set_backend("DEV-TESTS", "codex_native")
+    _authorize_both_native(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    review = _save_review_with_files("DEV-API", _review_id("approved-not-transferred"),
+                                      files=[{"path": "api.py", "status": "modified"}])
+    _bind_native_review_to_step(plan_id, "api", review["review_id"])
+    api_pane = _pane_id_for(plan_id, "api")
+    tests_pane = _pane_id_for(plan_id, "tests")
+    with database.get_connection() as connection:
+        connection.execute(
+            """INSERT INTO workspace_handoffs
+               (id, project_id, plan_id, source_agent_key, target_agent_key, source_pane_id, target_pane_id,
+                source_backend, source_native_review_id, source_session_id, target_session_id, source_base_sha,
+                source_head_sha, target_base_sha, target_head_sha, snapshot_fingerprint, files_json, status,
+                created_at, approved_at)
+               VALUES ('HANDOFF-APPROVED-ONLY', 'demo', ?, 'api', 'tests', ?, ?,
+                       'codex_native', ?, 'DEV-API', 'DEV-TESTS', 'base', 'base', 'base', 'base',
+                       'fp', '[{"path": "api.py", "status": "modified"}]', 'APPROVED', 'now', 'now')""",
+            (plan_id, api_pane, tests_pane, review["review_id"]),
+        )
+    coordinator._run(plan_id, token)
+    assert coordinator.state(plan_id)["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+    # The execution is genuinely eligible to attempt a resume (BLOCKED on
+    # exactly this dependency, in an otherwise consistent shape) -- but the
+    # attempt itself must still fail, because no handoff was ever actually
+    # TRANSFERRED. "Approved" is never read as "transferred".
+    with pytest.raises(DevServiceError) as error:
+        coordinator.resume(plan_id)
+    assert error.value.code == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+
+
+def test_claim_resume_refuses_a_handoff_recorded_for_the_wrong_pane(coord_env):
+    """Scenario 9 (wrong session/pane): a TRANSFERRED handoff whose own
+    target_pane_id does not match the pending step's pane must never be
+    accepted as proof that step's own dependency was satisfied."""
+    _set_backend("DEV-API", "codex_native")
+    _set_backend("DEV-TESTS", "codex_native")
+    _authorize_both_native(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    review = _save_review_with_files("DEV-API", _review_id("wrong-pane"),
+                                      files=[{"path": "api.py", "status": "modified"}])
+    _bind_native_review_to_step(plan_id, "api", review["review_id"])
+    api_pane = _pane_id_for(plan_id, "api")
+    with database.get_connection() as connection:
+        connection.execute(
+            """INSERT INTO workspace_handoffs
+               (id, project_id, plan_id, source_agent_key, target_agent_key, source_pane_id, target_pane_id,
+                source_backend, source_native_review_id, source_session_id, target_session_id, source_base_sha,
+                source_head_sha, target_base_sha, target_head_sha, snapshot_fingerprint, files_json, status,
+                created_at, approved_at, started_at, finished_at)
+               VALUES ('HANDOFF-WRONG-PANE', 'demo', ?, 'api', 'tests', ?, ?,
+                       'codex_native', ?, 'DEV-API', 'DEV-TESTS', 'base', 'base', 'base', 'base',
+                       'fp', '[{"path": "api.py", "status": "modified"}]', 'TRANSFERRED',
+                       'now', 'now', 'now', 'now')""",
+            # The transferred handoff names a real pane, just the wrong one
+            # (the source's own pane, instead of the pending target's).
+            (plan_id, api_pane, api_pane, review["review_id"]),
+        )
+    coordinator._run(plan_id, token)
+    assert coordinator.state(plan_id)["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+
+
+def test_resume_refuses_if_the_pending_step_already_has_native_evidence(coord_env):
+    """Scenario 13 (second agent's turn already exists): resume must treat
+    any pre-existing evidence on the pending step as proof a launch already
+    happened -- never replay it. No handoff is needed to set this up: the
+    ordinary "not transferred yet" block already parks the sequence at
+    BLOCKED/DEPENDENCY_WORKTREE_NOT_TRANSFERRED with "tests" pending."""
+    _set_backend("DEV-API", "codex_native")
+    _set_backend("DEV-TESTS", "codex_native")
+    _authorize_both_native(coord_env)
+    plan_id = coord_env["plan_id"]
+    token = executions.claim_execution(plan_id)
+    review = _save_review_with_files("DEV-API", _review_id("dup-turn"),
+                                      files=[{"path": "api.py", "status": "modified"}])
+    _bind_native_review_to_step(plan_id, "api", review["review_id"])
+    coordinator._run(plan_id, token)
+    state = coordinator.state(plan_id)
+    assert state["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+    assert state["steps"][1]["status"] == "BLOCKED"
+    # Simulate a leaked/duplicate turn id already recorded on "tests" before
+    # the explicit resume -- must never be silently replayed over.
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE workspace_plan_execution_steps SET native_turn_id='DEVTURN-LEAKED' WHERE plan_id=? AND agent_key='tests'",
+            (plan_id,),
+        )
+    with pytest.raises(DevServiceError) as error:
+        coordinator.resume(plan_id)
+    assert error.value.code == "RESUME_STEP_UNCERTAIN"
+
+
+def test_resume_is_refused_once_the_sequence_has_already_advanced(coord_env, monkeypatch):
+    """Scenario 12 (duplicate resume): once the sequence has moved past
+    BLOCKED (here: no changes, so the second agent launches on its own, no
+    handoff needed), a stray resume() call must be refused outright, never
+    silently re-launch the already-started step."""
+    _set_backend("DEV-API", "codex_native")
+    _set_backend("DEV-TESTS", "codex_native")
+    plan_id, turns = _launch_first_native_step(coord_env, monkeypatch)
+    dev_sessions.update_turn_status(turns[0], "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})
+    review = _save_review("DEV-API", _review_id("dup-resume"))  # no changes: no handoff required
+    coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and len(turns) < 2:
+        time.sleep(0.02)
+    assert len(turns) == 2, "the second agent should have launched on its own"
+    state = coordinator.state(plan_id)
+    assert state["status"] == "RUNNING"
+    with pytest.raises(DevServiceError) as error:
+        coordinator.resume(plan_id)
+    assert error.value.code == "RESUME_NOT_ALLOWED"
+    # Let the still-polling worker finish so it does not outlive this test.
+    dev_sessions.update_turn_status(turns[1], "COMPLETED", response_text="done")
+    _wait(plan_id, {"BLOCKED"})

@@ -137,6 +137,59 @@ def _changed_files(mission) -> list:
     return result.get("changed_files") or []
 
 
+def _native_agent_keys(steps) -> set:
+    """Which plan steps' panes are, right now, Codex Native -- queried fresh
+    (never inferred from a step's own evidence columns, which are empty for
+    a step that has not launched yet)."""
+    from nexus.chat.appserver_client import BACKEND_CODEX_NATIVE
+    from nexus.dev.executor import session_backend
+    from nexus.registry import dev_sessions
+
+    keys = set()
+    for step in steps:
+        pane = store.get_pane(step["pane_id"])
+        if pane is None:
+            continue
+        session = dev_sessions.get_session(pane["dev_session_id"])
+        if session is not None and session_backend(session) == BACKEND_CODEX_NATIVE:
+            keys.add(step["agent_key"])
+    return keys
+
+
+def _native_changed_files(step: dict, pane) -> list:
+    """Generic native evidence reader (P5.3B), mirroring _changed_files's
+    role for the legacy OmniRoute path: it tells the coordinator whether a
+    verified handoff is required before the next agent can launch. Unlike
+    _changed_files, a missing or invalid review is never read as "no
+    changes" -- that silent-bypass shape is exactly what P5.2C's
+    NATIVE_HANDOFF_NOT_SUPPORTED guard was added to prevent. It blocks
+    instead, by raising. Staleness re-verification happens later, only if
+    a handoff actually becomes required, inside handoff.verified_dependency.
+    """
+    from nexus.registry import dev_integrations, dev_sessions
+
+    review_id = step["native_review_id"] if step is not None else None
+    if not review_id:
+        _fail("NATIVE_REVIEW_EVIDENCE_MISSING", "The completed native step has no bound review.")
+    session = dev_sessions.get_session(pane["dev_session_id"]) if pane is not None else None
+    if session is None:
+        _fail("SESSION_NOT_FOUND", "The source agent's development session no longer exists.", 404)
+    review = dev_integrations.get_review(review_id)
+    if (review is None or review["dev_session_id"] != session["id"]
+            or review["status"] != "REVIEWED" or review["error_code"]):
+        _fail("NATIVE_REVIEW_EVIDENCE_INVALID", "The bound native review is not conclusively ready.")
+    try:
+        snapshot = review["snapshot"]
+        if not snapshot.get("approval_ready"):
+            _fail("NATIVE_REVIEW_EVIDENCE_INVALID", "The bound native review's snapshot is incomplete.")
+        changed = (snapshot.get("diff") or {}).get("files")
+    except (TypeError, AttributeError):
+        _fail("NATIVE_REVIEW_EVIDENCE_INVALID", "The bound native review's snapshot is invalid.")
+    if changed is None:
+        _fail("NATIVE_REVIEW_EVIDENCE_INVALID", "The bound native review has no change evidence.")
+    return changed
+
+
 def _is_interrupted(plan_id: str) -> bool:
     row = execution_store.get_execution(plan_id)
     return bool(row and row["interrupt_requested"])
@@ -171,10 +224,12 @@ def _resume_evidence(plan_id: str, execution: dict) -> dict:
     pending = steps[index]
     previous = steps[index - 1]
     if (pending["status"] != "BLOCKED" or pending["error_code"] != execution["error_code"]
-            or pending["mission_id"] or pending["started_at"] or pending["result"] is not None
-            or any(step["status"] != "READY_FOR_REVIEW" or not step["mission_id"] or step["error_code"]
+            or pending["mission_id"] or pending["native_review_id"] or pending["native_turn_id"]
+            or pending["started_at"] or pending["result"] is not None
+            or any(step["status"] != "READY_FOR_REVIEW" or not (step["mission_id"] or step["native_review_id"]) or step["error_code"]
                    for step in steps[:index])
-            or any(step["status"] != "PENDING" or step["mission_id"] for step in steps[index + 1:])):
+            or any(step["status"] != "PENDING" or step["mission_id"] or step["native_review_id"] or step["native_turn_id"]
+                   for step in steps[index + 1:])):
         _fail("RESUME_STEP_UNCERTAIN", "A step was started or its durable history is incomplete.")
     if execution["agent_keys"] != [step["agent_key"] for step in steps]:
         _fail("RESUME_AUTHORIZATION_INVALID", "Approved agent order changed.")
@@ -187,14 +242,30 @@ def _resume_evidence(plan_id: str, execution: dict) -> dict:
     if (not isinstance(agents, list) or any(not isinstance(agent, dict) for agent in agents)
             or [agent.get("key") for agent in agents] != execution["agent_keys"]
             or approval.get("max_turns_per_agent") != execution["max_turns_per_agent"]
-            or approval.get("mission_timeout_seconds") != execution["mission_timeout_seconds"]
-            or set(execution["test_profiles"]) != set(execution["agent_keys"])):
+            or approval.get("mission_timeout_seconds") != execution["mission_timeout_seconds"]):
         _fail("RESUME_AUTHORIZATION_INVALID", "Persisted execution no longer matches the plan approval.")
     if (agents[index].get("depends_on") or []) != [previous["agent_key"]]:
         _fail("RESUME_TOPOLOGY_UNSUPPORTED", "Resume supports one declared dependency on the previous agent.")
+    # P5.3B: a Codex Native agent has no trusted test profile (mirrors the
+    # same split authorize_execution already enforces at authorization
+    # time) and, like the model check below, its backend must not have
+    # silently changed since then. test_profiles always has an entry for
+    # every agent key (authorize_execution stores "" for a native one, never
+    # omits the key) -- a completed step's own recorded evidence type is
+    # the actual backend-consistency signal.
+    native_keys = _native_agent_keys(steps)
+    if any(step["mission_id"] and step["agent_key"] in native_keys
+           or step["native_review_id"] and step["agent_key"] not in native_keys
+           for step in steps):
+        _fail("RESUME_AUTHORIZATION_INVALID", "An agent's backend changed since authorization.")
     available_profiles = {item["id"] for item in list_test_profiles(plan["project_id"])}
-    if any(step["test_profile"] != execution["test_profiles"].get(step["agent_key"])
-           or step["test_profile"] not in available_profiles for step in steps):
+    if any(
+        (step["agent_key"] in native_keys and step["test_profile"])
+        or (step["agent_key"] not in native_keys and (
+            step["test_profile"] != execution["test_profiles"].get(step["agent_key"])
+            or step["test_profile"] not in available_profiles))
+        for step in steps
+    ):
         _fail("RESUME_AUTHORIZATION_INVALID", "A trusted test profile changed or disappeared.")
     catalog = {item["id"]: item for item in list_dev_models()["models"]}
     selected = approval.get("agent_models") or {}
@@ -344,17 +415,29 @@ def _run(plan_id: str, token: str) -> None:
                         update("BLOCKED", current_index=index, error_code="DEPENDENCY_PENDING")
                         return
                     previous_pane = store.get_pane(previous["pane_id"])
-                    if is_native or _is_native_pane(previous_pane):
-                        # handoff.py and its dependency evidence are mission-
-                        # based only (P5.2/P5.3 contract, acoplamento #4);
-                        # never silently treat an unreadable native source as
-                        # "no changes to hand off".
-                        message = ("Coordinated execution supports exactly one Codex Native agent per "
-                                   "plan today; handoff into or out of a native step is not implemented.")
-                        step_update(step["agent_key"], "BLOCKED", error_code="NATIVE_HANDOFF_NOT_SUPPORTED", error_message=message)
-                        update("BLOCKED", current_index=index, error_code="NATIVE_HANDOFF_NOT_SUPPORTED", error_message=message)
+                    previous_is_native = _is_native_pane(previous_pane)
+                    if is_native != previous_is_native:
+                        # P5.3B: two Codex Native agents in sequence are the
+                        # supported MVP topology (handoff.verified_dependency
+                        # already proves this correct end to end -- P5.3A).
+                        # A mixed native/OmniRoute pair is not comprobably
+                        # safe yet and stays explicitly blocked.
+                        message = ("Coordinated execution supports a Codex Native agent depending only on "
+                                   "another Codex Native agent today; a mixed native/OmniRoute handoff is "
+                                   "not implemented.")
+                        step_update(step["agent_key"], "BLOCKED", error_code="MIXED_BACKEND_HANDOFF_NOT_SUPPORTED", error_message=message)
+                        update("BLOCKED", current_index=index, error_code="MIXED_BACKEND_HANDOFF_NOT_SUPPORTED", error_message=message)
                         return
-                    if _changed_files(_mission_for(previous)):
+                    if previous_is_native:
+                        try:
+                            changed = _native_changed_files(previous, previous_pane)
+                        except DevServiceError as error:
+                            step_update(step["agent_key"], "BLOCKED", error_code=error.code, error_message=str(error))
+                            update("BLOCKED", current_index=index, error_code=error.code, error_message=str(error))
+                            return
+                    else:
+                        changed = _changed_files(_mission_for(previous))
+                    if changed:
                         from nexus.workspace import handoff
                         try:
                             handoff.verified_dependency(plan_id, previous, persisted)
