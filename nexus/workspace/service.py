@@ -367,6 +367,133 @@ def plan_task(project_id: str, task_text: str) -> dict:
     return {"plan_id": plan_id, "project_id": project_id, "task_text": task_text.strip(), **proposal}
 
 
+def create_manual_plan(
+    project_id: str,
+    task_text: str,
+    *,
+    agents: list[dict],
+    execution_order: list[str],
+) -> dict:
+    """Persist a human-authored, two-agent Native plan without model calls."""
+    from nexus.dev.service import validate_dev_project
+    from nexus.workspace import maestro_plan
+
+    validate_dev_project(project_id)
+    if not isinstance(task_text, str) or not task_text.strip():
+        raise DevServiceError(
+            "EMPTY_TASK", "task text must not be empty.", http_status=400,
+        )
+    if not isinstance(agents, list) or len(agents) != 2:
+        raise DevServiceError(
+            "MANUAL_PLAN_TOPOLOGY_UNSUPPORTED",
+            "Manual plans currently require exactly two agents.",
+            http_status=422,
+        )
+    keys = [agent.get("key") for agent in agents if isinstance(agent, dict)]
+    if len(keys) != 2 or len(set(keys)) != 2:
+        raise DevServiceError(
+            "INVALID_MANUAL_PLAN",
+            "Manual plan agent keys must be present and unique.",
+            http_status=422,
+        )
+    if (
+        not isinstance(execution_order, list)
+        or len(execution_order) != 2
+        or set(execution_order) != set(keys)
+        or len(set(execution_order)) != 2
+    ):
+        raise DevServiceError(
+            "INVALID_EXECUTION_ORDER",
+            "Execution order must name each of the two agents exactly once.",
+            http_status=422,
+        )
+
+    by_key = {agent["key"]: agent for agent in agents}
+    known = set(keys)
+    for agent in agents:
+        dependencies = agent.get("depends_on")
+        if not isinstance(dependencies, list) or any(
+            not isinstance(dependency, str) for dependency in dependencies
+        ):
+            raise DevServiceError(
+                "INVALID_MANUAL_PLAN",
+                "Each agent must declare depends_on as a list.",
+                http_status=422,
+            )
+        if len(dependencies) != len(set(dependencies)):
+            raise DevServiceError(
+                "INVALID_MANUAL_PLAN",
+                "Agent dependencies must not contain duplicates.",
+                http_status=422,
+            )
+        unknown = set(dependencies) - known
+        if unknown:
+            raise DevServiceError(
+                "DEPENDENCY_NOT_FOUND",
+                "Unknown agent dependency: " + ", ".join(sorted(unknown)),
+                http_status=422,
+            )
+        if agent["key"] in dependencies:
+            raise DevServiceError(
+                "DEPENDENCY_CYCLE",
+                "An agent cannot depend on itself.",
+                http_status=422,
+            )
+    positions = {key: index for index, key in enumerate(execution_order)}
+    if any(
+        positions[dependency] >= positions[agent["key"]]
+        for agent in agents for dependency in agent["depends_on"]
+    ):
+        raise DevServiceError(
+            "DEPENDENCY_CYCLE",
+            "Dependencies must point to an earlier agent in the execution order.",
+            http_status=422,
+        )
+
+    ordered_agents = [by_key[key] for key in execution_order]
+    raw = {
+        "complexity": "multi",
+        "summary": task_text.strip()[:300],
+        "needs_clarification": None,
+        "agents": [
+            {
+                "key": agent.get("key"),
+                "role": agent.get("role"),
+                "title": agent.get("title"),
+                "model": None,
+                "task": agent.get("task"),
+                "acceptance_criteria": agent.get("acceptance_criteria"),
+                "depends_on": agent.get("depends_on"),
+                "touches": agent.get("touches", []),
+            }
+            for agent in ordered_agents
+        ],
+    }
+    try:
+        proposal = maestro_plan.validate(
+            raw,
+            explanation="Plano estruturado criado manualmente; sem inferência.",
+            models=[],
+            limit=2,
+            allow_unselected_models=True,
+        )
+    except maestro_plan.PlanValidationError as error:
+        raise DevServiceError(
+            "INVALID_MANUAL_PLAN", str(error), http_status=422,
+        ) from error
+    proposal["source"] = "manual"
+    proposal["policy_version"] = maestro_plan.SCHEMA_VERSION
+    plan_id = store.create_plan(
+        project_id,
+        task_text.strip(),
+        policy_version=maestro_plan.SCHEMA_VERSION,
+        complexity="multi",
+        proposal=proposal,
+        source="manual",
+    )
+    return plan_view(store.get_plan(plan_id))
+
+
 def plan_view(row) -> dict:
     proposal = json.loads(row["proposal_json"])
     if "agents" not in proposal:
@@ -401,6 +528,18 @@ def plan_view(row) -> dict:
 
 def list_plans(project_id: str) -> list[dict]:
     return [plan_view(row) for row in store.list_plans(project_id)]
+
+
+def get_plan(plan_id: str) -> dict:
+    from nexus.dev.service import validate_dev_project
+
+    row = store.get_plan(plan_id)
+    if row is None:
+        raise DevServiceError(
+            "PLAN_NOT_FOUND", f"Unknown plan: {plan_id!r}", http_status=404,
+        )
+    validate_dev_project(row["project_id"])
+    return plan_view(row)
 
 
 def authorize_plan_execution(
@@ -560,6 +699,20 @@ def approve_plan(
         key for key in agent_models
         if (agent_backends or {}).get(key, backend) == "codex_native"
     }
+    if plan.get("source") == "manual":
+        approved_keys = {agent["key"] for agent in agents}
+        if native_agent_keys != approved_keys:
+            raise DevServiceError(
+                "MANUAL_PLAN_NATIVE_ONLY",
+                "Manual plans currently support Codex Native agents only.",
+                http_status=422,
+            )
+        if not isinstance(agent_efforts, dict) or set(agent_efforts) != approved_keys:
+            raise DevServiceError(
+                "EFFORTS_NOT_CONFIRMED",
+                "Choose an explicit reasoning effort for each Native agent.",
+                http_status=400,
+            )
     if agent_efforts is not None and (
         not isinstance(agent_efforts, dict)
         or not set(agent_efforts) <= native_agent_keys

@@ -22,6 +22,25 @@ class PlanRequest(BaseModel):
     task: str = Field(min_length=1, max_length=20_000)
 
 
+class ManualPlanAgentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    key: str = Field(min_length=1, max_length=24)
+    role: str = Field(min_length=1, max_length=32)
+    title: str = Field(min_length=1, max_length=80)
+    task: str = Field(min_length=1, max_length=4_000)
+    acceptance_criteria: list[str] = Field(min_length=1, max_length=8)
+    depends_on: list[str] = Field(max_length=2)
+    touches: list[str] = Field(default_factory=list, max_length=10)
+
+
+class ManualPlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=128)
+    task_text: str = Field(min_length=1, max_length=20_000)
+    agents: list[ManualPlanAgentRequest] = Field(min_length=2, max_length=2)
+    execution_order: list[str] = Field(min_length=2, max_length=2)
+
+
 class PaneCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str = Field(min_length=1, max_length=128)
@@ -174,6 +193,26 @@ def create_plan(request: PlanRequest):
     from nexus.workspace import service
 
     return _call(service.plan_task, request.project_id, request.task)
+
+
+@router.post("/plans/manual")
+def create_manual_plan(request: ManualPlanRequest):
+    from nexus.workspace import service
+
+    return _call(
+        service.create_manual_plan,
+        request.project_id,
+        request.task_text,
+        agents=[agent.model_dump() for agent in request.agents],
+        execution_order=request.execution_order,
+    )
+
+
+@router.get("/plans/{plan_id}")
+def get_plan(plan_id: str):
+    from nexus.workspace import service
+
+    return _call(service.get_plan, plan_id)
 
 
 @router.get("/plans")

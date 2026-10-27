@@ -139,7 +139,14 @@ def extract(response_text: str) -> tuple[str, dict]:
     return explanation[:MAX_EXPLANATION_CHARS], raw
 
 
-def validate(raw: dict, *, explanation: str, models: list[dict], limit: int) -> dict:
+def validate(
+    raw: dict,
+    *,
+    explanation: str,
+    models: list[dict],
+    limit: int,
+    allow_unselected_models: bool = False,
+) -> dict:
     unknown = set(raw) - _TOP_KEYS
     if unknown:
         raise PlanValidationError(f"unknown plan fields: {sorted(unknown)}")
@@ -180,9 +187,13 @@ def validate(raw: dict, *, explanation: str, models: list[dict], limit: int) -> 
         if role not in policy.ROLES:
             raise PlanValidationError(f"agent {key} has an unknown role")
         model = item.get("model")
-        if model not in approved:
+        if model is None and allow_unselected_models:
+            cost_status = None
+        elif model not in approved:
             # Never substitute another route: an unapproved model invalidates the plan.
             raise PlanValidationError(f"agent {key} uses a model that is not an approved live route")
+        else:
+            cost_status = approved[model].get("cost_status") or "unknown"
         depends = _str_list(item.get("depends_on"), f"{key}.depends_on", max_items=policy.HARD_MAX_AUTO_PANES, max_len=24)
         for dependency in depends:
             if dependency not in seen:
@@ -192,7 +203,7 @@ def validate(raw: dict, *, explanation: str, models: list[dict], limit: int) -> 
             "role": role,
             "title": _text(item.get("title"), f"{key}.title", max_len=80),
             "model": model,
-            "cost_status": approved[model].get("cost_status") or "unknown",
+            "cost_status": cost_status,
             "task": _text(item.get("task"), f"{key}.task", max_len=4000),
             "acceptance_criteria": _str_list(item.get("acceptance_criteria"), f"{key}.acceptance_criteria", max_items=8, max_len=300, min_items=1),
             "depends_on": depends,
@@ -206,7 +217,10 @@ def _overlap(a: list[str], b: list[str]) -> bool:
     if not a or not b:
         # Unknown footprint: assume it may overlap -- never assume safety.
         return True
-    norm = lambda value: value.strip().strip("/").replace("\\", "/").casefold()
+
+    def norm(value):
+        return value.strip().strip("/").replace("\\", "/").casefold()
+
     left, right = {norm(x) for x in a}, {norm(x) for x in b}
     return any(x == y or x.startswith(y + "/") or y.startswith(x + "/") for x in left for y in right)
 

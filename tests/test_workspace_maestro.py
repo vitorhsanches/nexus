@@ -378,11 +378,14 @@ def test_planned_panes_can_be_approved_on_codex_native_with_explicit_cost_consen
 def test_native_plan_persists_per_agent_efforts_and_survives_database_reinitialization(
     env, monkeypatch,
 ):
-    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
-        "backend": "codex_native",
-        "models": [{"id": "gpt-native", "cost_status": "known"}],
-        "catalog_error": None,
-    })
+    monkeypatch.setattr(
+        "nexus.chat.service.list_models",
+        lambda **kwargs: {
+            "backend": "codex_native",
+            "models": [{"id": "gpt-native", "cost_status": "known"}],
+            "catalog_error": None,
+        },
+    )
     def validate(_model, effort):
         if effort is not None and effort not in {"low", "high"}:
             raise DevServiceError(
@@ -802,6 +805,255 @@ def test_maestro_and_approval_routes_round_trip_without_apply(env):
 
     paths = {route.path for route in router.routes}
     assert paths and not any(word in path for path in paths for word in ("apply", "merge", "push", "integrat"))
+
+
+def _manual_native_plan(*, first_dependencies=None, second_dependencies=None):
+    return {
+        "project_id": "demo",
+        "task_text": "Implementar uma operação e validar seu uso.",
+        "agents": [
+            {
+                "key": "implement",
+                "role": "backend",
+                "title": "Implementação",
+                "task": "Implementar a função solicitada.",
+                "acceptance_criteria": ["A função retorna o resultado esperado."],
+                "depends_on": (
+                    first_dependencies if first_dependencies is not None else []
+                ),
+                "touches": ["calc.py"],
+            },
+            {
+                "key": "verify",
+                "role": "tester",
+                "title": "Validação",
+                "task": "Adicionar um teste complementar.",
+                "acceptance_criteria": ["O teste cobre a função implementada."],
+                "depends_on": (
+                    second_dependencies
+                    if second_dependencies is not None else ["implement"]
+                ),
+                "touches": ["tests/"],
+            },
+        ],
+        "execution_order": ["implement", "verify"],
+    }
+
+
+def test_manual_native_plan_is_proposed_without_catalog_session_or_execution(
+    env, monkeypatch,
+):
+    client = _client()
+    monkeypatch.setattr(
+        "nexus.dev.models.list_dev_models",
+        lambda: pytest.fail("manual planning must not consult the OmniRoute catalog"),
+    )
+    monkeypatch.setattr(
+        "nexus.chat.service.list_models",
+        lambda **kwargs: pytest.fail("manual planning must not load a model catalog"),
+    )
+    monkeypatch.setattr(
+        "nexus.chat.service.send_turn",
+        lambda *args, **kwargs: pytest.fail(
+            "manual planning must not invoke inference"
+        ),
+    )
+    response = client.post("/api/workspace/plans/manual", json=_manual_native_plan())
+    assert response.status_code == 200, response.text
+    plan = response.json()
+    assert plan["status"] == "PROPOSED"
+    assert plan["source"] == "manual"
+    assert plan["execution"] is None and plan["approval"] is None
+    assert [agent["key"] for agent in plan["agents"]] == ["implement", "verify"]
+    assert plan["agents"][1]["depends_on"] == ["implement"]
+    assert all(agent["model"] is None for agent in plan["agents"])
+    assert service.list_panes("demo", include_hidden=True) == []
+    assert dev_sessions.list_sessions("demo") == []
+    assert env["sent"] == [] and env["dev_turns"] == []
+    reread = client.get(f"/api/workspace/plans/{plan['plan_id']}")
+    assert reread.status_code == 200
+    assert reread.json()["plan_id"] == plan["plan_id"]
+
+
+def test_manual_native_plan_without_dependencies_is_valid(env):
+    payload = _manual_native_plan(second_dependencies=[])
+    response = _client().post("/api/workspace/plans/manual", json=payload)
+    assert response.status_code == 200, response.text
+    assert all(not agent["depends_on"] for agent in response.json()["agents"])
+    assert response.json()["execution"] is None
+
+
+@pytest.mark.parametrize(
+    "payload,code",
+    [
+        (
+            _manual_native_plan(first_dependencies=["missing"]),
+            "DEPENDENCY_NOT_FOUND",
+        ),
+        (
+            _manual_native_plan(
+                first_dependencies=["verify"], second_dependencies=["implement"]
+            ),
+            "DEPENDENCY_CYCLE",
+        ),
+        (
+            _manual_native_plan(second_dependencies=["implement"])
+            | {"execution_order": ["verify", "implement"]},
+            "DEPENDENCY_CYCLE",
+        ),
+        (
+            _manual_native_plan()
+            | {"agents": [
+                _manual_native_plan()["agents"][0],
+                {**_manual_native_plan()["agents"][1], "key": "implement"},
+            ]},
+            "INVALID_MANUAL_PLAN",
+        ),
+    ],
+)
+def test_manual_native_plan_rejects_invalid_graphs(env, payload, code):
+    response = _client().post("/api/workspace/plans/manual", json=payload)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == code
+    assert store.list_plans("demo") == []
+
+
+def test_manual_native_plan_rejects_unauthorized_project_and_invalid_payload(env):
+    client = _client()
+    payload = _manual_native_plan() | {"project_id": "locked"}
+    denied = client.post("/api/workspace/plans/manual", json=payload)
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "DEV_MODE_DISABLED"
+    invalid = client.post(
+        "/api/workspace/plans/manual",
+        json=_manual_native_plan() | {"unapproved_model": "gpt-6.1-sol"},
+    )
+    assert invalid.status_code == 422
+    assert store.list_plans("locked") == [] and store.list_plans("demo") == []
+
+
+def test_manual_plan_get_rechecks_project_authorization(env):
+    client = _client()
+    created = client.post(
+        "/api/workspace/plans/manual", json=_manual_native_plan()
+    )
+    assert created.status_code == 200
+    plan_id = created.json()["plan_id"]
+    with database.get_connection() as connection:
+        connection.execute("UPDATE projects SET dev_enabled=0 WHERE id='demo'")
+    denied = client.get(f"/api/workspace/plans/{plan_id}")
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "DEV_MODE_DISABLED"
+
+
+def test_manual_plan_persists_and_can_be_approved_and_authorized_as_native(
+    env, monkeypatch,
+):
+    from nexus.workspace import coordinator
+
+    client = _client()
+    payload = _manual_native_plan()
+    response = client.post("/api/workspace/plans/manual", json=payload)
+    assert response.status_code == 200, response.text
+    plan_id = response.json()["plan_id"]
+    database.initialize_database()
+    persisted = client.get(f"/api/workspace/plans/{plan_id}")
+    assert persisted.status_code == 200
+    assert persisted.json()["status"] == "PROPOSED"
+    assert service.list_panes("demo", include_hidden=True) == []
+
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "gpt-native", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice",
+        lambda model, effort: None,
+    )
+    approved = client.post(f"/api/workspace/plans/{plan_id}/approve", json={
+        "agent_models": {"implement": "gpt-native", "verify": "gpt-native"},
+        "backend": "codex_native",
+        "agent_backends": {"implement": "codex_native", "verify": "codex_native"},
+        "agent_efforts": {"implement": "high", "verify": "low"},
+        "max_turns_per_agent": 1,
+        "mission_timeout_seconds": 600,
+        "confirm_costs": True,
+    })
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["plan"]["status"] == "APPROVED"
+    assert {
+        key: choice["effort"]
+        for key, choice in approved.json()["plan"]["approval"]["agent_models"].items()
+    } == {"implement": "high", "verify": "low"}
+    assert [pane["session"]["backend"] for pane in approved.json()["panes"]] == [
+        "codex_native", "codex_native",
+    ]
+    monkeypatch.setattr(
+        "nexus.dev.models.list_dev_models",
+        lambda: pytest.fail("native plan authorization must not use OmniRoute catalog"),
+    )
+    execution = coordinator.authorize_execution(
+        plan_id, agent_keys=["implement", "verify"], test_profiles={},
+        max_turns_per_agent=1, mission_timeout_seconds=600,
+    )
+    assert execution["status"] == "AWAITING_EXECUTION"
+    assert env["dev_turns"] == []
+    assert all(step["native_turn_id"] is None for step in execution["steps"])
+
+
+def test_manual_plan_approval_rejects_mixed_backends(env):
+    plan = _client().post(
+        "/api/workspace/plans/manual", json=_manual_native_plan()
+    ).json()
+    response = _client().post(
+        f"/api/workspace/plans/{plan['plan_id']}/approve",
+        json={
+            "agent_models": {"implement": "free/model", "verify": "free/model"},
+            "agent_backends": {"implement": "codex_native", "verify": "omniroute"},
+            "agent_efforts": {"implement": "high"},
+            "max_turns_per_agent": 1,
+            "mission_timeout_seconds": 600,
+            "confirm_costs": True,
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "MANUAL_PLAN_NATIVE_ONLY"
+    assert service.list_panes("demo", include_hidden=True) == []
+
+
+def test_manual_plan_approval_rejects_model_absent_from_native_catalog(
+    env, monkeypatch,
+):
+    plan = _client().post(
+        "/api/workspace/plans/manual", json=_manual_native_plan()
+    ).json()
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "gpt-native", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice", lambda model, effort: None
+    )
+    response = _client().post(
+        f"/api/workspace/plans/{plan['plan_id']}/approve",
+        json={
+            "agent_models": {"implement": "gpt-revoked", "verify": "gpt-native"},
+            "backend": "codex_native",
+            "agent_backends": {
+                "implement": "codex_native", "verify": "codex_native",
+            },
+            "agent_efforts": {"implement": "high", "verify": "low"},
+            "max_turns_per_agent": 1,
+            "mission_timeout_seconds": 600,
+            "confirm_costs": True,
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "MODEL_NOT_ALLOWED"
+    assert service.plan_view(store.get_plan(plan["plan_id"]))["status"] == "PROPOSED"
+    assert service.list_panes("demo", include_hidden=True) == []
 
 
 def test_messages_are_refused_without_a_record_when_execution_is_disabled(env, monkeypatch):
