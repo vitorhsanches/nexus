@@ -316,6 +316,7 @@
 
   const render = () => {
     renderPlanPicker(); renderSteps(); renderHandoffNote(); renderHandoff(); renderResume(); renderFinal(); renderBind(); renderChrome();
+    if (state.execution) host.setPaneAvailable?.('review', true);
   };
 
   // ---- loading --------------------------------------------------------------

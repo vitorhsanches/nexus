@@ -20,6 +20,7 @@
   const costAuthCreate = document.getElementById('cost-auth-create');
   const groupControls = document.getElementById('group-controls');
   const savedLayouts = new Map();
+  const fiveLayouts = new Map();
   const preferredColumns = new Map();
   const gap = 6;
   const minimumWidth = 300;
@@ -29,6 +30,7 @@
   grid.querySelector('[data-pane="agent-b"]').remove();
   // Panes owned by the cockpit itself (not per-agent): never created or removed from agent data.
   const systemPanes = ['maestro', 'native', 'review'];
+  const compactSystemPanes = grid.querySelector('[data-pane="maestro"]')?.dataset.workspaceInactive === 'true';
   const knownAgents = new Map();
   const projectListeners = new Set();
   const closedAgents = new Set();
@@ -62,7 +64,8 @@
   let refreshTimer;
   let refreshGeneration = 0;
   let refreshRequest = 0;
-  const panes = () => [...grid.querySelectorAll(':scope > .pane')];
+  const allPanes = () => [...grid.querySelectorAll(':scope > .pane')];
+  const panes = () => allPanes().filter(pane => pane.dataset.workspaceInactive !== 'true');
   const twoDigits = number => String(number).padStart(2, '0');
   let toastTimer;
   let groupIndex = 0;
@@ -212,8 +215,89 @@
     for (let index = 0; index < layout.rows - 1; index++) makeDivider('rows', index);
     positionDividers();
   };
+  const clearFivePositioning = () => {
+    grid.style.removeProperty('display');
+    allPanes().forEach(pane => ['position', 'left', 'top', 'width', 'height'].forEach(name => pane.style.removeProperty(name)));
+  };
+  const drawFivePaneLayout = visible => {
+    const key = visible.map(pane => pane.dataset.pane).join(',');
+    const saved = fiveLayouts.get(key) || { top: [1 / 3, 2 / 3], bottom: .5, row: .5 };
+    const width = grid.clientWidth;
+    const height = grid.clientHeight;
+    const topWidths = [saved.top[0] * width, (saved.top[1] - saved.top[0]) * width, (1 - saved.top[1]) * width];
+    const bottomWidths = [saved.bottom * width, (1 - saved.bottom) * width];
+    const topHeight = saved.row * height;
+    const place = (pane, x, y, w, h) => {
+      pane.style.position = 'absolute';
+      pane.style.left = `${x}px`;
+      pane.style.top = `${y}px`;
+      pane.style.width = `${Math.max(0, w - gap)}px`;
+      pane.style.height = `${Math.max(0, h - gap)}px`;
+    };
+    let x = 0;
+    visible.slice(0, 3).forEach((pane, index) => { place(pane, x, 0, topWidths[index], topHeight); x += topWidths[index]; });
+    x = 0;
+    visible.slice(3).forEach((pane, index) => { place(pane, x, topHeight, bottomWidths[index], height - topHeight); x += bottomWidths[index]; });
+    clearDividers();
+    const divider = (axis, segment, index, position) => {
+      const node = document.createElement('div');
+      node.className = `grid-divider ${axis === 'row' ? 'horizontal' : 'vertical'}`;
+      node.setAttribute('role', 'separator');
+      node.setAttribute('tabindex', '0');
+      node.setAttribute('aria-orientation', axis === 'row' ? 'horizontal' : 'vertical');
+      node.setAttribute('aria-label', 'Redimensionar panes adjacentes');
+      if (axis === 'row') { node.style.top = `${position}px`; node.style.left = '0'; }
+      else { node.style.left = `${position}px`; node.style.top = segment === 'top' ? '0' : `${topHeight}px`; node.style.bottom = segment === 'top' ? `${height - topHeight}px` : '0'; }
+      const change = value => {
+        if (axis === 'row') saved.row = Math.max(minimumHeight / height, Math.min(1 - minimumHeight / height, value / height));
+        else if (segment === 'bottom') saved.bottom = Math.max(minimumWidth / width, Math.min(1 - minimumWidth / width, value / width));
+        else {
+          const low = index === 0 ? minimumWidth / width : saved.top[0] + minimumWidth / width;
+          const high = index === 0 ? saved.top[1] - minimumWidth / width : 1 - minimumWidth / width;
+          saved.top[index] = Math.max(low, Math.min(high, value / width));
+        }
+        fiveLayouts.set(key, saved);
+        drawFivePaneLayout(visible);
+      };
+      node.addEventListener('pointerdown', event => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        const start = axis === 'row' ? event.clientY : event.clientX;
+        const initial = position;
+        const move = pointer => change(initial + (axis === 'row' ? pointer.clientY : pointer.clientX) - start);
+        const finish = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', finish);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', finish);
+      });
+      node.addEventListener('keydown', event => {
+        const delta = { ArrowLeft: -16, ArrowRight: 16, ArrowUp: -16, ArrowDown: 16 }[event.key];
+        if (delta === undefined) return;
+        event.preventDefault();
+        change(position + delta);
+      });
+      grid.append(node);
+    };
+    divider('column', 'top', 0, topWidths[0]);
+    divider('column', 'top', 1, topWidths[0] + topWidths[1]);
+    divider('column', 'bottom', 0, bottomWidths[0]);
+    divider('row', '', 0, topHeight);
+  };
   const updateLayout = () => {
     const all = panes();
+    clearFivePositioning();
+    if (!all.length) {
+      grid.dataset.visible = '0';
+      grid.style.removeProperty('grid-template-columns');
+      grid.style.removeProperty('grid-template-rows');
+      groupControls.hidden = true;
+      layout = null;
+      clearDividers();
+      document.getElementById('grid-layout-label').textContent = '▦  Sem panes abertas';
+      return;
+    }
     if (mobileLayout()) {
       all.forEach(pane => { pane.hidden = false; pane.classList.remove('featured'); });
       groupControls.hidden = true;
@@ -234,6 +318,21 @@
     const visible = all.slice(groupIndex * groupCapacity, (groupIndex + 1) * groupCapacity);
     const visibleSet = new Set(visible);
     all.forEach(pane => { pane.hidden = !visibleSet.has(pane); });
+    if (compactSystemPanes && visible.length === 5 && maxColumns >= 3 && maxRows === 2 && !grid.classList.contains('has-maximized')) {
+      grid.style.display = 'block';
+      grid.dataset.visible = '5';
+      grid.dataset.columns = '3';
+      grid.dataset.rows = '2';
+      groupControls.hidden = groupCount === 1;
+      document.getElementById('group-label').textContent = `Grupo ${groupIndex + 1}/${groupCount}`;
+      document.getElementById('previous-group').disabled = groupIndex === 0;
+      document.getElementById('next-group').disabled = groupIndex === groupCount - 1;
+      document.getElementById('grid-layout-label').textContent = '▦  Grade 3 + 2';
+      document.getElementById('toggle-layout').hidden = true;
+      layout = null;
+      drawFivePaneLayout(visible);
+      return;
+    }
     const firstColumnCount = Math.ceil(visible.length / maxRows);
     const lastColumnCount = Math.min(maxColumns, visible.length);
     const columnOptions = Array.from({ length: lastColumnCount - firstColumnCount + 1 }, (_, index) => firstColumnCount + index);
@@ -242,7 +341,7 @@
     const columns = columnOptions.includes(preferredColumns.get(preferenceKey))
       ? preferredColumns.get(preferenceKey) : automaticColumns;
     const rows = Math.ceil(visible.length / columns);
-    const featured = rows === 2 && ((visible.length === 3 && columns === 2) || (visible.length === 5 && columns === 3));
+    const featured = rows === 2 && ((visible.length === 3 && columns === 2) || (!compactSystemPanes && visible.length === 5 && columns === 3));
     all.forEach(pane => pane.classList.toggle('featured', featured && pane === visible[0]));
     grid.dataset.visible = String(visible.length);
     grid.dataset.columns = String(columns);
@@ -293,6 +392,7 @@
   };
 
   const selectPane = pane => {
+    if (!pane || pane.dataset.workspaceInactive === 'true') return;
     if (grid.classList.contains('has-maximized') && !pane.classList.contains('maximized')) {
       panes().forEach(item => {
         item.classList.remove('maximized');
@@ -323,6 +423,20 @@
     if (wasSelected) selectPane(panes()[Math.min(index, panes().length - 1)]);
     closedAgents.add(pane.dataset.pane);
     notify(`${paneTitle(pane)} oculto nesta prévia`);
+  };
+  const setPaneAvailable = (kind, available) => {
+    if (!compactSystemPanes) return;
+    const pane = grid.querySelector(`[data-pane="${kind}"]`);
+    if (!pane || !systemPanes.includes(kind)) return;
+    const wasAvailable = pane.dataset.workspaceInactive !== 'true';
+    if (wasAvailable === available) return;
+    pane.dataset.workspaceInactive = available ? 'false' : 'true';
+    if (!available && pane.classList.contains('selected')) {
+      pane.classList.remove('selected');
+      const next = panes()[0];
+      if (next) next.classList.add('selected');
+    }
+    syncUI();
   };
 
   const addCloseControl = pane => {
@@ -405,10 +519,19 @@
   });
   document.getElementById('focus-maestro').addEventListener('click', () => {
     const pane = grid.querySelector('[data-pane="maestro"]');
+    setPaneAvailable('maestro', true);
     selectPane(pane);
     pane.scrollIntoView({ behavior: 'smooth', block: 'center' });
     pane.focus({ preventScroll: true });
     notify('Pane Maestro selecionado');
+  });
+  document.getElementById('open-review').addEventListener('click', () => {
+    setPaneAvailable('review', true);
+    selectPane(grid.querySelector('[data-pane="review"]'));
+  });
+  document.getElementById('open-native-session').addEventListener('click', () => {
+    setPaneAvailable('native', true);
+    selectPane(grid.querySelector('[data-pane="native"]'));
   });
   document.getElementById('menu-toggle').addEventListener('click', event => {
     const open = document.getElementById('sidebar').classList.toggle('open');
@@ -416,6 +539,8 @@
   });
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
+    if (!aiSection.hidden) { aiSection.hidden = true; aiSettingsOpen = false; }
+    document.getElementById('settings-advanced').open = false;
     panes().forEach(pane => {
       pane.classList.remove('maximized');
       pane.querySelector('.expand').textContent = '⤢';
@@ -452,6 +577,7 @@
   });
   document.getElementById('restore-layout').addEventListener('click', () => {
     savedLayouts.clear();
+    fiveLayouts.clear();
     preferredColumns.clear();
     updateLayout();
     syncStreams();
@@ -886,6 +1012,7 @@
   const openAiSettings = () => {
     aiSettingsOpen = true;
     aiSection.hidden = false;
+    document.getElementById('settings-advanced').open = false;
     aiSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('menu-toggle').setAttribute('aria-expanded', 'false');
@@ -893,8 +1020,11 @@
   };
   document.getElementById('settings-ai-button').addEventListener('click', openAiSettings);
   document.getElementById('settings-ai-link').addEventListener('click', openAiSettings);
+  document.getElementById('close-ai-settings').addEventListener('click', () => { aiSection.hidden = true; aiSettingsOpen = false; });
   modelCatalogRefreshButton.addEventListener('click', () => { void refreshModelCatalog(true); if (aiSettingsOpen) void refreshAiSettings(true); });
   document.getElementById('settings-models-link').addEventListener('click', () => {
+    aiSection.hidden = true;
+    aiSettingsOpen = false;
     document.getElementById('settings-advanced').open = true;
     document.getElementById('settings-models').scrollIntoView({ behavior: 'smooth', block: 'start' });
     document.getElementById('sidebar').classList.remove('open');
@@ -1264,13 +1394,16 @@
     badge.className = `pane-status ${['FAILED', 'OUTCOME_UNKNOWN', 'RESULT_UNCERTAIN'].includes(status) ? 'waiting' : 'idle'}`;
     const meta = pane.querySelector('.pane-meta');
     meta.replaceChildren();
-    [['MODELO', agent.model || 'Não selecionado'], ['MISSÃO', agent.latest_mission?.mission_id || 'Nenhuma'], ['SESSÃO', agent.session?.session_id || 'Ausente']].forEach(([label, value]) => {
+    [['BACKEND', agent.backend || agent.session?.backend || '—'], ['MODELO', agent.model || 'Não selecionado'],
+      ['EFFORT', agent.brief?.authorization?.effort || '—'], ['SESSÃO', agent.session?.session_id || 'Ausente']].forEach(([label, value]) => {
       const field = element('span', '', `${label} `);
       field.append(element('b', '', value));
       meta.append(field);
     });
     pane.querySelector('.terminal-kicker').replaceChildren(element('span', '', '●'), document.createTextNode(' EVENTOS NEXUS / NÃO É SHELL '), element('span', 'right', status));
-    pane.querySelector('.foot-path').textContent = agent.session?.branch || 'Sem worktree ativo';
+    const path = agent.session?.worktree_path || agent.session?.branch || 'Sem worktree ativo';
+    pane.querySelector('.foot-path').textContent = path;
+    pane.querySelector('.foot-path').title = path;
     pane.querySelector('.pane-footer > span:last-child').textContent = 'MENSAGENS NEXUS · SEM SHELL';
     const body = pane.querySelector('.terminal-body');
     const signature = JSON.stringify([agent.latest_mission, agent.messages, agent.dependencies, history?.events]);
@@ -1438,16 +1571,27 @@
     renderPlanningControls();
     const review = grid.querySelector('[data-pane="review"]');
     const awaiting = workspace.panes.filter(agent => agent.latest_mission?.status === 'READY_FOR_REVIEW');
-    review.querySelector('.pane-status').lastChild.textContent = awaiting.length ? ' Aguardando' : ' Sem pendências';
-    review.querySelector('.pane-meta').replaceChildren(element('span', '', `AGENTES  ${workspace.panes.length}`), element('span', '', `AGUARDANDO REVISÃO  ${awaiting.length}`));
-    review.querySelector('.review-steps').replaceChildren(...(awaiting.length ? awaiting.map(agent => {
+    const legacyItems = awaiting.length ? awaiting.map(agent => {
       const item = element('div', 'review-step');
       const details = element('div');
       details.append(element('strong', '', agent.title), element('small', '', agent.latest_mission.mission_id));
       item.append(element('span', 'step-number', '○'), details);
       return item;
-    }) : [element('div', 'review-step', 'Nenhuma missão aguardando revisão.')])) ;
-    review.querySelector('.pane-footer > span:last-child').textContent = 'INTEGRAÇÃO EXIGE APROVAÇÃO';
+    }) : [element('div', 'review-step', 'Nenhuma missão aguardando revisão.')];
+    if (compactSystemPanes) {
+      const summary = review.querySelector('#legacy-review-summary');
+      if (summary) {
+        summary.hidden = !awaiting.length;
+        summary.replaceChildren(...(awaiting.length ? legacyItems : []));
+      }
+      if (awaiting.length) setPaneAvailable('review', true);
+    } else {
+      review.querySelector('.pane-status').lastChild.textContent = awaiting.length ? ' Aguardando' : ' Sem pendências';
+      review.querySelector('.pane-meta').replaceChildren(element('span', '', `AGENTES  ${workspace.panes.length}`), element('span', '', `AGUARDANDO REVISÃO  ${awaiting.length}`));
+      review.querySelector('.review-steps').replaceChildren(...legacyItems);
+      review.querySelector('.pane-footer > span:last-child').textContent = 'INTEGRAÇÃO EXIGE APROVAÇÃO';
+    }
+    if (compactSystemPanes && (maestro?.busy || (maestro?.messages || []).length)) setPaneAvailable('maestro', true);
   };
   const streamBody = key => key === 'maestro'
     ? maestroPane.querySelector('.maestro-body')
@@ -1659,7 +1803,8 @@
     panes().filter(pane => !systemPanes.includes(pane.dataset.pane)).forEach(pane => pane.remove());
     renderProjects();
     syncUI();
-    selectPane(grid.querySelector('[data-pane="maestro"]'));
+    if (compactSystemPanes) systemPanes.forEach(kind => setPaneAvailable(kind, false));
+    else selectPane(grid.querySelector('[data-pane="maestro"]'));
     projectListeners.forEach(listener => {
       try { listener(projectId); } catch (error) { notify(`Falha no painel do projeto: ${error.message}`); }
     });
@@ -1691,6 +1836,7 @@
   window.NexusCockpit = Object.freeze({
     projectId: () => projectId,
     notify,
+    setPaneAvailable,
     onProject: listener => { projectListeners.add(listener); if (projectId) listener(projectId); },
   });
   syncUI();

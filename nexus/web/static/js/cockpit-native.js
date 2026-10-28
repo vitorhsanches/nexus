@@ -266,9 +266,11 @@
     badge.className = `pane-status ${tone}`;
     $('native-connection').textContent = ({ idle: state.session ? 'PRONTO' : 'OFFLINE', live: 'AO VIVO', reconnecting: 'RECONECTANDO', polling: 'CONSULTANDO' })[state.connection] || 'OFFLINE';
     $('native-meta-model').textContent = state.session?.requested_model || selectedModel() || '—';
+    $('native-meta-effort').textContent = $('native-effort').value ? `${$('native-effort').value} · próximo turno` : 'por turno';
     $('native-meta-session').textContent = state.session?.session_id || '—';
     $('native-meta-backend').textContent = state.session ? (isNative(state.session) ? BACKEND : 'omniroute · legado') : BACKEND;
-    $('native-foot').textContent = state.session?.branch || 'sem worktree ativo';
+    $('native-foot').textContent = state.session?.worktree_path || state.session?.branch || 'sem worktree ativo';
+    $('native-foot').title = state.session?.worktree_path || state.session?.branch || '';
     $('native-runtime-model').textContent = state.session?.requested_model || 'Selecione uma sessão';
     $('native-runtime-worktree').textContent = state.session?.branch
       ? `worktree · ${state.session.branch}` : 'Worktree isolado · sem projeto';
@@ -277,6 +279,7 @@
   };
   const render = () => {
     renderGate(); renderModels(); renderSessions(); renderLog(); renderLive(); renderApprovals(); renderChanges(); renderReview(); renderControls(); renderChrome();
+    if (state.session) host.setPaneAvailable?.('native', true);
   };
 
   // ---- loading ------------------------------------------------------------
@@ -601,6 +604,7 @@
 
   $('native-session').addEventListener('change', event => { void selectSession(event.currentTarget.value); });
   $('native-model').addEventListener('change', () => { renderEfforts(); renderControls(); renderChrome(); });
+  $('native-effort').addEventListener('change', () => { renderControls(); renderChrome(); });
   $('native-create').addEventListener('click', () => { void createSession(); });
   $('native-composer').addEventListener('submit', event => { event.preventDefault(); void sendTask(); });
   $('native-prompt').addEventListener('input', renderControls);

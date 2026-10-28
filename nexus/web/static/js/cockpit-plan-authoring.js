@@ -299,6 +299,9 @@
     }
     try {
       const synchronized = await window.NexusPlanMonitor.refresh(projectId, planId);
+      if (synchronized && typeof window.CustomEvent === 'function') {
+        window.dispatchEvent(new window.CustomEvent('nexus:plan-updated', { detail: { projectId, planId } }));
+      }
       if (!synchronized && !isStale(generation) && !state.error) {
         setError('Plano salvo, mas o monitor não confirmou a atualização. Recarregue o projeto antes de continuar.');
       }
@@ -378,6 +381,9 @@
       changedPlanId = result.plan_id;
       rememberPlan(projectId, result.plan_id);
       clearForm();
+      if (typeof window.CustomEvent === 'function') {
+        window.dispatchEvent(new window.CustomEvent('nexus:plan-created', { detail: { projectId, planId: result.plan_id } }));
+      }
       if (!isStale(generation)) {
         const entry = await refreshPlan(result.plan_id, projectId, generation);
         if (!isStale(generation) && entry) state.plans = [entry, ...state.plans.filter(item => item.plan.plan_id !== result.plan_id)];

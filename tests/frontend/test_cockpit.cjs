@@ -29,7 +29,7 @@ function buildPane(kind) {
   return pane;
 }
 
-function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null, withNative = false } = {}) {
+function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null, withNative = false, compact = false } = {}) {
   const rootNode = el('body');
   const ids = [...template.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
   const byId = Object.fromEntries(ids.map(id => [id, el('div')]));
@@ -37,6 +37,11 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
   const grid = byId['pane-grid'];
   grid.clientWidth = gridWidth;
   grid.append(buildPane('maestro'), ...(withNative ? [buildPane('native')] : []), buildPane('agent-a'), buildPane('agent-b'), buildPane('review'));
+  if (compact) {
+    for (const pane of grid.querySelectorAll(':scope > .pane')) {
+      if (['maestro', 'native', 'review'].includes(pane.dataset.pane)) pane.dataset.workspaceInactive = 'true';
+    }
+  }
   const overview = el('div');
   for (let index = 0; index < 3; index++) overview.append(nodeWith('div', 'overview-stat', el('strong')));
   rootNode.append(overview);
@@ -263,6 +268,28 @@ test('five visible panes form a tall lead pane and a two-by-two companion grid',
   const divider = app.grid.querySelector('.grid-divider.horizontal');
   assert.ok(divider);
   assert.notEqual(divider.style.left, '0px');
+});
+
+test('compact workspace shows only five real agent panes in a resizable three plus two grid', async () => {
+  const app = harness([agent(1), agent(2), agent(3), agent(4), agent(5)], { compact: true });
+  await app.settle();
+  assert.equal(app.grid.dataset.visible, '5');
+  assert.equal(app.grid.dataset.columns, '3');
+  assert.equal(app.grid.dataset.rows, '2');
+  assert.equal(app.grid.style.display, 'block');
+  const visible = [...app.grid.querySelectorAll(':scope > .pane')].filter(pane => pane.dataset.workspaceInactive !== 'true');
+  assert.equal(visible.length, 5);
+  assert.equal(visible[0].style.top, visible[1].style.top);
+  assert.equal(visible[1].style.top, visible[2].style.top);
+  assert.equal(visible[3].style.top, visible[4].style.top);
+  assert.notEqual(visible[0].style.top, visible[3].style.top);
+  assert.equal(visible[0].style.width, visible[1].style.width);
+  assert.equal(visible[3].style.width, visible[4].style.width);
+  const before = visible[0].style.width;
+  app.grid.querySelector('.grid-divider.vertical').dispatch('keydown', undefined, { key: 'ArrowRight' });
+  assert.notEqual(visible[0].style.width, before);
+  app.byId['restore-layout'].dispatch('click');
+  assert.equal(visible[0].style.width, before);
 });
 
 test('two panes can switch to vertical rows, resize their heights, and fit the viewport', () => {
