@@ -1022,6 +1022,52 @@ def test_manual_plan_approval_rejects_mixed_backends(env):
     assert service.list_panes("demo", include_hidden=True) == []
 
 
+@pytest.mark.parametrize(
+    "agent_models,agent_efforts,expected_code",
+    [
+        ({"implement": "gpt-native"}, {"implement": "high", "verify": "low"},
+         "MODELS_NOT_CONFIRMED"),
+        ({"implement": "gpt-native", "verify": "gpt-native"}, {"implement": "high"},
+         "EFFORTS_NOT_CONFIRMED"),
+    ],
+)
+def test_manual_plan_approval_requires_explicit_model_and_effort_for_each_agent(
+    env, monkeypatch, agent_models, agent_efforts, expected_code,
+):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "gpt-native", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice", lambda model, effort: None
+    )
+    plan = _client().post(
+        "/api/workspace/plans/manual", json=_manual_native_plan()
+    ).json()
+    response = _client().post(
+        f"/api/workspace/plans/{plan['plan_id']}/approve",
+        json={
+            "agent_models": agent_models,
+            "backend": "codex_native",
+            "agent_backends": {
+                "implement": "codex_native", "verify": "codex_native",
+            },
+            "agent_efforts": agent_efforts,
+            "max_turns_per_agent": 1,
+            "mission_timeout_seconds": 600,
+            "confirm_costs": True,
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == expected_code
+    assert service.plan_view(store.get_plan(plan["plan_id"]))["status"] == "PROPOSED"
+    assert all(
+        pane["plan_id"] != plan["plan_id"]
+        for pane in service.list_panes("demo", include_hidden=True)
+    )
+
+
 def test_manual_plan_approval_rejects_model_absent_from_native_catalog(
     env, monkeypatch,
 ):

@@ -14,11 +14,13 @@ import hashlib
 import json
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from nexus.dev.service import create_dev_session
+from nexus.dev.worktree import read_worktree_diff
 from nexus.registry import database, dev_integrations, dev_sessions
 from nexus.registry import workspace as store
 from nexus.workspace import coordinator
@@ -117,6 +119,29 @@ def _save_review(session_id: str, review_id: str, *, approval_ready: bool = True
     return record
 
 
+def _save_current_review(session: dict, label: str, base_sha: str) -> str:
+    """Persist review evidence from the exact current simulated worktree diff."""
+    diff = read_worktree_diff(session["worktree_path"], session["base_sha"])
+    session_id = (
+        session["session_id"] if "session_id" in session.keys() else session["id"]
+    )
+    review_id = _review_id(f"{session_id}-{label}")
+    dev_integrations.save_review(
+        review_id=review_id, dev_session_id=session_id, project_id="demo",
+        base_sha=session["base_sha"], target_head=base_sha, target_branch="main",
+        snapshot={
+            "session_id": session_id,
+            "project_id": "demo",
+            "base_sha": session["base_sha"],
+            "target_head": base_sha,
+            "target_branch": "main",
+            "diff": diff,
+            "approval_ready": bool(diff.get("approval_ready")),
+        },
+    )
+    return review_id
+
+
 def _fake_run_dev_turn(calls: list):
     def run(dev_session_id, prompt, *, model=None, effort=None):
         turn_id = dev_sessions.create_turn(dev_session_id, prompt, requested_model=model)
@@ -182,6 +207,180 @@ def test_bind_review_route_accepts_a_valid_review(native_plan_env, monkeypatch):
     assert final["status"] == "AWAITING_REVIEW"
     assert final["result"]["human_approval_required"] is True
     assert final["result"]["integration_applied"] is False
+
+
+def test_manual_two_native_agents_review_handoff_resume_http_e2e(
+    native_plan_env, monkeypatch,
+):
+    """Full two-agent HTTP flow with real disposable worktrees and fake turns."""
+    from nexus.workspace import service
+
+    env = native_plan_env
+    client = _client()
+    repo = env["repo"]
+    original_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True,
+    ).strip()
+    original_status = subprocess.check_output(
+        ["git", "status", "--porcelain=v1"], cwd=repo, text=True,
+    )
+    original_content = (repo / "api.py").read_text(encoding="utf-8")
+    monkeypatch.setattr("nexus.dev.models.list_dev_models", lambda: pytest.fail(
+        "Native plan path must not consult the OmniRoute catalog"
+    ))
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native",
+        "models": [{"id": "gpt-native", "cost_status": "known"}],
+        "catalog_error": None,
+    })
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice", lambda model, effort: None
+    )
+
+    proposed = client.post("/api/workspace/plans/manual", json={
+        "project_id": "demo",
+        "task_text": "Implementar e validar uma pequena alteração.",
+        "agents": [
+            {"key": "implement", "role": "backend", "title": "Implementação",
+             "task": "Alterar api.py para retornar 2.",
+             "acceptance_criteria": ["api() retorna 2"], "depends_on": [],
+             "touches": ["api.py"]},
+            {"key": "verify", "role": "tester", "title": "Validação",
+             "task": "Adicionar teste para api().",
+             "acceptance_criteria": ["Teste cobre api()"],
+             "depends_on": ["implement"], "touches": ["tests/"]},
+        ], "execution_order": ["implement", "verify"],
+    })
+    assert proposed.status_code == 200, proposed.text
+    plan_id = proposed.json()["plan_id"]
+    assert proposed.json()["status"] == "PROPOSED"
+    assert proposed.json()["execution"] is None and proposed.json()["approval"] is None
+    assert all(
+        pane["plan_id"] != plan_id
+        for pane in service.list_panes("demo", include_hidden=True)
+    )
+
+    approved = client.post(f"/api/workspace/plans/{plan_id}/approve", json={
+        "agent_models": {"implement": "gpt-native", "verify": "gpt-native"},
+        "backend": "codex_native",
+        "agent_backends": {"implement": "codex_native", "verify": "codex_native"},
+        "agent_efforts": {"implement": "high", "verify": "low"},
+        "max_turns_per_agent": 1, "mission_timeout_seconds": 60, "confirm_costs": True,
+    })
+    assert approved.status_code == 200, approved.text
+    plan = approved.json()["plan"]
+    assert plan["approval"]["agent_models"]["implement"]["effort"] == "high"
+    assert plan["approval"]["agent_models"]["verify"]["effort"] == "low"
+    panes_by_key = {pane["plan_agent_key"]: pane for pane in approved.json()["panes"]}
+    assert {
+        pane["session"]["backend"] for pane in approved.json()["panes"]
+    } == {"codex_native"}
+    assert panes_by_key["verify"]["brief"]["depends_on"] == ["implement"]
+
+    turns: list[dict] = []
+
+    def fake_turn(session_id, prompt, *, model=None, effort=None):
+        turn_id = dev_sessions.create_turn(session_id, prompt, requested_model=model)
+        turns.append({"turn_id": turn_id, "session_id": session_id,
+                      "model": model, "effort": effort})
+        return {"turn_id": turn_id, "dev_session_id": session_id, "status": "PENDING"}
+
+    monkeypatch.setattr("nexus.dev.executor.run_dev_turn", fake_turn)
+    authorized = client.post(f"/api/workspace/plans/{plan_id}/execute", json={
+        "agent_keys": ["implement", "verify"], "test_profiles": {},
+        "max_turns_per_agent": 1, "mission_timeout_seconds": 60,
+    })
+    assert authorized.status_code == 200, authorized.text
+    assert authorized.json()["status"] == "RUNNING"
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and len(turns) < 1:
+        time.sleep(0.02)
+    assert len(turns) == 1
+    assert turns[0]["session_id"] == panes_by_key["implement"]["session"]["session_id"]
+    assert (turns[0]["model"], turns[0]["effort"]) == ("gpt-native", "high")
+
+    source_session = dev_sessions.get_session(turns[0]["session_id"])
+    Path(source_session["worktree_path"], "api.py").write_text(
+        "def api():\n    return 2\n", encoding="utf-8",
+    )
+    dev_sessions.update_turn_status(
+        turns[0]["turn_id"], "COMPLETED", response_text="done"
+    )
+    assert _wait(plan_id, {"BLOCKED"})["error_code"] == "AWAITING_NATIVE_REVIEW"
+    review_a = _save_current_review(source_session, "agent-a", original_head)
+    bind_a = client.post(
+        ROUTE.format(plan_id=plan_id, agent_key="implement"),
+        json={"review_id": review_a},
+    )
+    assert bind_a.status_code == 200, bind_a.text
+    blocked = _wait(plan_id, {"BLOCKED"})
+    assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+    assert len(turns) == 1
+    assert client.post(f"/api/workspace/plans/{plan_id}/resume").status_code == 409
+
+    preview = client.post("/api/workspace/handoffs/preview", json={
+        "source_pane_id": panes_by_key["implement"]["pane_id"],
+        "target_pane_id": panes_by_key["verify"]["pane_id"],
+        "source_mission_id": review_a,
+    })
+    assert preview.status_code == 200, preview.text
+    handoff = preview.json()
+    denied_transfer = client.post(
+        f"/api/workspace/handoffs/{handoff['handoff_id']}/transfer"
+    )
+    assert denied_transfer.status_code == 409
+    approved_handoff = client.post(
+        f"/api/workspace/handoffs/{handoff['handoff_id']}/approve", json={
+            "fingerprint": handoff["snapshot_fingerprint"],
+            "source_pane_id": panes_by_key["implement"]["pane_id"],
+            "target_pane_id": panes_by_key["verify"]["pane_id"],
+        },
+    )
+    assert approved_handoff.status_code == 200, approved_handoff.text
+    assert client.post(f"/api/workspace/plans/{plan_id}/resume").status_code == 409
+    transferred = client.post(
+        f"/api/workspace/handoffs/{handoff['handoff_id']}/transfer"
+    )
+    assert transferred.status_code == 200, transferred.text
+    assert transferred.json()["status"] == "TRANSFERRED"
+    resumed = client.post(f"/api/workspace/plans/{plan_id}/resume")
+    assert resumed.status_code == 200, resumed.text
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and len(turns) < 2:
+        time.sleep(0.02)
+    assert len(turns) == 2
+    assert turns[1]["session_id"] == panes_by_key["verify"]["session"]["session_id"]
+    assert (turns[1]["model"], turns[1]["effort"]) == ("gpt-native", "low")
+
+    target_session = dev_sessions.get_session(turns[1]["session_id"])
+    Path(target_session["worktree_path"], "tests").mkdir()
+    Path(target_session["worktree_path"], "tests", "test_api.py").write_text(
+        "from api import api\n\ndef test_api():\n    assert api() == 2\n",
+        encoding="utf-8",
+    )
+    dev_sessions.update_turn_status(
+        turns[1]["turn_id"], "COMPLETED", response_text="done"
+    )
+    assert _wait(plan_id, {"BLOCKED"})["error_code"] == "AWAITING_NATIVE_REVIEW"
+    review_b = _save_current_review(target_session, "agent-b", original_head)
+    bind_b = client.post(
+        ROUTE.format(plan_id=plan_id, agent_key="verify"), json={"review_id": review_b},
+    )
+    assert bind_b.status_code == 200, bind_b.text
+    final = _wait(plan_id, {"AWAITING_REVIEW"})
+    assert final["status"] == "AWAITING_REVIEW"
+    assert final["result"]["human_approval_required"] is True
+    assert final["result"]["integration_applied"] is False
+    assert len(turns) == 2
+    final_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True,
+    ).strip()
+    final_status = subprocess.check_output(
+        ["git", "status", "--porcelain=v1"], cwd=repo, text=True,
+    )
+    assert final_head == original_head
+    assert final_status == original_status
+    assert (repo / "api.py").read_text(encoding="utf-8") == original_content
 
 
 # -- negative: identity and freshness ---------------------------------------
