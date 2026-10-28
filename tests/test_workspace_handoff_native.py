@@ -329,14 +329,21 @@ def _client() -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1")
 
 
-def test_preview_route_accepts_native_review_evidence_under_the_historical_field_name(native_env):
+def test_preview_route_accepts_native_review_evidence_under_the_historical_field_name(
+    native_env,
+):
     source = native_env["source"]["worktree_path"]
-    (Path(source) / "calc.py").write_text("def multiply(a, b):\n    return a * b\n", encoding="utf-8")
+    source_code = "def multiply(a, b):\n    return a * b\n"
+    (Path(source) / "calc.py").write_text(source_code, encoding="utf-8")
     review_id = _ready(native_env)
-    response = _client().post("/api/workspace/handoffs/preview", json={
-        "source_pane_id": native_env["source_pane"], "target_pane_id": native_env["target_pane"],
-        "source_mission_id": review_id,
-    })
+    response = _client().post(
+        "/api/workspace/handoffs/preview",
+        json={
+            "source_pane_id": native_env["source_pane"],
+            "target_pane_id": native_env["target_pane"],
+            "source_mission_id": review_id,
+        },
+    )
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["source_backend"] == "codex_native"
@@ -345,17 +352,26 @@ def test_preview_route_accepts_native_review_evidence_under_the_historical_field
     assert body["status"] == "PREVIEWED"
 
 
-def test_preview_route_rejects_a_review_id_that_does_not_belong_to_the_named_source_pane(native_env):
+def test_preview_route_rejects_foreign_source_review_id(native_env):
     other = create_dev_session("demo", backend="codex_native")
     review_id = _review_id("wrong-session-http")
     dev_integrations.save_review(
         review_id=review_id, dev_session_id=other["session_id"], project_id="demo",
-        base_sha=other["base_sha"], target_head=other["base_sha"], target_branch="master",
-        snapshot={"diff": {"files": [], "truncated": False, "review_id": "fingerprint"}, "approval_ready": True},
+        base_sha=other["base_sha"],
+        target_head=other["base_sha"],
+        target_branch="master",
+        snapshot={
+            "diff": {"files": [], "truncated": False, "review_id": "fingerprint"},
+            "approval_ready": True,
+        },
     )
-    response = _client().post("/api/workspace/handoffs/preview", json={
-        "source_pane_id": native_env["source_pane"], "target_pane_id": native_env["target_pane"],
-        "source_mission_id": review_id,
-    })
+    response = _client().post(
+        "/api/workspace/handoffs/preview",
+        json={
+            "source_pane_id": native_env["source_pane"],
+            "target_pane_id": native_env["target_pane"],
+            "source_mission_id": review_id,
+        },
+    )
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "HANDOFF_REVIEW_MISMATCH"
