@@ -6,9 +6,11 @@
   <meta name="color-scheme" content="dark">
   <title>Nexus — Cockpit</title>
   <link rel="stylesheet" href="/static/css/cockpit.css?v={{ asset_version }}">
+  <link rel="stylesheet" href="/static/css/cockpit-plan-authoring.css?v={{ asset_version }}">
   <script src="/static/js/cockpit.js?v={{ asset_version }}" defer></script>
   <script src="/static/js/cockpit-native.js?v={{ asset_version }}" defer></script>
   <script src="/static/js/cockpit-plans.js?v={{ asset_version }}" defer></script>
+  <script src="/static/js/cockpit-plan-authoring.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -214,6 +216,30 @@
           </div>
           <div class="pane-footer"><span class="foot-path" id="review-foot">◇ &nbsp;workspace / revisão</span><span id="review-foot-right">AGUARDANDO DADOS DO NEXUS</span></div>
         </article>
+      </section>
+
+      <section class="plan-authoring" id="native-plan-authoring" aria-labelledby="native-plan-title">
+        <header class="plan-authoring-heading">
+          <div><span class="plan-authoring-kicker">PLANEJAMENTO MANUAL · SEM OMNIROUTE</span><h2 id="native-plan-title">Missão multiagente <span>CODEX NATIVE</span></h2></div>
+          <p id="plan-authoring-project" aria-live="polite">Selecione um projeto autorizado</p>
+        </header>
+        <p class="plan-authoring-intro">Crie uma proposta com dois agentes. Nenhuma sessão ou execução começa antes das aprovações explícitas.</p>
+        <form id="plan-authoring-form" class="plan-authoring-form">
+          <label class="plan-field plan-field-wide">Missão geral<textarea id="plan-task-text" rows="2" maxlength="20000" required placeholder="Descreva o resultado esperado da missão"></textarea></label>
+          <label class="plan-field">Tarefa do agente A<textarea id="plan-agent-a-task" rows="3" maxlength="4000" required placeholder="O que o agente A deve fazer?"></textarea></label>
+          <label class="plan-field">Critérios de aceite do agente A<textarea id="plan-agent-a-criteria" rows="3" required placeholder="Um critério por linha"></textarea></label>
+          <label class="plan-field">Tarefa do agente B<textarea id="plan-agent-b-task" rows="3" maxlength="4000" required placeholder="O que o agente B deve fazer?"></textarea></label>
+          <label class="plan-field">Critérios de aceite do agente B<textarea id="plan-agent-b-criteria" rows="3" required placeholder="Um critério por linha"></textarea></label>
+          <label class="plan-field plan-field-wide">Relação de execução<select id="plan-dependency" required>
+            <option value="">Escolha a sequência</option>
+            <option value="after">Agente B depende do agente A</option>
+            <option value="independent">Agentes independentes, na ordem A → B</option>
+          </select></label>
+          <div class="plan-authoring-actions plan-field-wide"><button id="plan-create" class="plan-action-primary" type="submit" disabled>Criar proposta</button><span>Propostas ficam PROPOSED até aprovação humana.</span></div>
+        </form>
+        <p class="plan-authoring-error" id="plan-authoring-error" role="status" aria-live="polite" hidden></p>
+        <div class="plan-authoring-catalog" id="plan-authoring-catalog" role="status" aria-live="polite">Selecione um projeto para carregar o catálogo Codex Native.</div>
+        <div class="plan-authoring-list" id="plan-authoring-list" aria-live="polite"></div>
       </section>
 
       <footer class="workspace-footer"><span><i></i> NEXUS COCKPIT PREVIEW</span><span>MENSAGENS NEXUS <b>·</b> SEM SHELL <b>·</b> APROVAÇÃO HUMANA</span><span id="footer-pane-count">2 PANES · 0 SESSÕES</span></footer>

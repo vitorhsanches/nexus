@@ -7,8 +7,10 @@ const { TextNode, el } = require('./fake_dom.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const script = fs.readFileSync(path.join(root, 'nexus/web/static/js/cockpit-plans.js'), 'utf8');
+const authoringScript = fs.readFileSync(path.join(root, 'nexus/web/static/js/cockpit-plan-authoring.js'), 'utf8');
 const template = fs.readFileSync(path.join(root, 'nexus/web/templates/cockpit.html'), 'utf8');
 const reviewMarkup = template.slice(template.indexOf('<article class="pane" data-pane="review"'), template.indexOf('</article>', template.indexOf('<article class="pane" data-pane="review"')));
+const authoringMarkup = template.slice(template.indexOf('<section class="plan-authoring"'), template.indexOf('</section>', template.indexOf('<section class="plan-authoring"')));
 
 function buildDom() {
   const byId = {};
@@ -21,6 +23,12 @@ function buildDom() {
     byId[node.id] = node;
   }
   byId['review-status-badge'].append(el('i'), new TextNode(' Aguardando'));
+  for (const match of authoringMarkup.matchAll(/<([\w-]+)([^>]*?)\sid="([^"]+)"([^>]*)>/g)) {
+    const node = el(match[1]);
+    node.id = match[3];
+    byId[node.id] = node;
+  }
+  byId['plan-create'].disabled = true;
   return byId;
 }
 
@@ -35,6 +43,7 @@ function harness(overrides = {}) {
   const toasts = [];
   const timers = [];
   const listeners = [];
+  const storage = new Map();
   const server = {
     project: 'demo',
     plans: [],
@@ -61,6 +70,55 @@ function harness(overrides = {}) {
     }
     if (method === 'GET' && url.startsWith('/api/workspace/plans?')) return reply({ plans: server.plans });
     if (method === 'GET' && url.startsWith('/api/workspace/state?')) return reply({ panes: server.panes, coordination: [], execution_enabled: true });
+    if (server.integrated && method === 'GET' && url === '/api/dev/models?backend=codex_native') {
+      return reply({ backend: 'codex_native', models: [
+        { id: 'gpt-native', selectable: true, cost_status: 'free', supported_efforts: ['high', 'low'] },
+      ], catalog_error: null });
+    }
+    if (server.integrated && method === 'POST' && url === '/api/workspace/plans/manual') {
+      const item = {
+        plan_id: 'WSPLAN-1', project_id: body.project_id, task_text: body.task_text,
+        agents: body.agents, execution_order: body.execution_order,
+        source: 'manual', status: 'PROPOSED', approval: null, execution: null,
+      };
+      server.plans.push(item);
+      return reply(item);
+    }
+    if (server.integrated && method === 'GET' && /^\/api\/workspace\/plans\/[^/]+$/.test(url)) {
+      return reply(server.plans.find(item => item.plan_id === url.split('/').at(-1)));
+    }
+    const planApproveMatch = url.match(/^\/api\/workspace\/plans\/([^/]+)\/approve$/);
+    if (server.integrated && method === 'POST' && planApproveMatch) {
+      const item = server.plans.find(plan => plan.plan_id === planApproveMatch[1]);
+      item.status = 'APPROVED';
+      item.approval = { ...body, cost_confirmed_for: [], agent_models: Object.fromEntries(
+        Object.entries(body.agent_models).map(([key, model]) => [key, {
+          model, backend: 'codex_native', effort: body.agent_efforts[key], cost_status: 'free',
+        }]),
+      ) };
+      server.panes = item.agents.map((agent, index) => ({
+        pane_id: `PANE-${index + 1}`, plan_id: item.plan_id, plan_agent_key: agent.key,
+        backend: 'codex_native', model: body.agent_models[agent.key],
+        session: { session_id: `DEV-${index + 1}`, status: 'ACTIVE', backend: 'codex_native' },
+      }));
+      return reply({ plan: item, panes: server.panes });
+    }
+    const planExecuteMatch = url.match(/^\/api\/workspace\/plans\/([^/]+)\/execute$/);
+    if (server.integrated && method === 'POST' && planExecuteMatch) {
+      const item = server.plans.find(plan => plan.plan_id === planExecuteMatch[1]);
+      const current = {
+        plan_id: item.plan_id, project_id: item.project_id, status: 'RUNNING', current_index: 0,
+        error_code: null, error_message: null, result: null, resume: { eligible: false },
+        steps: body.agent_keys.map((key, index) => ({
+          agent_key: key, ordinal: index, pane_id: server.panes[index].pane_id,
+          status: index === 0 ? 'RUNNING' : 'PENDING', native_turn_id: index === 0 ? 'TURN-1' : null,
+          native_review_id: null, mission_id: null, error_code: null, error_message: null,
+        })),
+      };
+      item.execution = current;
+      server.executions[item.plan_id] = current;
+      return reply(current);
+    }
     const executionMatch = url.match(/^\/api\/workspace\/plans\/([^/]+)\/execution$/);
     if (method === 'GET' && executionMatch) {
       const execution = server.executions[executionMatch[1]];
@@ -74,6 +132,17 @@ function harness(overrides = {}) {
       const step = execution.steps.find(item => item.agent_key === agentKey);
       step.status = 'READY_FOR_REVIEW';
       step.native_review_id = body.review_id;
+      if (server.integrated) {
+        if (agentKey === 'agent-a') {
+          execution.status = 'BLOCKED'; execution.current_index = 1;
+          execution.error_code = 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED';
+          execution.steps[1].status = 'BLOCKED';
+        } else {
+          execution.status = 'AWAITING_REVIEW'; execution.current_index = 1;
+          execution.error_code = null;
+          execution.result = { human_approval_required: true, integration_applied: false };
+        }
+      }
       return reply(execution);
     }
     const integrationsMatch = url.match(/^\/api\/dev\/sessions\/([^/]+)\/integrations$/);
@@ -127,14 +196,26 @@ function harness(overrides = {}) {
   };
   const context = {
     document, fetch,
-    window: { NexusCockpit: { projectId: () => server.project, notify: message => toasts.push(message), onProject: callback => listeners.push(callback) } },
+    window: {
+      localStorage: {
+        getItem: key => storage.get(key) || null,
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      NexusCockpit: { projectId: () => server.project, notify: message => toasts.push(message), onProject: callback => listeners.push(callback) },
+    },
     setTimeout(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimeout(timer) { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
   };
   vm.runInNewContext(script, context, { filename: 'cockpit-plans.js' });
+  if (server.integrated) vm.runInNewContext(authoringScript, context, { filename: 'cockpit-plan-authoring.js' });
   const settle = async () => { for (let count = 0; count < 12; count++) await new Promise(resolve => setImmediate(resolve)); };
   return {
     byId, calls, toasts, timers, server, settle,
+    monitor: context.window.NexusPlanMonitor,
+    findButton: label => Object.values(byId).flatMap(item => [item, ...item.descendants()])
+      .find(item => item.tagName === 'BUTTON' && item.textContent === label),
+    findSelect: label => Object.values(byId).flatMap(item => [item, ...item.descendants()])
+      .find(item => item.tagName === 'SELECT' && item.getAttribute('aria-label') === label),
     get posts() { return calls.filter(call => call.method === 'POST'); },
     async selectProject(id = 'demo') { listeners.forEach(callback => callback(id)); await settle(); },
     async selectPlan(id) { byId['review-plan-select'].value = id; byId['review-plan-select'].dispatch('change'); await settle(); },
@@ -199,6 +280,120 @@ test('a project with no plans shows an informational empty state, not an error',
   await app.selectProject();
   assert.match(app.text('review-plan-note'), /Nenhum plano/);
   assert.equal(app.text('review-steps'), 'Nenhum plano selecionado.');
+});
+
+test('a confirmed plan mutation refreshes the picker and pane index without a page reload', async () => {
+  const app = harness();
+  await app.selectProject();
+  const before = app.calls.length;
+  app.server.plans = [plan({ status: 'PROPOSED' })];
+  app.server.panes = panesFor('WSPLAN-1');
+  assert.equal(await app.monitor.refresh('demo', 'WSPLAN-1'), true);
+  await app.settle();
+  assert.equal(app.byId['review-plan-select'].value, 'WSPLAN-1');
+  assert.equal(app.text('review-meta-plan'), 'WSPLAN-1');
+  assert.equal(app.calls.slice(before).filter(call => call.method === 'GET'
+    && call.url.startsWith('/api/workspace/plans?')).length, 1);
+  assert.equal(app.calls.slice(before).filter(call => call.method === 'GET'
+    && call.url.startsWith('/api/workspace/state?')).length, 1);
+  assert.equal(app.posts.length, 0);
+  app.server.plans = [];
+  app.server.panes = [];
+  await app.selectProject('other');
+  const afterSwitch = app.calls.length;
+  assert.equal(await app.monitor.refresh('demo', 'WSPLAN-1'), false);
+  assert.equal(app.calls.length, afterSwitch);
+  assert.equal(app.byId['review-plan-select'].disabled, true);
+});
+
+test('both cockpit modules complete the explicit two-agent Native flow with simulated turns', async () => {
+  const app = harness({ integrated: true });
+  await app.selectProject();
+  app.byId['plan-task-text'].value = 'Implementar e validar api.py';
+  app.byId['plan-agent-a-task'].value = 'Implementar api()';
+  app.byId['plan-agent-a-criteria'].value = 'api() retorna 2';
+  app.byId['plan-agent-b-task'].value = 'Acrescentar teste';
+  app.byId['plan-agent-b-criteria'].value = 'Teste cobre api()';
+  app.byId['plan-dependency'].value = 'after';
+  app.byId['plan-authoring-form'].dispatch('submit');
+  await app.settle();
+  assert.equal(app.server.plans[0].status, 'PROPOSED');
+  assert.deepEqual(app.server.plans[0].agents[1].depends_on, ['agent-a']);
+  assert.equal(app.byId['review-plan-select'].value, 'WSPLAN-1');
+  assert.equal(app.posts.filter(call => call.url.endsWith('/plans/manual')).length, 1);
+  assert.equal(app.posts.some(call => call.url.endsWith('/approve') || call.url.endsWith('/execute')), false);
+
+  const choose = (label, value) => {
+    const select = app.findSelect(label);
+    assert.ok(select, label);
+    select.value = value;
+    select.dispatch('change');
+  };
+  choose('Modelo de Agente A', 'gpt-native');
+  choose('Reasoning effort de Agente A', 'high');
+  choose('Modelo de Agente B', 'gpt-native');
+  choose('Reasoning effort de Agente B', 'low');
+  app.findButton('Aprovar configurações').dispatch('click');
+  await app.settle();
+  assert.equal(app.server.plans[0].status, 'APPROVED');
+  assert.equal(app.server.plans[0].approval.agent_models['agent-a'].effort, 'high');
+  assert.equal(app.server.plans[0].approval.agent_models['agent-b'].effort, 'low');
+  assert.equal(app.server.panes.length, 2);
+  assert.equal(app.byId['review-plan-select'].value, 'WSPLAN-1');
+  assert.equal(app.posts.some(call => call.url.endsWith('/execute')), false);
+
+  app.findButton('Iniciar missão').dispatch('click');
+  await app.settle();
+  const authorized = app.posts.find(call => call.url.endsWith('/execute'));
+  assert.deepEqual(authorized.body.test_profiles, {});
+  assert.equal(app.text('review-meta-status'), 'Executando');
+  const running = app.server.executions['WSPLAN-1'];
+  assert.equal(running.steps[1].status, 'PENDING');
+
+  running.status = 'BLOCKED'; running.error_code = 'AWAITING_NATIVE_REVIEW';
+  running.steps[0].status = 'AWAITING_NATIVE_REVIEW';
+  const firstReview = 'a'.repeat(64);
+  app.server.reviews['DEV-1'] = [{ review_id: firstReview, status: 'REVIEWED' }];
+  await app.tick(3000);
+  assert.equal(app.byId['review-bind'].hidden, false);
+  await app.selectReview(firstReview);
+  await app.click('review-bind-submit');
+  assert.equal(running.steps[1].status, 'BLOCKED');
+  assert.equal(running.error_code, 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED');
+  assert.equal(app.byId['review-handoff'].hidden, false);
+  assert.equal(app.posts.some(call => call.url.endsWith('/resume')), false);
+
+  await app.click('review-handoff-preview');
+  const preview = app.server.handoffs['WSPLAN-1'][0];
+  assert.equal(preview.status, 'PREVIEWED');
+  assert.equal(app.byId['review-handoff-approve'].hidden, false);
+  await app.click('review-handoff-approve');
+  assert.equal(preview.status, 'APPROVED');
+  assert.equal(app.byId['review-handoff-transfer'].hidden, false);
+  await app.click('review-handoff-transfer');
+  assert.equal(preview.status, 'TRANSFERRED');
+  assert.equal(preview.result.integration_applied, false);
+  assert.equal(app.byId['review-resume'].hidden, false);
+  assert.equal(app.posts.some(call => call.url.endsWith('/resume')), false);
+  await app.click('review-resume-button');
+  assert.equal(app.posts.some(call => call.url.endsWith('/resume')), false);
+  await app.click('review-resume-button');
+  assert.equal(running.status, 'RUNNING');
+  assert.equal(running.steps[1].status, 'STARTING');
+
+  running.status = 'BLOCKED'; running.error_code = 'AWAITING_NATIVE_REVIEW';
+  running.steps[1].status = 'AWAITING_NATIVE_REVIEW';
+  running.steps[1].native_turn_id = 'TURN-2';
+  const finalReview = 'b'.repeat(64);
+  app.server.reviews['DEV-2'] = [{ review_id: finalReview, status: 'REVIEWED' }];
+  await app.tick(3000);
+  await app.selectReview(finalReview);
+  await app.click('review-bind-submit');
+  assert.equal(running.status, 'AWAITING_REVIEW');
+  assert.equal(running.result.human_approval_required, true);
+  assert.equal(running.result.integration_applied, false);
+  assert.match(app.text('review-final'), /integração nunca é automática/);
+  assert.equal(app.posts.some(call => /\/(apply|push|merge)\b/.test(call.url)), false);
 });
 
 // -- two-agent plan: initial and running states -----------------------------

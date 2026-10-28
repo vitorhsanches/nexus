@@ -198,7 +198,7 @@
     const code = execution?.error_code || '';
     let text = '';
     if (execution?.status === 'BLOCKED' && code === 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED') {
-      text = 'Handoff pendente: há alterações no agente anterior aguardando preview, aprovação e transferência humana antes de continuar. (Transferência e retomada chegam na próxima etapa.)';
+      text = 'Handoff pendente: há alterações no agente anterior aguardando preview, aprovação e transferência humana antes de continuar.';
     } else if (execution?.status === 'BLOCKED' && code === 'MIXED_BACKEND_HANDOFF_NOT_SUPPORTED') {
       text = 'Bloqueado: esta sequência mistura Codex Native com OmniRoute, o que ainda não é suportado.';
     } else if (execution?.status === 'BLOCKED' && code) {
@@ -411,7 +411,7 @@
     return byPlan;
   };
 
-  const loadProject = async projectId => {
+  const loadProject = async (projectId, preferredPlanId = null) => {
     state.generation++;
     const generation = state.generation;
     stopPolling();
@@ -439,12 +439,24 @@
       if (!stale(generation)) {
         state.plansLoading = false;
         render();
-        const preferred = state.plans.find(plan => plan.execution && !TERMINAL_EXECUTION.has(plan.execution.status))
+        const preferred = state.plans.find(plan => plan.plan_id === preferredPlanId)
+          || state.plans.find(plan => plan.execution && !TERMINAL_EXECUTION.has(plan.execution.status))
           || state.plans[0];
         if (preferred) selectPlan(preferred.plan_id);
       }
     }
   };
+
+  // The authoring module calls this only after a confirmed plan mutation.
+  // Reload both server-owned plan and pane state, then select that plan.
+  window.NexusPlanMonitor = Object.freeze({
+    refresh: async (projectId, planId) => {
+      if (!projectId || projectId !== state.projectId || !planId) return false;
+      await loadProject(projectId, planId);
+      return state.projectId === projectId && state.selectedPlanId === planId
+        && state.plans.some(plan => plan.plan_id === planId);
+    },
+  });
 
   // ---- the one explicit write: bind an existing review to the step ---------
   const bindReview = async () => {
