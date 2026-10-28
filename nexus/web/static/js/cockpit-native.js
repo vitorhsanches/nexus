@@ -153,6 +153,12 @@
   };
   const renderLog = () => {
     const log = $('native-log');
+    // The scrollable ancestor is .native-body, not #native-log itself --
+    // replaceChildren() never touches its parent's scrollTop, so without
+    // this the view silently falls behind every time a new turn is appended
+    // and the reader is left looking at older content below their window.
+    const scrollBody = pane.querySelector('.native-body');
+    const stickToBottom = scrollBody ? scrollBody.scrollHeight - scrollBody.clientHeight - scrollBody.scrollTop < 32 : false;
     if (!state.session) {
       log.replaceChildren(element('div', 'cockpit-event', state.projectId ? 'Selecione uma sessão ou crie uma sessão Codex Native.' : 'Selecione um projeto.'));
       return;
@@ -168,6 +174,7 @@
       return item;
     });
     log.replaceChildren(...(items.length ? items : [element('div', 'cockpit-event', 'Nenhuma tarefa enviada nesta sessão.')]));
+    if (scrollBody && stickToBottom) scrollBody.scrollTop = scrollBody.scrollHeight;
   };
   const renderLive = () => {
     const node = $('native-live');

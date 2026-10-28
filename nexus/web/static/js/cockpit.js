@@ -58,6 +58,7 @@
   let testProfilesLoading = false;
   let testProfilesError = '';
   let projectId = null;
+  let projectReady = false; // true once the selected project's first /state response has landed
   let projects = [];
   let projectsLoaded = false;
   let projectsError = '';
@@ -304,6 +305,14 @@
     clearFivePositioning();
     if (!all.length) {
       grid.dataset.visible = '0';
+      // The empty-grid message must never claim "select a project" while one
+      // is already selected and its first load just hasn't landed yet --
+      // that reads as a broken/reset workspace on every reload.
+      grid.dataset.emptyMessage = !projectId
+        ? 'Selecione um projeto ou crie uma missão para abrir sessões reais.'
+        : !projectReady
+          ? 'Carregando sessões do projeto…'
+          : 'Nenhuma sessão aberta. Crie uma missão ou abra uma sessão Native para começar.';
       grid.style.removeProperty('grid-template-columns');
       grid.style.removeProperty('grid-template-rows');
       groupControls.hidden = true;
@@ -620,6 +629,15 @@
     if (className) item.className = className;
     if (value !== undefined) item.textContent = String(value);
     return item;
+  };
+  // A conversation body re-rendered after new content arrives must follow
+  // the bottom when the reader was already there, exactly like a terminal;
+  // otherwise it stays pinned to the old pixel offset, which drifts away
+  // from "latest message" every time content grows. A reader who scrolled
+  // up to read history is left exactly where they were.
+  const wasNearBottom = body => body.scrollHeight - body.clientHeight - body.scrollTop < 32;
+  const restoreScroll = (body, oldScroll, stickToBottom) => {
+    body.scrollTop = stickToBottom ? body.scrollHeight : oldScroll;
   };
   const api = async (path, options = {}) => {
     const response = await fetch(path, {
@@ -1369,6 +1387,22 @@
       (agent.messages || []).some(message => ['PENDING', 'RUNNING'].includes(message.status)) ||
       agent.session?.status !== 'ACTIVE' || !agent.model || providerUnavailable ||
       (agent.model.startsWith('cc/') || agent.model.startsWith('cx/')) && !composer.effort.value;
+    // Surface the actual reason Enviar is disabled -- the cost/model note set
+    // above says nothing about it, and a blocked control with no visible
+    // explanation is indistinguishable from a broken one. Busy/in-flight
+    // states are left out: those are already shown by the status badge.
+    const sendBlockReason = !workspaceState?.execution_enabled
+      ? 'Execução Development desativada neste servidor (inicie o Nexus com -EnableDevelopment). Você pode revisar, mas não enviar tarefas.'
+      : agent.session?.status !== 'ACTIVE'
+        ? `Sessão ${agent.session?.status || 'ausente'}: envio indisponível.`
+        : !agent.model
+          ? 'Nenhum modelo selecionado para este agente.'
+          : providerUnavailable
+            ? `Conecte ${oauthProvider === 'claude_code' ? 'Claude Code' : 'Codex'} em Configurações → IA para enviar.`
+            : (agent.model.startsWith('cc/') || agent.model.startsWith('cx/')) && !composer.effort.value
+              ? 'Escolha um esforço para este modelo antes de enviar.'
+              : '';
+    if (sendBlockReason) composer.note.textContent = sendBlockReason;
     mission.start.disabled = pending.has(paneId) || !workspaceState?.execution_enabled || agent.busy || activeMission ||
       agent.session?.status !== 'ACTIVE' || !agent.model || !mission.profile.value || providerUnavailable ||
       (agent.model.startsWith('cc/') || agent.model.startsWith('cx/')) && !mission.effort.value ||
@@ -1423,6 +1457,7 @@
     const signature = JSON.stringify([agent.latest_mission, agent.messages, agent.dependencies, history?.events]);
     if (body.dataset.signature === signature) return;
     const oldScroll = body.scrollTop;
+    const stickToBottom = wasNearBottom(body);
     const eventList = element('div', 'cockpit-event-list');
     const mission = agent.latest_mission;
     if (mission) {
@@ -1446,7 +1481,7 @@
     if (!eventList.children.length) eventList.append(element('div', 'cockpit-event', 'Nenhuma atividade registrada para este agente.'));
     body.replaceChildren(pane.querySelector('.terminal-kicker'), conversation, eventList);
     body.dataset.signature = signature;
-    body.scrollTop = oldScroll;
+    restoreScroll(body, oldScroll, stickToBottom);
     pane.querySelector('.minimize').setAttribute('aria-label', `Minimizar ${pane.dataset.title}`);
     pane.querySelector('.expand').setAttribute('aria-label', `Expandir ${pane.dataset.title}`);
     const close = pane.querySelector('.close');
@@ -1567,6 +1602,7 @@
     const signature = JSON.stringify(maestro?.messages || []);
     if (body.dataset.signature !== signature) {
       const oldScroll = body.scrollTop;
+      const stickToBottom = wasNearBottom(body);
       const conversation = element('div', 'cockpit-conversation');
       (maestro?.messages || []).forEach(message => {
         const item = element('div', `cockpit-message ${message.author === 'user' ? 'cockpit-user' : 'cockpit-maestro'}`);
@@ -1579,7 +1615,7 @@
       if (!conversation.children.length) conversation.append(element('div', 'cockpit-event', 'Nenhuma mensagem registrada para este projeto.'));
       body.replaceChildren(maestroPane.querySelector('.terminal-kicker'), conversation);
       body.dataset.signature = signature;
-      body.scrollTop = oldScroll;
+      restoreScroll(body, oldScroll, stickToBottom);
     }
     maestroPane.querySelector('.pane-footer > span:last-child').textContent = 'PLANEJAMENTO · SEM EXECUÇÃO AUTOMÁTICA';
     renderPlanningControls();
@@ -1764,6 +1800,7 @@
         api(`/api/workspace/cost-authorizations?project_id=${query}`)
       ]);
       if (generation !== refreshGeneration || request !== refreshRequest) return;
+      projectReady = true;
       workspaceState = workspace;
       maestroState = maestro;
       costAuthorizations = authData.authorizations || [];
@@ -1788,7 +1825,13 @@
       syncUI();
       void refreshProviderStatus();
     } catch (error) {
-      if (generation === refreshGeneration && request === refreshRequest) document.getElementById('data-status').textContent = `Falha ao carregar: ${error.message}`;
+      if (generation === refreshGeneration && request === refreshRequest) {
+        // A definitive failure is not "still loading": show it as an error,
+        // never leave the grid's empty state implying no project is chosen.
+        projectReady = true;
+        document.getElementById('data-status').textContent = `Falha ao carregar: ${error.message}`;
+        updateLayout();
+      }
     } finally {
       if (generation === refreshGeneration && request === refreshRequest) refreshTimer = setTimeout(refresh, 15000);
     }
@@ -1796,6 +1839,7 @@
   const selectProject = id => {
     stopAllStreams();
     if (projectId) maestroDrafts.set(projectId, maestroComposer.input.value);
+    projectReady = false;
     projectId = id;
     aiSettings = null;
     aiSettingsRequest++;
