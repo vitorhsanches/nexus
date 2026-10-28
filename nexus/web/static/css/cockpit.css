@@ -166,6 +166,11 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .pane-nav-link.active{background:var(--surface-raised);border-left-color:var(--accent);color:var(--accent-strong)}
 .pane-nav-dot{width:5px;height:5px;border-radius:50%;background:var(--text-dim);flex:none}
 .pane-nav-link.active .pane-nav-dot{background:var(--accent)}
+.pane-nav-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pane-nav-status{flex:none;margin-left:auto;max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim);font-size:9px}
+.pane-nav-status.is-ready{color:var(--accent-strong)}
+.pane-nav-status.is-waiting{color:var(--warning)}
+.pane-nav-status:empty{display:none}
 .pane-nav-link.is-minimized .pane-nav-name{opacity:.65}
 .pane-grid{grid-template-rows:none;grid-auto-rows:minmax(250px,1fr);grid-template-columns:repeat(2,minmax(0,1fr));align-content:stretch}
 .pane-grid[data-count="1"]{grid-template-columns:minmax(0,1fr)}

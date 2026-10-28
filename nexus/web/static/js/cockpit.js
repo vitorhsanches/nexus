@@ -94,10 +94,15 @@
     const label = document.createElement('span');
     label.className = 'pane-nav-name';
     label.textContent = paneTitle(pane);
-    button.append(dot, label);
+    const status = document.createElement('span');
+    status.className = 'pane-nav-status';
+    button.append(dot, label, status);
     return button;
   };
 
+  // Mirrors each pane's own status badge (the single source of truth already
+  // rendered by updateAgentPane/renderSystemPanes) into the sidebar row --
+  // never a second, independently computed status.
   const updateSidebar = () => {
     const existing = new Map([...paneNav.children].map(button => [button.dataset.paneTarget, button]));
     panes().forEach(pane => {
@@ -105,6 +110,13 @@
       button.classList.toggle('active', pane.classList.contains('selected'));
       button.classList.toggle('is-minimized', pane.classList.contains('minimized'));
       button.querySelector('.pane-nav-name').textContent = paneTitle(pane);
+      const statusNode = button.querySelector('.pane-nav-status');
+      if (statusNode) {
+        const badge = pane.querySelector('.pane-status');
+        statusNode.textContent = (badge?.lastChild?.textContent || '').trim();
+        statusNode.classList.toggle('is-ready', Boolean(badge?.classList.contains('ready')));
+        statusNode.classList.toggle('is-waiting', Boolean(badge?.classList.contains('waiting')));
+      }
       if (pane.classList.contains('selected')) button.setAttribute('aria-current', 'true');
       else button.removeAttribute('aria-current');
       paneNav.append(button);
