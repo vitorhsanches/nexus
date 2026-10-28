@@ -283,7 +283,8 @@ test('compact workspace shows only five real agent panes in a resizable three pl
   assert.equal(visible[1].style.top, visible[2].style.top);
   assert.equal(visible[3].style.top, visible[4].style.top);
   assert.notEqual(visible[0].style.top, visible[3].style.top);
-  assert.equal(visible[0].style.width, visible[1].style.width);
+  assert.notEqual(visible[0].style.width, visible[1].style.width);
+  assert.ok(Number.parseFloat(visible[0].style.width) > Number.parseFloat(visible[1].style.width));
   assert.equal(visible[3].style.width, visible[4].style.width);
   const before = visible[0].style.width;
   app.grid.querySelector('.grid-divider.vertical').dispatch('keydown', undefined, { key: 'ArrowRight' });

@@ -221,7 +221,9 @@
   };
   const drawFivePaneLayout = visible => {
     const key = visible.map(pane => pane.dataset.pane).join(',');
-    const saved = fiveLayouts.get(key) || { top: [1 / 3, 2 / 3], bottom: .5, row: .5 };
+    // Flowbyte-style cockpit: the primary terminal gets a little more width,
+    // while the two lower panes remain balanced for side-by-side review.
+    const saved = fiveLayouts.get(key) || { top: [.37, .69], bottom: .5, row: .56 };
     const width = grid.clientWidth;
     const height = grid.clientHeight;
     const topWidths = [saved.top[0] * width, (saved.top[1] - saved.top[0]) * width, (1 - saved.top[1]) * width];

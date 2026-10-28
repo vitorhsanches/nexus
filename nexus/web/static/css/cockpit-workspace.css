@@ -27,15 +27,15 @@ html,body{height:100%;overflow:hidden}
 .manual-plan-nav .mission-link small{display:block;margin-top:2px;font:8px 'Cascadia Code',Consolas,monospace;color:var(--text-dim)}
 .sidebar-spacer{min-height:16px}.sidebar-footer{min-height:40px;margin-top:auto}
 .workspace{height:calc(100dvh - 29px)!important;min-height:0!important;overflow:hidden!important;background:var(--bg)}
-.topbar{height:41px;min-height:41px;padding:0 11px;flex-wrap:nowrap;border-bottom:1px solid var(--border-soft)}
+.topbar{height:34px;min-height:34px;padding:0 11px;flex-wrap:nowrap;border-bottom:1px solid var(--border-soft)}
 .topbar-summary{gap:10px}.topbar-summary .overview-stat span{font-size:8px}
 .topbar-data-status{max-width:150px}.topbar-maestro{font-size:9px}
-.workspace-tabs{display:flex;align-items:stretch;gap:0;height:34px;min-height:34px;padding:0 8px;overflow-x:auto;overflow-y:hidden;background:var(--surface);border-bottom:1px solid var(--border-soft);scrollbar-width:thin}
+.workspace-tabs{display:flex;align-items:stretch;gap:0;height:31px;min-height:31px;padding:0 8px;overflow-x:auto;overflow-y:hidden;background:var(--surface);border-bottom:1px solid var(--border-soft);scrollbar-width:thin}
 .workspace-tab{display:flex;align-items:center;gap:6px;max-width:175px;min-width:75px;padding:0 11px;border:0;border-right:1px solid var(--border-soft);border-bottom:2px solid transparent;background:transparent;color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .workspace-tab[aria-selected="true"]{color:var(--text);background:var(--terminal);border-bottom-color:var(--accent)}
 .workspace-tab:hover{color:var(--accent-strong)}.workspace-tab-dot{width:5px;height:5px;flex:none;border-radius:50%;background:var(--text-dim)}
 .workspace-tab[aria-selected="true"] .workspace-tab-dot{background:var(--accent)}
-.section-heading{min-height:37px;margin:0;padding:0 10px;border-bottom:1px solid var(--border-soft);background:var(--bg)}
+.section-heading{min-height:29px;margin:0;padding:0 10px;border-bottom:1px solid var(--border-soft);background:var(--bg)}
 .section-heading h2{font-size:11px;margin:0}.section-kicker{font-size:8px}.view-controls{gap:5px}
 .restore-layout-button,.group-controls button{height:22px}.add-pane-button{padding:4px 8px}
 .pane-grid{flex:1 1 0;min-height:0!important;margin:0!important;padding:3px;gap:3px;background:var(--border-soft);border:0}
@@ -49,6 +49,12 @@ html,body{height:100%;overflow:hidden}
 .pane-grid .pane-footer{height:20px;min-height:20px;background:var(--surface);padding:0 8px}
 .pane-grid .foot-path{min-width:0;max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pane-grid .pane-body{background:var(--terminal)}
+.pane-grid .cockpit-composer{max-height:27%;padding:4px 8px;gap:3px}
+.pane-grid .cockpit-input{min-height:24px;max-height:58px;padding:4px 6px}
+.pane-grid .cockpit-send{min-height:22px;padding:3px 7px}
+.pane-grid .cockpit-compose-controls{gap:3px 6px}
+.pane-grid .cockpit-mission-details{margin-top:3px}
+.pane-grid .cockpit-mission-details textarea{min-height:28px;max-height:54px}
 .legacy-review-summary{margin:7px 10px;border:1px solid var(--border-soft)}
 .pane-grid .pane-identity strong{font-size:10px}.pane-grid .pane-status{font-size:8px}
 .grid-divider::after{background:var(--border-strong)}
