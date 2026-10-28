@@ -48,6 +48,10 @@
     pollTimer: null,
     reviews: { sessionId: null, items: [], error: '', loading: false },
     bindBusy: false, bindError: '',
+    // The relevant handoff record is re-derived from the server on every
+    // execution load -- never trusted across polls or reloads on its own.
+    handoff: null, handoffBusy: false, handoffError: '',
+    resumeArmed: false, resumeBusy: false, resumeError: '',
   };
 
   const element = (tag, className, text) => {
@@ -87,6 +91,28 @@
   const paneFor = (planId, agentKey) => state.panesByPlan.get(planId)?.get(agentKey) || null;
   const selectedPlan = () => state.plans.find(plan => plan.plan_id === state.selectedPlanId) || null;
   const stepAwaitingReview = () => (state.execution?.steps || []).find(step => step.status === 'AWAITING_NATIVE_REVIEW') || null;
+  // A pending dependency-handoff block: the one case where the coordinator
+  // itself requires a human-approved transfer before the next agent may
+  // launch (coordinator.py's verified_dependency path). Evidence id is
+  // read generically (native_review_id or mission_id, whichever the
+  // predecessor actually used) -- the HTTP contract accepts both under
+  // the historical "source_mission_id" field name (verified in P5.UIC2).
+  const pendingHandoffInfo = () => {
+    const execution = state.execution;
+    if (!execution || execution.status !== 'BLOCKED' || execution.error_code !== 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED') return null;
+    const index = execution.current_index;
+    const steps = execution.steps;
+    if (!Number.isInteger(index) || index < 1 || index >= steps.length) return null;
+    const source = steps[index - 1];
+    const target = steps[index];
+    const evidenceId = source.native_review_id || source.mission_id;
+    if (!evidenceId) return null;
+    return { source, target, evidenceId };
+  };
+  const matchingHandoff = (handoffs, info) => handoffs.find(item => item.source_pane_id === info.source.pane_id
+    && item.target_pane_id === info.target.pane_id
+    && (item.source_native_review_id || item.source_mission_id) === info.evidenceId
+    && ['PREVIEWED', 'APPROVED', 'TRANSFERRED'].includes(item.status)) || null;
 
   // ---- rendering -----------------------------------------------------------
   const renderPlanPicker = () => {
@@ -222,6 +248,56 @@
     setNote('review-bind-error', state.bindError, true);
   };
 
+  const renderHandoff = () => {
+    const box = $('review-handoff');
+    if (!box) return;
+    const info = pendingHandoffInfo();
+    if (!info) { box.hidden = true; return; }
+    box.hidden = false;
+    $('review-handoff-source').textContent = info.source.agent_key;
+    $('review-handoff-target').textContent = info.target.agent_key;
+    const handoff = state.handoff;
+    const snapshot = $('review-handoff-snapshot');
+    const previewBtn = $('review-handoff-preview');
+    const approveBtn = $('review-handoff-approve');
+    const transferBtn = $('review-handoff-transfer');
+    if (!handoff || handoff.error_code) {
+      snapshot.replaceChildren(element('div', '', handoff?.error_code
+        ? `O handoff anterior ficou obsoleto (${handoff.error_code}${handoff.error_message ? `: ${handoff.error_message}` : ''}); prepare um novo.`
+        : 'Nenhum handoff preparado ainda para esta dependência.'));
+      previewBtn.hidden = false; previewBtn.disabled = state.handoffBusy;
+      approveBtn.hidden = true; transferBtn.hidden = true;
+    } else {
+      const evidenceLabel = String(handoff.source_native_review_id || handoff.source_mission_id || '').slice(0, 12);
+      snapshot.replaceChildren(
+        element('div', '', `Revisão utilizada: ${evidenceLabel}`),
+        element('div', '', `${handoff.files.length} arquivo(s): ${handoff.files.map(file => `${file.status} ${file.path}`).join(', ') || '—'}`),
+        element('div', '', `Fingerprint SHA-256: ${handoff.snapshot_fingerprint}`),
+        element('div', '', `Estado da transferência: ${handoff.status}`),
+      );
+      previewBtn.hidden = true;
+      approveBtn.hidden = handoff.status !== 'PREVIEWED';
+      approveBtn.disabled = state.handoffBusy;
+      transferBtn.hidden = handoff.status !== 'APPROVED';
+      transferBtn.disabled = state.handoffBusy;
+    }
+    setNote('review-handoff-error', state.handoffError, true);
+  };
+
+  const renderResume = () => {
+    const box = $('review-resume');
+    if (!box) return;
+    const execution = state.execution;
+    const eligible = Boolean(execution?.resume?.eligible);
+    if (!eligible) { box.hidden = true; state.resumeArmed = false; return; }
+    box.hidden = false;
+    const button = $('review-resume-button');
+    button.disabled = state.resumeBusy;
+    button.textContent = state.resumeArmed ? 'Confirmar retomada' : 'Retomar execução';
+    $('review-resume-cancel').hidden = !state.resumeArmed || state.resumeBusy;
+    setNote('review-resume-error', state.resumeError, true);
+  };
+
   const renderChrome = () => {
     const execution = state.execution;
     const plan = selectedPlan();
@@ -238,7 +314,9 @@
     $('review-foot-right').textContent = execution ? 'LEITURA + VÍNCULO EXPLÍCITO DE REVISÃO' : 'AGUARDANDO DADOS DO NEXUS';
   };
 
-  const render = () => { renderPlanPicker(); renderSteps(); renderHandoffNote(); renderFinal(); renderBind(); renderChrome(); };
+  const render = () => {
+    renderPlanPicker(); renderSteps(); renderHandoffNote(); renderHandoff(); renderResume(); renderFinal(); renderBind(); renderChrome();
+  };
 
   // ---- loading --------------------------------------------------------------
   const stopPolling = () => { clearTimeout(state.pollTimer); state.pollTimer = null; };
@@ -255,11 +333,13 @@
       const execution = await api(`/api/workspace/plans/${encodeURIComponent(planId)}/execution`);
       if (stale(generation) || state.selectedPlanId !== planId) return;
       state.execution = execution; state.executionError = '';
+      await loadHandoffFor(generation, planId);
     } catch (error) {
       if (stale(generation) || state.selectedPlanId !== planId) return;
       // A plan with no execution authorization yet is not a failure.
       if (error.code === 'EXECUTION_NOT_AUTHORIZED') state.execution = null;
       else state.executionError = error.message;
+      state.handoff = null;
     } finally {
       if (!stale(generation) && state.selectedPlanId === planId) {
         state.executionLoading = false;
@@ -289,6 +369,23 @@
     }
   };
 
+  // The relevant handoff (if any) is re-derived from GET .../handoffs on
+  // every execution load -- never carried forward across a poll, an action,
+  // a reload or a project switch on client memory alone.
+  const loadHandoffFor = async (generation, planId) => {
+    const info = pendingHandoffInfo();
+    if (!info) { state.handoff = null; return; }
+    try {
+      const data = await api(`/api/workspace/plans/${encodeURIComponent(planId)}/handoffs`);
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      state.handoff = matchingHandoff(data.handoffs || [], info);
+    } catch (error) {
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      state.handoff = null;
+      state.handoffError = `Falha ao consultar handoffs: ${error.message}`;
+    }
+  };
+
   const selectPlan = (planId, { skipRender = false } = {}) => {
     if (planId === state.selectedPlanId) return;
     state.generation++;
@@ -298,6 +395,8 @@
     state.execution = null; state.executionError = ''; state.executionLoading = false;
     state.reviews = { sessionId: null, items: [], error: '', loading: false };
     state.bindError = '';
+    state.handoff = null; state.handoffBusy = false; state.handoffError = '';
+    state.resumeArmed = false; state.resumeBusy = false; state.resumeError = '';
     if (!skipRender) render();
     if (state.selectedPlanId) void loadExecution(generation, state.selectedPlanId);
   };
@@ -320,6 +419,7 @@
       projectId, plans: [], plansError: '', plansLoading: Boolean(projectId),
       panesByPlan: new Map(), selectedPlanId: null, execution: null, executionError: '', executionLoading: false,
       reviews: { sessionId: null, items: [], error: '', loading: false }, bindBusy: false, bindError: '',
+      handoff: null, handoffBusy: false, handoffError: '', resumeArmed: false, resumeBusy: false, resumeError: '',
     });
     render();
     if (!projectId) return;
@@ -361,6 +461,7 @@
       );
       if (stale(generation) || state.selectedPlanId !== planId) return;
       state.execution = execution;
+      await loadHandoffFor(generation, planId);
       setNote('review-bind-note', `Revisão ${String(reviewId).slice(0, 12)} vinculada ao passo ${step.agent_key}.`);
       host.notify(`Revisão vinculada ao passo ${step.agent_key}.`);
       render();
@@ -377,6 +478,109 @@
     }
   };
 
+  // ---- handoff: preview, approve, transfer -- each an explicit, single
+  // click, never chained automatically into the next step. ------------------
+  const previewHandoff = async () => {
+    const info = pendingHandoffInfo();
+    if (!info || state.handoffBusy) return;
+    const planId = state.selectedPlanId;
+    const generation = state.generation;
+    state.handoffBusy = true; state.handoffError = ''; renderHandoff();
+    try {
+      const result = await api('/api/workspace/handoffs/preview', { method: 'POST', body: {
+        source_pane_id: info.source.pane_id, target_pane_id: info.target.pane_id, source_mission_id: info.evidenceId,
+      } });
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      state.handoff = result;
+      host.notify('Handoff preparado. Revise o snapshot antes de aprovar.');
+    } catch (error) {
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      state.handoffError = error.message;
+    } finally {
+      state.handoffBusy = false;
+      if (!stale(generation) && state.selectedPlanId === planId) renderHandoff();
+    }
+  };
+  const approveHandoff = async () => {
+    const handoff = state.handoff;
+    if (!handoff || handoff.status !== 'PREVIEWED' || handoff.error_code || state.handoffBusy) return;
+    const planId = state.selectedPlanId;
+    const generation = state.generation;
+    state.handoffBusy = true; state.handoffError = ''; renderHandoff();
+    try {
+      // Exactly the fingerprint and pane ids the preview itself returned --
+      // never recomputed or guessed by this pane.
+      const result = await api(`/api/workspace/handoffs/${encodeURIComponent(handoff.handoff_id)}/approve`, { method: 'POST', body: {
+        fingerprint: handoff.snapshot_fingerprint, source_pane_id: handoff.source_pane_id, target_pane_id: handoff.target_pane_id,
+      } });
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      state.handoff = result;
+      host.notify('Handoff aprovado.');
+    } catch (error) {
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      // A stale/changed snapshot surfaces here as the server's own error
+      // (e.g. HANDOFF_SNAPSHOT_CHANGED) -- shown as-is, never retried.
+      state.handoffError = error.message;
+    } finally {
+      state.handoffBusy = false;
+      if (!stale(generation) && state.selectedPlanId === planId) renderHandoff();
+    }
+  };
+  const transferHandoff = async () => {
+    const handoff = state.handoff;
+    if (!handoff || handoff.status !== 'APPROVED' || handoff.error_code || state.handoffBusy) return;
+    const planId = state.selectedPlanId;
+    const generation = state.generation;
+    state.handoffBusy = true; state.handoffError = ''; renderHandoff();
+    try {
+      const result = await api(`/api/workspace/handoffs/${encodeURIComponent(handoff.handoff_id)}/transfer`, { method: 'POST' });
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      state.handoff = result;
+      host.notify('Alterações transferidas.');
+      // Refresh the plan's own execution now, not just on the next poll
+      // tick, so resume eligibility reflects the transfer immediately.
+      await loadExecution(generation, planId);
+      return;
+    } catch (error) {
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      state.handoffError = error.message;
+    } finally {
+      state.handoffBusy = false;
+      if (!stale(generation) && state.selectedPlanId === planId) renderHandoff();
+    }
+  };
+
+  // ---- resume: an explicit two-click confirmation, never chained after
+  // transfer and never launching a turn directly from this pane. -----------
+  const armResume = () => { state.resumeArmed = true; state.resumeError = ''; renderResume(); };
+  const cancelResume = () => { state.resumeArmed = false; state.resumeError = ''; renderResume(); };
+  const confirmResume = async () => {
+    const execution = state.execution;
+    if (!execution?.resume?.eligible || state.resumeBusy) return;
+    const planId = state.selectedPlanId;
+    const generation = state.generation;
+    state.resumeBusy = true; state.resumeError = ''; renderResume();
+    try {
+      const result = await api(`/api/workspace/plans/${encodeURIComponent(planId)}/resume`, { method: 'POST' });
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      state.execution = result;
+      state.resumeArmed = false;
+      host.notify('Execução retomada; acompanhando o próximo agente.');
+      render();
+      schedulePoll(generation);
+    } catch (error) {
+      if (stale(generation) || state.selectedPlanId !== planId) return;
+      // The real backend eligibility error is shown; the UI stays
+      // conservative and offers no fallback action of its own.
+      state.resumeError = error.message;
+      state.resumeArmed = false;
+    } finally {
+      state.resumeBusy = false;
+      if (!stale(generation) && state.selectedPlanId === planId) renderResume();
+    }
+  };
+  const onResumeClick = () => { if (state.resumeArmed) void confirmResume(); else armResume(); };
+
   $('review-plan-select')?.addEventListener('change', event => { selectPlan(event.currentTarget.value); });
   $('review-bind-select')?.addEventListener('change', renderBind);
   $('review-bind-refresh')?.addEventListener('click', () => {
@@ -384,6 +588,11 @@
     void loadReviewsForAwaitingStep(state.generation);
   });
   $('review-bind-submit')?.addEventListener('click', () => { void bindReview(); });
+  $('review-handoff-preview')?.addEventListener('click', () => { void previewHandoff(); });
+  $('review-handoff-approve')?.addEventListener('click', () => { void approveHandoff(); });
+  $('review-handoff-transfer')?.addEventListener('click', () => { void transferHandoff(); });
+  $('review-resume-button')?.addEventListener('click', onResumeClick);
+  $('review-resume-cancel')?.addEventListener('click', cancelResume);
 
   host.onProject(projectId => { void loadProject(projectId); });
   render();

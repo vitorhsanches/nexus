@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nexus.dev.service import DevServiceError, create_dev_session
 from nexus.dev.worktree import read_worktree_diff
@@ -310,3 +311,51 @@ def test_native_dependency_fails_closed_without_a_transfer(native_env):
     with pytest.raises(DevServiceError) as error:
         handoff.verified_dependency(native_env["plan"], source_step, target_step)
     assert error.value.code == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
+
+
+# P5.UIC2 ETAPA 1: the HTTP contract for POST /api/workspace/handoffs/preview
+# names its evidence field "source_mission_id" for historical (OmniRoute)
+# reasons, but the route itself (and handoff.preview() underneath) accepts
+# any source_evidence_id, native or mission, by value alone. No existing
+# test exercised this through the actual HTTP layer -- only through
+# handoff.preview() called directly as a Python function -- so this proves
+# the contract really does work end to end, not just that the field accepts
+# a 64-char string.
+
+
+def _client() -> TestClient:
+    from nexus.web.app import app
+
+    return TestClient(app, base_url="http://127.0.0.1")
+
+
+def test_preview_route_accepts_native_review_evidence_under_the_historical_field_name(native_env):
+    source = native_env["source"]["worktree_path"]
+    (Path(source) / "calc.py").write_text("def multiply(a, b):\n    return a * b\n", encoding="utf-8")
+    review_id = _ready(native_env)
+    response = _client().post("/api/workspace/handoffs/preview", json={
+        "source_pane_id": native_env["source_pane"], "target_pane_id": native_env["target_pane"],
+        "source_mission_id": review_id,
+    })
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["source_backend"] == "codex_native"
+    assert body["source_native_review_id"] == review_id
+    assert body["source_mission_id"] is None
+    assert body["status"] == "PREVIEWED"
+
+
+def test_preview_route_rejects_a_review_id_that_does_not_belong_to_the_named_source_pane(native_env):
+    other = create_dev_session("demo", backend="codex_native")
+    review_id = _review_id("wrong-session-http")
+    dev_integrations.save_review(
+        review_id=review_id, dev_session_id=other["session_id"], project_id="demo",
+        base_sha=other["base_sha"], target_head=other["base_sha"], target_branch="master",
+        snapshot={"diff": {"files": [], "truncated": False, "review_id": "fingerprint"}, "approval_ready": True},
+    )
+    response = _client().post("/api/workspace/handoffs/preview", json={
+        "source_pane_id": native_env["source_pane"], "target_pane_id": native_env["target_pane"],
+        "source_mission_id": review_id,
+    })
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "HANDOFF_REVIEW_MISMATCH"

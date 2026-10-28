@@ -192,6 +192,24 @@
               <p class="native-note" id="review-bind-note" role="status"></p>
             </div>
             <p class="native-note" id="review-handoff-note" role="status"></p>
+            <div id="review-handoff" class="review-handoff" hidden>
+              <p class="native-note">Handoff de <strong id="review-handoff-source"></strong> para <strong id="review-handoff-target"></strong></p>
+              <div id="review-handoff-snapshot" class="native-note"></div>
+              <div class="native-actions">
+                <button class="cockpit-send" id="review-handoff-preview" type="button">Preparar handoff</button>
+                <button class="cockpit-send" id="review-handoff-approve" type="button" hidden>Aprovar handoff</button>
+                <button class="cockpit-send" id="review-handoff-transfer" type="button" hidden>Transferir alterações</button>
+              </div>
+              <p class="cockpit-compose-error" id="review-handoff-error" role="status"></p>
+            </div>
+            <div id="review-resume" class="review-resume" hidden>
+              <div class="native-actions">
+                <button class="cockpit-send" id="review-resume-button" type="button" disabled>Retomar execução</button>
+                <button class="cockpit-send" id="review-resume-cancel" type="button" hidden>Cancelar</button>
+              </div>
+              <p class="cockpit-compose-error" id="review-resume-error" role="status"></p>
+              <p class="native-note" id="review-resume-note" role="status"></p>
+            </div>
             <p class="native-note" id="review-final" role="status"></p>
           </div>
           <div class="pane-footer"><span class="foot-path" id="review-foot">◇ &nbsp;workspace / revisão</span><span id="review-foot-right">AGUARDANDO DADOS DO NEXUS</span></div>

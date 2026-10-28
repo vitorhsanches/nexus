@@ -41,16 +41,18 @@ function harness(overrides = {}) {
     panes: [],
     executions: {}, // plan_id -> execution object (coordinator.state shape)
     reviews: {}, // session_id -> integrations list
-    fail: {}, // "METHOD url-substring" -> {code, message}
+    handoffs: {}, // plan_id -> [handoff record]
+    nextHandoffId: 1,
+    fail: {}, // "METHOD url-substring" -> {code, message, status}
     ...overrides,
   };
   const reply = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+  const planIdForPane = paneId => server.panes.find(pane => pane.pane_id === paneId)?.plan_id;
   const fetch = async (url, options = {}) => {
     const method = options.method || 'GET';
     const body = options.body ? JSON.parse(options.body) : null;
     calls.push({ method, url, body });
-    assert.doesNotMatch(url, /\/(apply|reject|transfer|resume|handoffs\/preview|handoffs\/[^/]+\/approve)\b/,
-      'the plan monitor must never call Apply/Reject, transfer, resume or create/approve a handoff');
+    assert.doesNotMatch(url, /\/(apply|reject)\b/, 'the plan monitor must never call Apply or Reject');
     assert.ok(!(method === 'POST' && url.endsWith('/reviews')), 'the plan monitor must never create a review itself');
     const failure = Object.entries(server.fail).find(([pattern]) => `${method} ${url}`.includes(pattern));
     if (failure) {
@@ -76,6 +78,51 @@ function harness(overrides = {}) {
     }
     const integrationsMatch = url.match(/^\/api\/dev\/sessions\/([^/]+)\/integrations$/);
     if (method === 'GET' && integrationsMatch) return reply({ integrations: server.reviews[integrationsMatch[1]] || [] });
+    const handoffsListMatch = url.match(/^\/api\/workspace\/plans\/([^/]+)\/handoffs$/);
+    if (method === 'GET' && handoffsListMatch) return reply({ handoffs: server.handoffs[handoffsListMatch[1]] || [] });
+    if (method === 'POST' && url === '/api/workspace/handoffs/preview') {
+      const planId = planIdForPane(body.source_pane_id);
+      const handoff = {
+        handoff_id: `HANDOFF-${server.nextHandoffId++}`, plan_id: planId,
+        source_pane_id: body.source_pane_id, target_pane_id: body.target_pane_id,
+        source_backend: 'codex_native', source_native_review_id: body.source_mission_id, source_mission_id: null,
+        snapshot_fingerprint: 'f'.repeat(64), status: 'PREVIEWED', error_code: null, error_message: null,
+        files: [{ path: 'api.py', status: 'modified', sha256: 'a'.repeat(64), size: 10 }],
+        created_at: 't-preview', approved_at: null, started_at: null, finished_at: null, result: null,
+      };
+      server.handoffs[planId] = [handoff, ...(server.handoffs[planId] || [])];
+      return reply(handoff);
+    }
+    const approveMatch = url.match(/^\/api\/workspace\/handoffs\/([^/]+)\/approve$/);
+    if (method === 'POST' && approveMatch) {
+      const handoff = Object.values(server.handoffs).flat().find(item => item.handoff_id === approveMatch[1]);
+      if (body.fingerprint !== handoff.snapshot_fingerprint) {
+        return reply({ detail: { code: 'HANDOFF_SNAPSHOT_CHANGED', message: 'Snapshot changed; create and approve a new preview.' } }, 409);
+      }
+      handoff.status = 'APPROVED'; handoff.approved_at = 't-approve';
+      return reply(handoff);
+    }
+    const transferMatch = url.match(/^\/api\/workspace\/handoffs\/([^/]+)\/transfer$/);
+    if (method === 'POST' && transferMatch) {
+      const handoff = Object.values(server.handoffs).flat().find(item => item.handoff_id === transferMatch[1]);
+      handoff.status = 'TRANSFERRED'; handoff.started_at = 't-transfer'; handoff.finished_at = 't-transfer';
+      handoff.result = { files: handoff.files, verified: true, integration_applied: false };
+      const planId = handoff.plan_id;
+      const execution = server.executions[planId];
+      if (execution) execution.resume = { eligible: true, pending_agent: execution.steps[execution.current_index]?.agent_key };
+      return reply(handoff);
+    }
+    const resumeMatch = url.match(/^\/api\/workspace\/plans\/([^/]+)\/resume$/);
+    if (method === 'POST' && resumeMatch) {
+      const execution = server.executions[resumeMatch[1]];
+      if (!execution?.resume?.eligible) {
+        return reply({ detail: { code: 'RESUME_NOT_ALLOWED', message: 'Only an unresolved handoff block can be resumed.' } }, 409);
+      }
+      execution.status = 'RUNNING'; execution.error_code = null; execution.error_message = null;
+      execution.steps[execution.current_index].status = 'STARTING';
+      execution.resume = { eligible: false };
+      return reply(execution);
+    }
     throw new Error(`Unexpected API call: ${method} ${url}`);
   };
   const context = {
@@ -98,6 +145,7 @@ function harness(overrides = {}) {
       timers.splice(index, 1)[0].callback();
       await settle();
     },
+    async click(id) { byId[id].dispatch('click'); await settle(); },
     text: id => byId[id].textContent,
   };
 }
@@ -121,6 +169,17 @@ const execution = (overrides = {}) => ({
   steps: [
     { agent_key: 'api', ordinal: 0, pane_id: 'PANE-API', status: 'RUNNING', mission_id: null, native_turn_id: 'TURN-1', native_review_id: null, error_code: null, error_message: null },
     { agent_key: 'tests', ordinal: 1, pane_id: 'PANE-TESTS', status: 'PENDING', mission_id: null, native_turn_id: null, native_review_id: null, error_code: null, error_message: null },
+  ],
+  ...overrides,
+});
+const EVIDENCE_REVIEW_ID = 'r'.repeat(64);
+const blockedExecution = (overrides = {}) => ({
+  plan_id: 'WSPLAN-1', project_id: 'demo', status: 'BLOCKED', current_index: 1,
+  error_code: 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED', error_message: 'The exact source evidence has no completed handoff.',
+  result: null, resume: { eligible: false },
+  steps: [
+    { agent_key: 'api', ordinal: 0, pane_id: 'PANE-API', status: 'READY_FOR_REVIEW', mission_id: null, native_turn_id: 'TURN-1', native_review_id: EVIDENCE_REVIEW_ID, error_code: null, error_message: null },
+    { agent_key: 'tests', ordinal: 1, pane_id: 'PANE-TESTS', status: 'BLOCKED', mission_id: null, native_turn_id: null, native_review_id: null, error_code: 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED', error_message: 'not transferred' },
   ],
   ...overrides,
 });
@@ -240,15 +299,19 @@ test('an invalid review surfaces the exact server error and binds nothing', asyn
 
 // -- handoff pending, failures, uncertain results ----------------------------
 
-test('a handoff pending block is shown as read-only, with no transfer or resume control anywhere', async () => {
+test('a handoff pending block is shown as read-only until the operator acts, with no automatic preview/approve/transfer/resume', async () => {
   const plans = [plan()];
-  const executions = { 'WSPLAN-1': execution({
-    status: 'BLOCKED', error_code: 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED', error_message: 'not transferred',
-  }) };
+  const executions = { 'WSPLAN-1': blockedExecution() };
   const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
   await app.selectProject();
   assert.match(app.text('review-handoff-note'), /Handoff pendente/);
-  assert.doesNotMatch(reviewMarkup, /transfer|resume/i);
+  assert.equal(app.byId['review-handoff'].hidden, false);
+  assert.equal(app.byId['review-handoff-preview'].hidden, false);
+  assert.equal(app.byId['review-handoff-approve'].hidden, true);
+  assert.equal(app.byId['review-handoff-transfer'].hidden, true);
+  assert.equal(app.byId['review-resume'].hidden, true); // not eligible before a transfer
+  assert.ok(!app.posts.some(call => /handoffs\/preview|\/approve$|\/transfer$|\/resume$/.test(call.url)),
+    'nothing is posted automatically from polling or rendering alone');
 });
 
 test('a failed plan is shown as an error, never retried automatically, and polling stops', async () => {
@@ -336,4 +399,270 @@ test('a legacy OmniRoute-only plan renders normally and never shows the native b
   assert.match(app.text('review-steps'), /Backend omniroute/);
   assert.equal(app.byId['review-bind'].hidden, true);
   assert.ok(!app.calls.some(call => call.url.includes('/integrations')));
+});
+
+// -- P5.UIC2: handoff preview / approve / transfer, and resume --------------
+
+test('preview is called only on explicit click and shows origin, target, review, files and fingerprint', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  assert.equal(app.posts.some(call => call.url === '/api/workspace/handoffs/preview'), false);
+  await app.click('review-handoff-preview');
+  const post = app.posts.find(call => call.url === '/api/workspace/handoffs/preview');
+  assert.ok(post, 'preview was called after the explicit click');
+  assert.deepEqual(post.body, { source_pane_id: 'PANE-API', target_pane_id: 'PANE-TESTS', source_mission_id: EVIDENCE_REVIEW_ID });
+  assert.equal(app.byId['review-handoff-source'].textContent, 'api');
+  assert.equal(app.byId['review-handoff-target'].textContent, 'tests');
+  const snapshot = app.text('review-handoff-snapshot');
+  assert.match(snapshot, new RegExp(EVIDENCE_REVIEW_ID.slice(0, 12)));
+  assert.match(snapshot, /modified api\.py/);
+  assert.match(snapshot, /f{64}/);
+  assert.match(snapshot, /PREVIEWED/);
+  assert.equal(app.byId['review-handoff-preview'].hidden, true);
+  assert.equal(app.byId['review-handoff-approve'].hidden, false);
+});
+
+test('a rejected preview shows the real server error and offers no approve control', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({
+    plans, panes: panesFor('WSPLAN-1'), executions,
+    fail: { 'POST /api/workspace/handoffs/preview': { code: 'HANDOFF_TARGET_DIRTY', message: 'The target worktree already contains changes.' } },
+  });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  assert.match(app.text('review-handoff-error'), /already contains changes/);
+  assert.equal(app.byId['review-handoff-error'].classList.contains('is-error'), true);
+  assert.equal(app.byId['review-handoff-approve'].hidden, true);
+  assert.equal(app.byId['review-handoff-preview'].hidden, false); // still offered: nothing was created
+});
+
+test('approval sends exactly the fingerprint and panes the preview returned', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  await app.click('review-handoff-approve');
+  const post = app.posts.find(call => call.url.endsWith('/approve'));
+  assert.ok(post);
+  assert.deepEqual(post.body, { fingerprint: 'f'.repeat(64), source_pane_id: 'PANE-API', target_pane_id: 'PANE-TESTS' });
+  assert.match(app.text('review-handoff-snapshot'), /APPROVED/);
+  assert.equal(app.byId['review-handoff-approve'].hidden, true);
+  assert.equal(app.byId['review-handoff-transfer'].hidden, false);
+});
+
+test('a diverged fingerprint at approval time is shown as the real server error, never retried silently', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({
+    plans, panes: panesFor('WSPLAN-1'), executions,
+    // Simulates the source drifting between preview and approval: the
+    // server itself is the one that recomputes and rejects the mismatch
+    // (handoff.approve() re-verifies against the live worktree) -- this
+    // pane only has to show that real error, never recompute anything.
+    fail: { 'POST /api/workspace/handoffs/HANDOFF-1/approve': { code: 'HANDOFF_SNAPSHOT_CHANGED', message: 'Snapshot changed; create and approve a new preview.' } },
+  });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  await app.click('review-handoff-approve');
+  assert.match(app.text('review-handoff-error'), /Snapshot changed/);
+  assert.equal(app.byId['review-handoff-transfer'].hidden, true);
+});
+
+test('transfer is a separate explicit click, never chained automatically after approve', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  await app.click('review-handoff-approve');
+  assert.equal(app.posts.some(call => call.url.endsWith('/transfer')), false, 'approve alone must never transfer');
+  await app.click('review-handoff-transfer');
+  const post = app.posts.find(call => call.url.endsWith('/transfer'));
+  assert.ok(post);
+  assert.equal(post.body, null, 'transfer takes no body, no file-copy logic of its own');
+  assert.match(app.text('review-handoff-snapshot'), /TRANSFERRED/);
+  assert.equal(app.byId['review-handoff-transfer'].hidden, true);
+  assert.equal(app.byId['review-handoff-approve'].hidden, true);
+  assert.equal(app.byId['review-handoff-preview'].hidden, true);
+});
+
+test('resume only becomes available after a transferred handoff and needs two explicit clicks', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  assert.equal(app.byId['review-resume'].hidden, true);
+  await app.click('review-handoff-preview');
+  await app.click('review-handoff-approve');
+  await app.click('review-handoff-transfer');
+  assert.equal(app.byId['review-resume'].hidden, false);
+  assert.equal(app.byId['review-resume-button'].textContent, 'Retomar execução');
+  assert.equal(app.posts.some(call => call.url.endsWith('/resume')), false);
+  await app.click('review-resume-button'); // arm
+  assert.equal(app.byId['review-resume-button'].textContent, 'Confirmar retomada');
+  assert.equal(app.posts.some(call => call.url.endsWith('/resume')), false, 'the first click only confirms, never posts');
+  await app.click('review-resume-button'); // confirm
+  const post = app.posts.find(call => call.url.endsWith('/resume'));
+  assert.ok(post);
+  assert.equal(post.body, null, 'the frontend never launches a turn itself, only asks the coordinator to resume');
+  assert.ok(app.toasts.some(message => /retomada/.test(message)));
+  assert.match(app.text('review-steps'), /Iniciando/); // the second agent's step moved to STARTING
+});
+
+test('resume cancel disarms the confirmation without posting anything', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  await app.click('review-handoff-approve');
+  await app.click('review-handoff-transfer');
+  await app.click('review-resume-button'); // arm
+  await app.click('review-resume-cancel');
+  assert.equal(app.byId['review-resume-button'].textContent, 'Retomar execução');
+  assert.equal(app.posts.some(call => call.url.endsWith('/resume')), false);
+});
+
+test('a backend-rejected resume shows the real error and keeps the UI conservative', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({
+    plans, panes: panesFor('WSPLAN-1'), executions,
+    fail: { 'POST /api/workspace/plans/WSPLAN-1/resume': { code: 'RESUME_CONCURRENT', message: 'The plan, approval or handoff changed before the resume claim.' } },
+  });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  await app.click('review-handoff-approve');
+  await app.click('review-handoff-transfer');
+  await app.click('review-resume-button');
+  await app.click('review-resume-button');
+  assert.match(app.text('review-resume-error'), /resume claim/);
+  assert.equal(app.byId['review-resume-button'].textContent, 'Retomar execução'); // disarmed, not stuck armed
+});
+
+test('resume stays unavailable while the backend reports it ineligible, even if a handoff looks transferred', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution({ resume: { eligible: false } }) };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  app.server.handoffs['WSPLAN-1'] = [{
+    handoff_id: 'HANDOFF-OLD', plan_id: 'WSPLAN-1', source_pane_id: 'PANE-API', target_pane_id: 'PANE-TESTS',
+    source_backend: 'codex_native', source_native_review_id: EVIDENCE_REVIEW_ID, source_mission_id: null,
+    snapshot_fingerprint: 'f'.repeat(64), status: 'TRANSFERRED', error_code: null, error_message: null,
+    files: [{ path: 'api.py', status: 'modified', sha256: 'a'.repeat(64), size: 10 }],
+    created_at: 't0', approved_at: 't0', started_at: 't0', finished_at: 't0', result: { files: [], verified: true, integration_applied: false },
+  }];
+  await app.selectPlan('WSPLAN-1'); // force a fresh load that picks up the seeded handoff
+  assert.equal(app.byId['review-resume'].hidden, true, 'the backend\'s own eligibility flag is authoritative, not the handoff status alone');
+});
+
+test('a stale/obsolete handoff (evidence no longer matches) is never offered for approval -- a fresh preview is required', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  app.server.handoffs['WSPLAN-1'] = [{
+    handoff_id: 'HANDOFF-STALE', plan_id: 'WSPLAN-1', source_pane_id: 'PANE-API', target_pane_id: 'PANE-TESTS',
+    source_backend: 'codex_native', source_native_review_id: 'z'.repeat(64), source_mission_id: null,
+    snapshot_fingerprint: 'e'.repeat(64), status: 'PREVIEWED', error_code: null, error_message: null,
+    files: [], created_at: 't-1', approved_at: null, started_at: null, finished_at: null, result: null,
+  }];
+  await app.selectPlan('WSPLAN-1');
+  assert.equal(app.byId['review-handoff-preview'].hidden, false, 'a handoff for a different (superseded) review must not be reused');
+  assert.equal(app.byId['review-handoff-approve'].hidden, true);
+});
+
+test('a double click on preview sends exactly one request', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  app.byId['review-handoff-preview'].dispatch('click');
+  app.byId['review-handoff-preview'].dispatch('click');
+  await app.settle();
+  assert.equal(app.posts.filter(call => call.url === '/api/workspace/handoffs/preview').length, 1);
+});
+
+test('a network failure during transfer is shown without crashing and the handoff stays APPROVED, not silently advanced', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({
+    plans, panes: panesFor('WSPLAN-1'), executions,
+    fail: { 'POST /api/workspace/handoffs/HANDOFF-1/transfer': { code: 'SERVER_ERROR', message: 'Nexus está indisponível' } },
+  });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  await app.click('review-handoff-approve');
+  await app.click('review-handoff-transfer');
+  assert.match(app.text('review-handoff-error'), /indisponível/);
+  assert.equal(app.byId['review-resume'].hidden, true);
+  assert.equal(app.byId['review-handoff-transfer'].hidden, false);
+});
+
+test('reload between checkpoints rebuilds the exact handoff phase from the server alone', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const seedHandoffs = { 'WSPLAN-1': [{
+    handoff_id: 'HANDOFF-SEED', plan_id: 'WSPLAN-1', source_pane_id: 'PANE-API', target_pane_id: 'PANE-TESTS',
+    source_backend: 'codex_native', source_native_review_id: EVIDENCE_REVIEW_ID, source_mission_id: null,
+    snapshot_fingerprint: 'f'.repeat(64), status: 'APPROVED', error_code: null, error_message: null,
+    files: [{ path: 'api.py', status: 'modified', sha256: 'a'.repeat(64), size: 10 }],
+    created_at: 't0', approved_at: 't0', started_at: null, finished_at: null, result: null,
+  }] };
+  // A brand new harness is the reload: no client memory survives it.
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions, handoffs: seedHandoffs });
+  await app.selectProject();
+  assert.equal(app.byId['review-handoff-preview'].hidden, true);
+  assert.equal(app.byId['review-handoff-approve'].hidden, true);
+  assert.equal(app.byId['review-handoff-transfer'].hidden, false, 'the already-approved handoff is picked up straight from the server');
+});
+
+test('switching projects mid-operation discards the in-flight handoff/resume state', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions, project: 'demo' });
+  await app.selectProject('demo');
+  await app.click('review-handoff-preview');
+  app.server.project = 'other';
+  app.server.plans = [];
+  app.server.panes = [];
+  await app.selectProject('other');
+  assert.equal(app.byId['review-handoff'].hidden, true);
+  assert.equal(app.byId['review-resume'].hidden, true);
+});
+
+test('polling the execution alone never previews, approves, transfers or resumes anything', async () => {
+  const plans = [plan()];
+  const executions = { 'WSPLAN-1': blockedExecution() };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1'), executions });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  const before = app.posts.length;
+  await app.tick(3000); // one execution poll tick
+  const after = app.posts.slice(before).filter(call => /handoffs\/preview|\/approve$|\/transfer$|\/resume$/.test(call.url));
+  assert.equal(after.length, 0);
+  assert.equal(app.posts.length, before, 'the poll tick itself issues no POST at all');
+});
+
+test('a legacy OmniRoute dependency block can also be prepared, approved, transferred and resumed through the same controls', async () => {
+  const plans = [plan({ agents: [
+    { key: 'api', role: 'backend', title: 'API', model: 'free/model', depends_on: [] },
+    { key: 'tests', role: 'tester', title: 'Tests', model: 'free/model', depends_on: ['api'] },
+  ] })];
+  const executions = { 'WSPLAN-1': blockedExecution({ steps: [
+    { agent_key: 'api', ordinal: 0, pane_id: 'PANE-API', status: 'READY_FOR_REVIEW', mission_id: 'DEVMISSION-1', native_turn_id: null, native_review_id: null, error_code: null, error_message: null },
+    { agent_key: 'tests', ordinal: 1, pane_id: 'PANE-TESTS', status: 'BLOCKED', mission_id: null, native_turn_id: null, native_review_id: null, error_code: 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED', error_message: 'not transferred' },
+  ] }) };
+  const app = harness({ plans, panes: panesFor('WSPLAN-1', { api: 'omniroute', tests: 'omniroute' }), executions });
+  await app.selectProject();
+  await app.click('review-handoff-preview');
+  const post = app.posts.find(call => call.url === '/api/workspace/handoffs/preview');
+  assert.deepEqual(post.body, { source_pane_id: 'PANE-API', target_pane_id: 'PANE-TESTS', source_mission_id: 'DEVMISSION-1' });
+  await app.click('review-handoff-approve');
+  await app.click('review-handoff-transfer');
+  assert.equal(app.byId['review-resume'].hidden, false);
 });
