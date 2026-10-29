@@ -59,6 +59,7 @@
   let testProfilesError = '';
   let projectId = null;
   let projectReady = false; // true once the selected project's first /state response has landed
+  let projectLoadErrorMessage = ''; // set only by a genuine /state fetch failure, never by "zero sessions"
   let projects = [];
   let projectsLoaded = false;
   let projectsError = '';
@@ -307,12 +308,19 @@
       grid.dataset.visible = '0';
       // The empty-grid message must never claim "select a project" while one
       // is already selected and its first load just hasn't landed yet --
-      // that reads as a broken/reset workspace on every reload.
+      // that reads as a broken/reset workspace on every reload. A genuine
+      // API failure (project list or project state) is its own distinct
+      // message too -- never silently read as "this project just has zero
+      // sessions".
       grid.dataset.emptyMessage = !projectId
-        ? 'Selecione um projeto ou crie uma missão para abrir sessões reais.'
-        : !projectReady
-          ? 'Carregando sessões do projeto…'
-          : 'Nenhuma sessão aberta. Crie uma missão ou abra uma sessão Native para começar.';
+        ? (projectsError
+          ? `Falha ao carregar projetos: ${projectsError}`
+          : 'Selecione um projeto ou crie uma missão para abrir sessões reais.')
+        : projectLoadErrorMessage
+          ? `Falha ao carregar sessões do projeto: ${projectLoadErrorMessage}`
+          : !projectReady
+            ? 'Carregando sessões do projeto…'
+            : 'Nenhuma sessão aberta. Crie uma missão ou abra uma sessão Native para começar.';
       grid.style.removeProperty('grid-template-columns');
       grid.style.removeProperty('grid-template-rows');
       groupControls.hidden = true;
@@ -1560,19 +1568,35 @@
     renderAgentControls(agent.pane_id);
     return pane;
   };
+  // Cadastrado/desativado/autorizado are three independent, real facts
+  // (projects.enabled, projects.dev_enabled) -- never collapsed into one
+  // "autorizado" label, and never hidden by filtering the list down to
+  // only the already-usable projects.
+  const projectStateBadges = project => [
+    project.enabled ? ['is-on', 'Cadastrado'] : ['is-off', 'Desativado'],
+    project.dev_enabled ? ['is-on', 'Dev autorizado'] : ['is-off', 'Sem autorização Dev'],
+  ];
   const renderProjects = () => {
     const nav = document.getElementById('project-nav');
     nav.replaceChildren(...projects.map(project => {
       const button = element('button', `mission-link${project.id === projectId ? ' active' : ''}`);
       button.type = 'button';
-      button.append(element('span', 'mission-indicator'), element('span', '', project.name));
+      const row = element('div', 'project-row');
+      row.append(element('span', 'mission-indicator'), element('span', 'project-row-name', project.name));
+      const states = element('span', 'project-row-states');
+      projectStateBadges(project).forEach(([cls, label]) => states.append(element('span', `project-state ${cls}`, label)));
+      row.append(states);
+      button.append(row);
       button.addEventListener('click', () => { nav.hidden = true; selectProject(project.id); });
       return button;
     }));
     document.getElementById('project-count').textContent = twoDigits(projects.length);
     const selected = projects.find(project => project.id === projectId);
     document.getElementById('project-name').textContent = selected?.name || 'Selecione um projeto';
-    document.getElementById('project-detail').textContent = selected ? 'Projeto autorizado' : 'Nenhum projeto selecionado';
+    document.getElementById('project-detail').textContent = !selected ? 'Nenhum projeto selecionado'
+      : !selected.enabled ? 'Projeto desativado'
+        : !selected.dev_enabled ? 'Sem autorização de Development'
+          : 'Projeto autorizado';
     document.getElementById('workspace-id').textContent = selected?.id || '—';
     renderModelCatalog();
   };
@@ -1801,6 +1825,7 @@
       ]);
       if (generation !== refreshGeneration || request !== refreshRequest) return;
       projectReady = true;
+      projectLoadErrorMessage = '';
       workspaceState = workspace;
       maestroState = maestro;
       costAuthorizations = authData.authorizations || [];
@@ -1829,6 +1854,7 @@
         // A definitive failure is not "still loading": show it as an error,
         // never leave the grid's empty state implying no project is chosen.
         projectReady = true;
+        projectLoadErrorMessage = error.message;
         document.getElementById('data-status').textContent = `Falha ao carregar: ${error.message}`;
         updateLayout();
       }
@@ -1840,6 +1866,7 @@
     stopAllStreams();
     if (projectId) maestroDrafts.set(projectId, maestroComposer.input.value);
     projectReady = false;
+    projectLoadErrorMessage = '';
     projectId = id;
     aiSettings = null;
     aiSettingsRequest++;
@@ -1890,6 +1917,63 @@
     const nav = document.getElementById('project-nav');
     nav.hidden = !nav.hidden;
   });
+  // Register a local Git repository as a project (P6.C2). Reuses the same
+  // admin-token session state as Settings → Modelos -- never a separate
+  // or weaker auth path -- and never enables Development Mode or global
+  // execution for the new project; that stays a later, explicit action.
+  const projectCreateForm = document.getElementById('project-create-form');
+  const projectCreateName = document.getElementById('project-create-name');
+  const projectCreatePath = document.getElementById('project-create-path');
+  const projectCreateToken = document.getElementById('project-create-token');
+  const projectCreateSubmit = document.getElementById('project-create-submit');
+  const projectCreateError = document.getElementById('project-create-error');
+  const projectCreateNote = document.getElementById('project-create-note');
+  const closeProjectCreateForm = () => {
+    projectCreateForm.hidden = true;
+    projectCreateName.value = ''; projectCreatePath.value = ''; projectCreateToken.value = '';
+    projectCreateError.textContent = '';
+    projectCreateNote.textContent = 'Novo projeto começa sem autorização de Development.';
+  };
+  document.getElementById('open-new-project').addEventListener('click', () => {
+    document.getElementById('project-nav').hidden = true;
+    projectCreateForm.hidden = !projectCreateForm.hidden;
+    if (!projectCreateForm.hidden) projectCreateName.focus();
+  });
+  document.getElementById('project-create-cancel').addEventListener('click', closeProjectCreateForm);
+  let projectCreateBusy = false;
+  projectCreateSubmit.addEventListener('click', async () => {
+    if (projectCreateBusy) return;
+    const name = projectCreateName.value.trim();
+    const path = projectCreatePath.value.trim();
+    const typedToken = projectCreateToken.value.trim();
+    if (!name || !path) { projectCreateError.textContent = 'Informe nome e caminho do repositório.'; return; }
+    if (typedToken) modelAdminToken = typedToken;
+    if (!modelAdminToken) {
+      projectCreateError.textContent = 'Informe o token administrativo (ou desbloqueie em Configurações → Modelos).';
+      return;
+    }
+    projectCreateBusy = true; projectCreateSubmit.disabled = true; projectCreateError.textContent = '';
+    projectCreateNote.textContent = 'Cadastrando…';
+    try {
+      await api('/api/projects', { method: 'POST', body: { name, path } });
+      projectCreateToken.value = '';
+      notify(`Projeto "${name}" cadastrado. Sem autorização de Development ainda.`);
+      closeProjectCreateForm();
+      const data = await api('/api/projects');
+      projects = data.projects || [];
+      projectsError = '';
+      renderProjects();
+      updateLayout();
+    } catch (error) {
+      // Never retried automatically: the exact server error (duplicate
+      // path, path not found, not a Git repository, auth) is shown and
+      // the operator decides, same as every other write in this cockpit.
+      projectCreateError.textContent = error.message;
+      projectCreateNote.textContent = 'Novo projeto começa sem autorização de Development.';
+    } finally {
+      projectCreateBusy = false; projectCreateSubmit.disabled = false;
+    }
+  });
   // Small surface for add-on panes (cockpit-native.js): the selected project and a toast.
   window.NexusCockpit = Object.freeze({
     projectId: () => projectId,
@@ -1900,16 +1984,24 @@
   syncUI();
   void refreshModelCatalog();
   api('/api/projects').then(data => {
-    projects = (data.projects || []).filter(project => project.enabled && project.dev_enabled);
+    // Every registered project is kept and shown with its real state
+    // (cadastrado/desativado/autorizado) -- only the auto-selected default
+    // is restricted to one actually usable for Development Mode.
+    projects = data.projects || [];
     projectsLoaded = true;
     projectsError = '';
     renderProjects();
-    if (projects.length) selectProject(projects[0].id);
-    else document.getElementById('data-status').textContent = 'Nenhum projeto autorizado para Development Mode';
+    updateLayout();
+    const usable = projects.find(project => project.enabled && project.dev_enabled);
+    if (usable) selectProject(usable.id);
+    else document.getElementById('data-status').textContent = projects.length
+      ? 'Nenhum projeto autorizado para Development Mode'
+      : 'Nenhum projeto cadastrado';
   }).catch(error => {
     projectsLoaded = true;
     projectsError = error.message;
     renderModelCatalog();
+    updateLayout();
     document.getElementById('data-status').textContent = `Falha ao carregar projetos: ${error.message}`;
   });
 })();

@@ -320,6 +320,32 @@ def list_projects():
     return {"projects": [dict(r) for r in rows]}
 
 
+class ProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    path: str = Field(min_length=1, max_length=1024)
+
+
+@router.post("/projects")
+def create_project(request: ProjectCreateRequest, http_request: Request):
+    """Register a local Git repository as a project (Phase C2).
+
+    Reuses the same local-operator + NEXUS_ADMIN_TOKEN gate as the other
+    administrative write routes -- never a separate or weaker check. The
+    new project starts disabled for Development Mode (dev_enabled is left
+    at its schema default) and no global execution flag is touched.
+    """
+    from nexus.dev import model_management  # noqa: PLC0415
+    from nexus.dev.service import DevServiceError  # noqa: PLC0415
+    from nexus.registry.projects import register_local_project  # noqa: PLC0415
+
+    try:
+        model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
+        return register_local_project(request.name, request.path)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
 @router.get("/runs/{run_id}/checkpoints")
 def run_checkpoints(run_id: str):
     """Return durable checkpoints and approved plan for a Run."""
