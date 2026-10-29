@@ -202,9 +202,11 @@ def get_dev_enabled(project_id: str) -> bool:
 
 
 def set_dev_enabled(project_id: str, enabled: bool) -> None:
-    """Internal-only setter (F1.2): no route/endpoint calls this yet. Never
-    touched by sync_projects(), so re-syncing config/projects.json can
-    never silently change it."""
+    """Persist an explicit per-project Development authorization decision.
+
+    Project administration uses this after local operator authentication.
+    sync_projects() never changes this flag during configuration refresh.
+    """
     with get_connection() as connection:
         connection.execute(
             "UPDATE projects SET dev_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
