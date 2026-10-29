@@ -64,6 +64,33 @@ function Invoke-GitOrFail {
     return $result.Output
 }
 
+function Get-CheckedOutBranch {
+    # Keep the branch guard deterministic even when a preflight intentionally
+    # removes git from PATH (for example, to verify that gh is the next gate).
+    # Linked worktrees store .git as a file pointing at the real git dir.
+    $gitEntry = Join-Path $RepoRoot ".git"
+    $gitDir = $gitEntry
+    $gitItem = Get-Item -Force $gitEntry -ErrorAction SilentlyContinue
+    if (-not $gitItem) {
+        return (Invoke-GitOrFail rev-parse --abbrev-ref HEAD).Trim()
+    }
+    if (-not $gitItem.PSIsContainer) {
+        $gitPointer = (Get-Content -LiteralPath $gitEntry -Raw -ErrorAction SilentlyContinue).Trim()
+        if ($gitPointer -match '^gitdir:\s*(.+)$') {
+            $gitDir = $Matches[1]
+            if (-not [System.IO.Path]::IsPathRooted($gitDir)) {
+                $gitDir = Join-Path $RepoRoot $gitDir
+            }
+        }
+    }
+    $headPath = Join-Path $gitDir "HEAD"
+    $head = (Get-Content -LiteralPath $headPath -Raw -ErrorAction SilentlyContinue).Trim()
+    if ($head -match '^ref:\s+refs/heads/(.+)$') {
+        return $Matches[1]
+    }
+    return (Invoke-GitOrFail rev-parse --abbrev-ref HEAD).Trim()
+}
+
 function Invoke-Gh {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GhArgs)
     # Same PowerShell 5.1 stderr-redirection pitfall as Invoke-Git above.
@@ -85,15 +112,6 @@ if (-not (Test-Path (Join-Path $RepoRoot ".git"))) {
 }
 Push-Location $RepoRoot
 try {
-    $ghCommand = Get-Command gh -ErrorAction SilentlyContinue
-    if (-not $ghCommand) {
-        Stop-Sync "GitHub CLI (gh) is not available on PATH" @("Install gh and sign in, then re-run.")
-    }
-    $authStatus = Invoke-Gh auth status
-    if ($authStatus.ExitCode -ne 0) {
-        Stop-Sync "GitHub CLI is not authenticated" @($authStatus.Output)
-    }
-
     if (-not $Branch) { $Branch = (Invoke-GitOrFail status --branch --porcelain=v1 | Select-Object -First 1) -replace '^## ', '' -replace '\.\.\..*$', '' }
     $Branch = $Branch.Trim()
     if (-not $Branch) {
@@ -109,7 +127,7 @@ try {
         Stop-Sync "Base and working branch must differ" @("Base: $Base", "Branch: $Branch")
     }
 
-    $currentBranch = (Invoke-GitOrFail rev-parse --abbrev-ref HEAD).Trim()
+    $currentBranch = Get-CheckedOutBranch
     if ($currentBranch -ne $Branch) {
         Stop-Sync "Checked-out branch does not match -Branch" @("Checked out: $currentBranch", "Requested: $Branch", "Switch branches yourself before running this script.")
     }
@@ -123,6 +141,19 @@ try {
     if ($missing) {
         Stop-Sync "One or more authorized files do not exist on disk" $missing
     }
+
+    # Complete all local safety checks before consulting GitHub. This keeps
+    # invalid branch/base/file requests deterministic when gh is unavailable,
+    # while authentication still happens before any staging or publication.
+    $ghCommand = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $ghCommand) {
+        Stop-Sync "GitHub CLI (gh) is not available on PATH" @("Install gh and sign in, then re-run.")
+    }
+    $authStatus = Invoke-Gh auth status
+    if ($authStatus.ExitCode -ne 0) {
+        Stop-Sync "GitHub CLI is not authenticated" @($authStatus.Output)
+    }
+
     Invoke-GitOrFail add -- @Files | Out-Null
     $staged = (Invoke-GitOrFail diff --cached --name-only) -split "`n" | Where-Object { $_ }
     $unexpected = $staged | Where-Object { $Files -notcontains $_ }
