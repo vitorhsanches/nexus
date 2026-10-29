@@ -22,6 +22,21 @@
       <div class="sidebar-caption">ESPAÇO DE TRABALHO <span id="project-count">00</span></div>
       <button class="project active" id="project-toggle" type="button" aria-label="Selecionar projeto"><span class="project-icon">N</span><span><strong id="project-name">Selecione um projeto</strong><small id="project-detail">Carregando projetos</small></span><span class="chevron">⌄</span></button>
       <nav class="mission-nav" id="project-nav" aria-label="Projetos disponíveis" hidden></nav>
+      <button class="sidebar-create" id="open-new-project" type="button">＋ Novo projeto</button>
+      <div class="project-create" id="project-create-form" hidden>
+        <label for="project-create-name">Nome</label>
+        <input id="project-create-name" type="text" maxlength="200" placeholder="Nome do projeto" autocomplete="off">
+        <label for="project-create-path">Caminho local do repositório Git</label>
+        <input id="project-create-path" type="text" maxlength="1024" placeholder="Caminho absoluto do repositório" autocomplete="off">
+        <label for="project-create-token">Token administrativo local</label>
+        <input id="project-create-token" type="password" maxlength="200" placeholder="NEXUS_ADMIN_TOKEN (não é salvo)" autocomplete="off">
+        <div class="native-actions">
+          <button class="cockpit-send" id="project-create-submit" type="button">Cadastrar projeto</button>
+          <button class="cockpit-send" id="project-create-cancel" type="button">Cancelar</button>
+        </div>
+        <p class="cockpit-compose-error" id="project-create-error" role="status"></p>
+        <p class="native-note" id="project-create-note" role="status">Novo projeto começa sem autorização de Development.</p>
+      </div>
       <div class="nav-label">MISSÕES <span id="mission-count">00</span></div>
       <button class="sidebar-create" id="open-native-plan" type="button">＋ Nova missão</button>
       <nav class="mission-nav" id="mission-nav" aria-label="Missões registradas"></nav>

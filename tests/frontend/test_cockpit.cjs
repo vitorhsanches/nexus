@@ -29,7 +29,7 @@ function buildPane(kind) {
   return pane;
 }
 
-function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null, withNative = false, compact = false } = {}) {
+function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, projects = null, withNative = false, compact = false, projectsFetchError = null } = {}) {
   const rootNode = el('body');
   const ids = [...template.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
   const byId = Object.fromEntries(ids.map(id => [id, el('div')]));
@@ -61,6 +61,7 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
     },
     catalogError: null,
     projects: projects || [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 }],
+    projectsFetchError,
     profiles: [{ id: 'unit', name: 'Unitários', timeout_seconds: 120 }],
     diff: { base_sha: 'base-12345678', head_sha: 'head-abcdefgh',
       files: [{ path: 'nexus/example.py', status: 'M', patch: '--- a/nexus/example.py\n+++ b/nexus/example.py' }] },
@@ -160,10 +161,20 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
         data = { pane, mission: pane.latest_mission };
       } else if (/\/api\/dev\/sessions\/[^/]+\/missions\/[^/]+\/interrupt$/.test(url)) {
         data = { mission_id: url.split('/')[6], interrupt_requested: true };
+      } else if (url === '/api/projects') {
+        if (box.projectCreateError) throw box.projectCreateError;
+        const body = JSON.parse(options.body);
+        const created = { id: body.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          name: body.name, path: body.path, enabled: 1, dev_enabled: 0 };
+        box.projects.push(created);
+        data = created;
       } else throw new Error(`Unexpected POST: ${url}`);
       return { ok: true, json: async () => data };
     }
-    if (url === '/api/projects') data = { projects: box.projects };
+    if (url === '/api/projects') {
+      if (box.projectsFetchError) throw box.projectsFetchError;
+      data = { projects: box.projects };
+    }
     else if (url === '/api/dev/ai-settings/admin-check') data = { authenticated: Boolean(options.headers?.Authorization) };
     else if (url.startsWith('/api/dev/ai-settings/providers?')) data = { project_id: 'demo', executors: box.aiSettings.executors };
     else if (url.startsWith('/api/dev/ai-settings?')) data = box.aiSettings;
@@ -713,7 +724,10 @@ test('catalog failure fails closed and missing authorized projects are stated', 
   const app = harness([], { projects: [] });
   await app.settle();
   assert.match(app.byId['model-catalog-project-note'].textContent, /Nenhum projeto autorizado/);
-  assert.match(app.byId['data-status'].textContent, /Nenhum projeto autorizado/);
+  // Zero projects registered at all is a more specific, more honest status
+  // than the generic "none authorized" (P6.C2: real cadastrado/desativado/
+  // autorizado states, not one blanket message for every zero-usable case).
+  assert.match(app.byId['data-status'].textContent, /Nenhum projeto cadastrado/);
   const planning = app.grid.querySelector('[data-pane="maestro"]')
     .querySelector('.cockpit-composer').querySelector('.cockpit-model-select');
   app.box.catalogError = new Error('OmniRoute indisponível');
@@ -1094,4 +1108,82 @@ test('the Codex Native pane is a system pane: kept across refreshes and project 
   assert.ok(nativeFor(), 'refresh never removes the native pane');
   assert.deepEqual([...app.byId['pane-nav'].children].map(button => button.dataset.paneTarget).includes('native'), true);
   assert.equal(Object.isFrozen(host), true, 'add-ons cannot replace the host API');
+});
+
+test('the project list shows every registered project with its real cadastrado/dev state, never hiding unusable ones', async () => {
+  const app = harness([], { projects: [
+    { id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 },
+    { id: 'off', name: 'Projeto desativado', enabled: 0, dev_enabled: 0 },
+    { id: 'no-dev', name: 'Projeto sem dev', enabled: 1, dev_enabled: 0 },
+  ] });
+  await app.settle();
+  assert.equal(app.byId['project-count'].textContent, '03');
+  const rows = [...app.byId['project-nav'].children];
+  assert.equal(rows.length, 3);
+  const states = row => [...row.querySelector('.project-row-states').children].map(span => span.textContent);
+  assert.deepEqual(states(rows[0]), ['Cadastrado', 'Dev autorizado']);
+  assert.deepEqual(states(rows[1]), ['Desativado', 'Sem autorização Dev']);
+  assert.deepEqual(states(rows[2]), ['Cadastrado', 'Sem autorização Dev']);
+  // Auto-selection only ever picks a project that is both enabled and dev-authorized.
+  assert.equal(app.byId['workspace-id'].textContent, 'demo');
+  assert.equal(app.byId['project-detail'].textContent, 'Projeto autorizado');
+});
+
+test('a failed /api/projects fetch blocks planning/execution with its real error, not a generic empty state', async () => {
+  const failedList = harness([], { projectsFetchError: new Error('offline') });
+  await failedList.settle();
+  assert.match(failedList.byId['model-catalog-project-note'].textContent, /offline/);
+  assert.equal(failedList.byId['project-count'].textContent, '');
+});
+
+test('registering a new project persists it into the sidebar immediately, without a server restart, and never grants Development', async () => {
+  const app = harness([], { projects: [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 1 }] });
+  await app.settle();
+  app.byId['project-create-form'].hidden = true;
+  app.byId['open-new-project'].dispatch('click');
+  assert.equal(app.byId['project-create-form'].hidden, false);
+  app.byId['project-create-name'].value = 'Novo Repo';
+  app.byId['project-create-path'].value = 'C:\\repos\\novo-repo';
+  app.byId['project-create-token'].value = 'operator-token-value';
+  app.byId['project-create-submit'].dispatch('click');
+  await app.settle();
+  const createCall = app.calls.find(call => call.method === 'POST' && call.url === '/api/projects');
+  assert.ok(createCall, 'the create request was sent');
+  assert.deepEqual(createCall.body, { name: 'Novo Repo', path: 'C:\\repos\\novo-repo' });
+  assert.equal(createCall.authorization, 'Bearer operator-token-value');
+  assert.equal(app.byId['project-create-form'].hidden, true, 'the form closes on success');
+  assert.equal(app.byId['project-count'].textContent, '02');
+  const newRow = [...app.byId['project-nav'].children].find(row => row.querySelector('.project-row-name').textContent === 'Novo Repo');
+  assert.ok(newRow, 'the new project appears in the sidebar without a reload');
+  assert.deepEqual([...newRow.querySelector('.project-row-states').children].map(span => span.textContent),
+    ['Cadastrado', 'Sem autorização Dev']);
+});
+
+test('a failed project registration shows the server error and keeps the form open for correction', async () => {
+  const app = harness([], { projects: [] });
+  await app.settle();
+  app.byId['project-create-form'].hidden = true;
+  app.byId['open-new-project'].dispatch('click');
+  app.byId['project-create-name'].value = 'Duplicado';
+  app.byId['project-create-path'].value = 'C:\\repos\\dup';
+  app.byId['project-create-token'].value = 'operator-token-value';
+  app.box.projectCreateError = Object.assign(new Error('Este repositório já está cadastrado: C:\\repos\\dup'),
+    { detail: { code: 'PROJECT_PATH_ALREADY_REGISTERED' } });
+  app.byId['project-create-submit'].dispatch('click');
+  await app.settle();
+  assert.equal(app.byId['project-create-form'].hidden, false, 'the form stays open so the operator can correct it');
+  assert.match(app.byId['project-create-error'].textContent, /já está cadastrado/);
+  assert.equal(app.byId['project-count'].textContent, '00', 'nothing was added on failure');
+});
+
+test('registration is blocked client-side without an admin token, with no request sent', async () => {
+  const app = harness([], { projects: [] });
+  await app.settle();
+  app.byId['open-new-project'].dispatch('click');
+  app.byId['project-create-name'].value = 'Sem Token';
+  app.byId['project-create-path'].value = 'C:\\repos\\sem-token';
+  app.byId['project-create-submit'].dispatch('click');
+  await app.settle();
+  assert.match(app.byId['project-create-error'].textContent, /token administrativo/);
+  assert.equal(app.calls.some(call => call.method === 'POST' && call.url === '/api/projects'), false);
 });

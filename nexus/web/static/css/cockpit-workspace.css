@@ -20,6 +20,17 @@ html,body{height:100%;overflow:hidden}
 .sidebar-create{border-color:var(--accent-border);color:var(--accent-strong);background:var(--accent-tint)}
 .sidebar-review{margin-top:7px;background:transparent;color:var(--text-muted)}
 .sidebar-create:hover,.sidebar-review:hover{border-color:var(--accent);color:var(--accent-strong)}
+.project-create{display:grid;gap:5px;margin-top:6px;padding:8px;border:1px solid var(--border-soft);background:var(--surface)}
+.project-create label{color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace;letter-spacing:.05em;text-transform:uppercase}
+.project-create input{width:100%;min-width:0;padding:6px;background:var(--terminal);border:1px solid var(--border-strong);border-radius:2px;color:var(--text);font:10px 'Cascadia Code',Consolas,monospace}
+.project-create .native-actions{margin-top:2px}
+.project-row{display:flex;align-items:center;gap:8px;min-height:38px}
+.project-row .mission-indicator{flex:none}
+.project-row-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-row-states{flex:none;display:flex;gap:4px}
+.project-state{flex:none;border-radius:2px;padding:2px 5px;font:8px 'Cascadia Code',Consolas,monospace;white-space:nowrap;color:var(--text-dim);border:1px solid var(--border-soft)}
+.project-state.is-off{color:var(--warning);border-color:var(--warning)}
+.project-state.is-on{color:var(--accent-strong);border-color:var(--accent-border)}
 .manual-plan-nav{max-height:22dvh;overflow:auto;scrollbar-width:thin}
 .manual-plan-nav .mission-link{display:flex;align-items:center;gap:7px;padding:5px 8px;text-align:left;background:transparent;border:0;border-left:2px solid transparent;color:var(--text-muted)}
 .manual-plan-nav .mission-link:hover{background:var(--surface)}
