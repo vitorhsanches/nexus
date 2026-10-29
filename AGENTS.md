@@ -55,7 +55,14 @@ you, fix the underlying situation instead):
 
 After running it, confirm success from its structured output (`Result`,
 `Url`, `Number`, `Base`, `Branch`, `Commit`, `RemoteSha`, `CiStatus`) —
-not by assuming the commands "probably worked."
+not by assuming the commands "probably worked." `Result` is `"created"`
+on a brand-new PR or `"updated"` when a PR already existed for that
+branch/base pair (title/body are refreshed in place, never duplicated).
+
+`tests/test_nexus_sync.py` covers the script's guard rails (protected
+branch, missing/duplicate base, unauthorized files, missing `gh`) against
+disposable temp repos; run it with `pytest tests/test_nexus_sync.py` after
+changing the script.
 
 See also [`CLAUDE.md`](CLAUDE.md) for Claude-specific session conventions
 that build on this same flow.
