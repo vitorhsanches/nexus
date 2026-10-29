@@ -162,6 +162,15 @@ def update_thread(session_id: str, *, codex_thread_id: str, codex_home: str | No
         )
 
 
+def update_claude_session(session_id: str, *, claude_session_id: str) -> None:
+    """Record the Claude Code conversation a Claude Native session resumes."""
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE dev_sessions SET claude_session_id = ?, updated_at = ? WHERE id = ?",
+            (claude_session_id, _now(), session_id),
+        )
+
+
 def mark_active(session_id: str, *, worktree_path: str, base_sha: str) -> None:
     _transition(session_id, STATUS_ACTIVE, worktree_path=worktree_path, base_sha=base_sha)
 

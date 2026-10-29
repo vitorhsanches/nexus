@@ -52,6 +52,10 @@ function harness(overrides = {}) {
       { id: 'gpt-x', name: 'GPT X', selectable: true, supported_efforts: ['low', 'high'] },
       { id: 'not-ready', name: 'Not ready', selectable: false },
     ], default_model: 'gpt-x', catalog_error: null },
+    claudeModels: { models: [
+      { id: 'claude-opus-4-8', name: 'Opus', selectable: true, supported_efforts: ['low', 'high'] },
+    ], default_model: 'claude-opus-4-8', catalog_error: null },
+    operations: {},
     sessions: [
       { session_id: 'DEV-NATIVE', project_id: 'demo', status: 'ACTIVE', backend: 'codex_native', requested_model: 'gpt-x', branch: 'nexus/dev/DEV-NATIVE', created_at: 't1' },
       { session_id: 'DEV-LEGACY', project_id: 'demo', status: 'ACTIVE', backend: 'omniroute', requested_model: 'cx/old', branch: 'nexus/dev/DEV-LEGACY', created_at: 't0' },
@@ -80,6 +84,7 @@ function harness(overrides = {}) {
     if (url === '/api/dev/execution-status') return reply({ execution_enabled: server.gate });
     if (url === '/api/dev/integration-status') return reply({ integration_enabled: server.integration });
     if (url === '/api/dev/models?backend=codex_native') return reply(server.models);
+    if (url === '/api/dev/models?backend=claude_native') return reply(server.claudeModels);
     if (url.startsWith('/api/dev/sessions?project_id=')) return reply({ sessions: server.sessions });
     if (method === 'POST' && url === '/api/dev/sessions') {
       const session = { session_id: 'DEV-NEW', project_id: body.project_id, status: 'ACTIVE', backend: body.backend, requested_model: body.requested_model, branch: 'nexus/dev/DEV-NEW', created_at: 't2' };
@@ -100,9 +105,16 @@ function harness(overrides = {}) {
       }
       if (method === 'POST' && rest === '/interrupt') return reply({ status: 'INTERRUPT_REQUESTED' });
       if (rest === '/approvals' && method === 'GET') return reply({ approvals: server.approvals[id] });
+      if (rest.endsWith('/operation') && method === 'GET') {
+        const approvalId = rest.split('/')[2];
+        const detail = server.operations[approvalId];
+        if (!detail) return reply({ detail: { code: 'OPERATION_UNAVAILABLE', message: 'gone' } }, 409);
+        return reply(detail);
+      }
       if (rest.startsWith('/approvals/') && method === 'POST') {
         const approval = server.approvals[id].find(item => rest.endsWith(item.approval_id));
         approval.status = body.decision === 'accept' ? 'APPROVED' : 'DECLINED';
+        approval.lastDecisionBody = body;
         return reply(approval);
       }
       if (rest === '/changed-files') return reply({ files: server.changed[id] });
@@ -237,6 +249,39 @@ test('a session is created only by an explicit click with an explicitly chosen c
   assert.equal(app.byId['native-session'].value, 'DEV-NEW');
   assert.match(app.text('native-meta-session'), /DEV-NEW/);
   assert.match(app.text('native-session-note'), /worktree isolado/);
+});
+
+test('switching the runtime reloads the real catalog for that account and creates with the chosen backend', async () => {
+  const app = harness();
+  await app.selectProject();
+  // Codex Native is the default runtime (fake_dom, unlike a real <select>,
+  // does not auto-select the first <option>, so the catalog fetched on
+  // project load -- asserted next -- is the real signal here).
+  assert.deepEqual(app.options('native-model'), ['', 'gpt-x']);
+
+  app.byId['native-runtime'].value = 'claude_native';
+  app.byId['native-runtime'].dispatch('change');
+  await app.settle();
+  assert.ok(app.calls.some(call => call.url === '/api/dev/models?backend=claude_native'), 'the Claude catalog was fetched');
+  assert.deepEqual(app.options('native-model'), ['', 'claude-opus-4-8']);
+
+  await app.chooseModel('claude-opus-4-8');
+  app.byId['native-create'].dispatch('click');
+  await app.settle();
+  assert.deepEqual(app.posts.map(call => [call.url, call.body]), [
+    ['/api/dev/sessions', { project_id: 'demo', backend: 'claude_native', requested_model: 'claude-opus-4-8' }]]);
+});
+
+test('a Claude catalog failure is reported without touching the Codex catalog', async () => {
+  const app = harness();
+  await app.selectProject();
+  app.server.fail['GET /api/dev/models?backend=claude_native'] = 'Claude Code is not signed in.';
+  app.byId['native-runtime'].value = 'claude_native';
+  app.byId['native-runtime'].dispatch('change');
+  await app.settle();
+  assert.deepEqual(app.options('native-model'), ['']);
+  assert.match(app.text('native-model-note'), /Catálogo Claude Native indisponível: Claude Code is not signed in\./);
+  assert.equal(app.byId['native-create'].disabled, true);
 });
 
 test('a failed session creation shows the error, selects nothing and is not retried', async () => {
@@ -493,6 +538,38 @@ test('approvals are shown exactly, decided only by a click, and never automatica
   assert.deepEqual(app.posts.map(call => [call.url, call.body]), [['/api/dev/sessions/DEV-NATIVE/approvals/APPROVAL-1', { decision: 'accept' }]]);
   assert.equal(app.text('native-approval-count'), '0');
   assert.match(app.text('native-approval-note'), /Aprovado uma vez/);
+});
+
+test('a Claude edit approval cannot be accepted before its exact content was fetched and shown', async () => {
+  const app = harness();
+  app.server.turns['DEV-NATIVE'] = [runningTurn];
+  app.server.approvals['DEV-NATIVE'] = [
+    { approval_id: 'APPROVAL-1', kind: 'file_change', status: 'PENDING',
+      summary: { tool: 'Edit', grantRoot: 'calc.py', reason: 'Edit in the session worktree', operation_sha256: 'a'.repeat(64), operation_bytes: 42 } },
+  ];
+  app.server.operations['APPROVAL-1'] = { approval_id: 'APPROVAL-1', tool: 'Edit', operation_sha256: 'a'.repeat(64), operation: '{"old":"a - b","new":"a + b"}' };
+  await app.selectProject();
+  await app.selectSession('DEV-NATIVE');
+  assert.match(app.text('native-approvals'), /Ferramenta: Edit/);
+
+  const pendingRow = [...app.byId['native-approvals'].children][0];
+  const [accept] = [...[...pendingRow.children].at(-1).children];
+  assert.equal(accept.disabled, true, 'nothing is approvable before the exact operation was shown');
+  assert.doesNotMatch(app.text('native-approvals'), /"old":"a - b"/, 'content is not shown until explicitly requested');
+
+  const reveal = [...pendingRow.children].find(node => node.tagName === 'BUTTON' && node.textContent === 'Ver alteração completa');
+  reveal.dispatch('click');
+  await app.settle();
+  assert.ok(app.calls.some(call => call.url === '/api/dev/sessions/DEV-NATIVE/approvals/APPROVAL-1/operation'));
+  assert.match(app.text('native-approvals'), /"old":"a - b"/);
+
+  const revealedRow = [...app.byId['native-approvals'].children][0];
+  const [acceptNow] = [...[...revealedRow.children].at(-1).children];
+  assert.equal(acceptNow.disabled, false, 'approvable once the exact operation was shown');
+  acceptNow.dispatch('click');
+  await app.settle();
+  assert.deepEqual(app.posts.at(-1), { method: 'POST', url: '/api/dev/sessions/DEV-NATIVE/approvals/APPROVAL-1',
+    body: { decision: 'accept', operation_sha256: 'a'.repeat(64) } });
 });
 
 test('declining posts only a decline; a failed decision is reported and nothing else is decided', async () => {
