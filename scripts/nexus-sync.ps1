@@ -158,7 +158,7 @@ try {
     if (-not $Title) { $Title = $Message.Split("`n")[0] }
     if (-not $Body) { $Body = $Message }
 
-    $existing = Invoke-Gh pr list --head $Branch --base $Base --state open --json number,url
+    $existing = Invoke-Gh pr list --head $Branch --base $Base --state open --json "number,url"
     if ($existing.ExitCode -ne 0) {
         Stop-Sync "gh pr list failed" @($existing.Output)
     }
