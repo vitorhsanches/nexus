@@ -60,7 +60,7 @@ function harness(overrides = {}) {
     approvals: { 'DEV-NATIVE': [], 'DEV-LEGACY': [] },
     changed: { 'DEV-NATIVE': [], 'DEV-LEGACY': [] },
     diff: { 'DEV-NATIVE': { base_sha: 'aaaaaaaaaaaa', head_sha: 'bbbbbbbbbbbb', files: [] }, 'DEV-LEGACY': { files: [] } },
-    history: [],
+    history: [], preflight: null, preflightQueue: [],
     fail: {}, hold: {},
     ...overrides,
   };
@@ -69,7 +69,6 @@ function harness(overrides = {}) {
     const method = options.method || 'GET';
     const body = options.body ? JSON.parse(options.body) : null;
     calls.push({ method, url, body });
-    assert.doesNotMatch(url, /\/(apply|reject)\b/, 'the cockpit must never call Apply or Reject');
     if (server.hold[`${method} ${url}`]) await server.hold[`${method} ${url}`];
     const failure = Object.entries(server.fail).find(([pattern]) => `${method} ${url}`.includes(pattern));
     if (failure) {
@@ -110,11 +109,25 @@ function harness(overrides = {}) {
       if (rest === '/diff') return reply(server.diff[id]);
       if (rest === '/integrations') return reply({ integrations: server.history });
       if (rest === '/reviews' && method === 'POST') {
-        server.review = { review_id: 'a'.repeat(64), status: 'REVIEWED', snapshot: { approval_ready: true, diff: { files: server.diff[id].files } } };
-        server.history = [{ review_id: 'a'.repeat(64), status: 'REVIEWED' }];
+        server.review = { review_id: 'a'.repeat(64), status: 'REVIEWED', target_branch: 'main', target_head: 'a'.repeat(40),
+          snapshot: { approval_ready: true, target_branch: 'main', target_head: 'a'.repeat(40), diff: server.diff[id] } };
+        server.history = [server.review];
         return reply(server.review);
       }
-      if (rest === '/preflight') return reply({ ready: false, issues: [{ code: 'INTEGRATION_DISABLED' }] });
+      if (rest.startsWith('/reviews/') && method === 'GET') return reply(server.history.find(row => rest.endsWith(row.review_id)));
+      if (rest === '/preflight') return reply(server.preflightQueue.length ? server.preflightQueue.shift()
+        : server.preflight || { review_id: 'a'.repeat(64), ready: false, gate_enabled: false,
+          issues: [{ code: 'INTEGRATION_DISABLED', message: 'Integração desabilitada.' }] });
+      if (rest === '/apply' && method === 'POST') {
+        server.review = { ...server.review, status: 'APPLIED', result_sha: 'c'.repeat(40) };
+        server.history = [server.review];
+        return reply({ review_id: body.review_id, status: 'APPLIED', branch: 'main', commit_sha: 'c'.repeat(40) });
+      }
+      if (rest === '/reject' && method === 'POST') {
+        server.review = { ...server.review, status: 'REJECTED' };
+        server.history = [server.review];
+        return reply({ review_id: body.review_id, status: 'REJECTED' });
+      }
     }
     throw new Error(`Unexpected API call: ${method} ${url}`);
   };
@@ -530,7 +543,7 @@ test('files and diff render as inert text, with secrets redacted and truncation 
   assert.match(diff.textContent, /Sensitive file content is omitted\./);
 });
 
-test('the review snapshot and preflight are explicit, read-only and never apply', async () => {
+test('the review snapshot and preflight show the exact destination, diff, and integration block', async () => {
   const app = harness();
   app.server.changed['DEV-NATIVE'] = [{ path: 'calc.py', status: 'M' }];
   app.server.diff['DEV-NATIVE'] = { files: [{ path: 'calc.py', status: 'M', patch: '+x' }] };
@@ -542,14 +555,123 @@ test('the review snapshot and preflight are explicit, read-only and never apply'
   await app.settle();
   assert.deepEqual(app.posts.map(call => call.url), ['/api/dev/sessions/DEV-NATIVE/reviews']);
   assert.match(app.text('native-review'), /Revisão aaaaaaaaaaaa · REVIEWED · 1 arquivo\(s\) · pronta para decisão humana/);
-  assert.match(app.text('native-review-note'), /continua na interface Development/);
+  assert.match(app.text('native-review-target'), /Destino: main/);
+  assert.match(app.text('native-review-files'), /calc\.py/);
+  assert.match(app.text('native-review-diff'), /\+x/);
+  assert.match(app.text('native-review-note'), /Inspecione o diff/);
   app.byId['native-review-preflight'].dispatch('click');
   await app.settle();
   assert.match(app.text('native-preflight'), /Preflight BLOQUEADO · INTEGRATION_DISABLED/);
+  assert.match(app.text('native-review-blockers'), /Integração desabilitada/);
   assert.match(app.text('native-history'), /aaaaaaaaaaaa · REVIEWED/);
   assert.equal(app.posts.length, 1);
-  assert.ok(nativeMarkup.includes('href="/nexus#development"'), 'direct access to the Development view for Apply/Reject');
+  assert.equal(app.byId['native-review-apply'].disabled, true);
   assert.ok(app.calls.every(call => !/\/(apply|reject)/.test(call.url)));
+});
+
+async function createReviewInCockpit(app) {
+  app.server.changed['DEV-NATIVE'] = [{ path: 'calc.py', status: 'M' }];
+  app.server.diff['DEV-NATIVE'] = { base_sha: 'a'.repeat(40), head_sha: 'a'.repeat(40),
+    files: [{ path: 'calc.py', status: 'M', patch: '+def add(a, b):\n+    return a + b' }] };
+  await app.selectProject();
+  await app.selectSession('DEV-NATIVE');
+  app.byId['native-review-create'].dispatch('click');
+  await app.settle();
+}
+
+test('Apply requires a reviewed snapshot, ready preflight, explicit confirmation, and a second server preflight', async () => {
+  const app = harness({ integration: true,
+    preflight: { review_id: 'a'.repeat(64), ready: true, gate_enabled: true, target_branch: 'main', issues: [] } });
+  await createReviewInCockpit(app);
+  assert.equal(app.byId['native-review-apply'].disabled, true);
+  app.byId['native-review-apply'].dispatch('click');
+  await app.settle();
+  assert.equal(app.posts.filter(call => call.url.endsWith('/apply')).length, 0);
+  app.byId['native-review-preflight'].dispatch('click');
+  await app.settle();
+  assert.equal(app.byId['native-review-apply'].disabled, true, 'preflight alone is not consent');
+  app.byId['native-apply-confirm'].checked = true;
+  app.byId['native-apply-confirm'].dispatch('change');
+  assert.equal(app.byId['native-review-apply'].disabled, false);
+  app.byId['native-review-apply'].dispatch('click');
+  await app.settle();
+  const writes = app.posts.filter(call => call.url.endsWith('/apply'));
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].body, { review_id: 'a'.repeat(64), confirmed: true });
+  const preflights = app.calls.filter(call => call.url.includes('/preflight?'));
+  assert.equal(preflights.length, 2, 'the second read occurred immediately before Apply');
+  assert.ok(app.calls.indexOf(preflights[1]) < app.calls.indexOf(writes[0]));
+  assert.match(app.text('native-review'), /APPLIED/);
+  assert.match(app.text('native-history'), /APPLIED/);
+  assert.equal(app.byId['native-apply-confirm'].checked, false);
+});
+
+test('a destination change between confirmation and Apply blocks the POST', async () => {
+  const ready = { review_id: 'a'.repeat(64), ready: true, gate_enabled: true, issues: [] };
+  const moved = { review_id: 'a'.repeat(64), ready: false, gate_enabled: true,
+    issues: [{ code: 'TARGET_MOVED', message: 'A branch de destino mudou.' }] };
+  const app = harness({ integration: true, preflightQueue: [ready, moved] });
+  await createReviewInCockpit(app);
+  app.byId['native-review-preflight'].dispatch('click');
+  await app.settle();
+  app.byId['native-apply-confirm'].checked = true;
+  app.byId['native-apply-confirm'].dispatch('change');
+  app.byId['native-review-apply'].dispatch('click');
+  await app.settle();
+  assert.equal(app.posts.filter(call => call.url.endsWith('/apply')).length, 0);
+  assert.match(app.text('native-review-blockers'), /TARGET_MOVED.*destino mudou/);
+  assert.equal(app.byId['native-apply-confirm'].checked, false);
+});
+
+test('Apply failure is surfaced, history is reconciled, and no automatic retry occurs', async () => {
+  const app = harness({ integration: true,
+    preflight: { review_id: 'a'.repeat(64), ready: true, gate_enabled: true, issues: [] },
+    fail: { 'POST /api/dev/sessions/DEV-NATIVE/apply': 'Snapshot obsoleto' } });
+  await createReviewInCockpit(app);
+  app.byId['native-review-preflight'].dispatch('click');
+  await app.settle();
+  app.byId['native-apply-confirm'].checked = true;
+  app.byId['native-apply-confirm'].dispatch('change');
+  app.byId['native-review-apply'].dispatch('click');
+  await app.settle();
+  assert.equal(app.posts.filter(call => call.url.endsWith('/apply')).length, 1);
+  assert.match(app.text('native-review-note'), /Resultado do Apply incerto.*Snapshot obsoleto/);
+  assert.equal(app.byId['native-review-apply'].disabled, true);
+  assert.equal(app.byId['native-apply-confirm'].checked, false);
+});
+
+test('Reject is an independent human click and refreshes persisted history without Apply', async () => {
+  const app = harness();
+  await createReviewInCockpit(app);
+  assert.equal(app.byId['native-review-reject'].disabled, false);
+  app.byId['native-review-reject'].dispatch('click');
+  await app.settle();
+  assert.deepEqual(app.posts.filter(call => call.url.endsWith('/reject')).map(call => call.body),
+    [{ review_id: 'a'.repeat(64) }]);
+  assert.equal(app.posts.filter(call => call.url.endsWith('/apply')).length, 0);
+  assert.match(app.text('native-review'), /REJECTED/);
+  assert.match(app.text('native-history'), /REJECTED/);
+  assert.equal(app.byId['native-review-apply'].disabled, true);
+});
+
+test('incomplete diff and active turn block Apply, while reload restores the persisted review', async () => {
+  const app = harness({ integration: true,
+    preflight: { review_id: 'a'.repeat(64), ready: true, gate_enabled: true, issues: [] } });
+  await createReviewInCockpit(app);
+  await app.selectSession('DEV-NATIVE');
+  assert.match(app.text('native-review'), /REVIEWED/, 'history restores the persisted snapshot');
+  app.server.history[0].snapshot.diff.files[0].patch = null;
+  app.server.history[0].snapshot.diff.files[0].content_omitted = true;
+  await app.selectSession('DEV-NATIVE');
+  assert.match(app.text('native-review-blockers'), /diff incompleto/);
+  assert.equal(app.byId['native-review-apply'].disabled, true);
+  app.server.history[0].snapshot.diff.files[0].patch = '+complete';
+  app.server.history[0].snapshot.diff.files[0].content_omitted = false;
+  app.server.turns['DEV-NATIVE'] = [runningTurn];
+  await app.selectSession('DEV-NATIVE');
+  assert.match(app.text('native-review-blockers'), /Execução ativa/);
+  assert.equal(app.byId['native-review-apply'].disabled, true);
+  assert.equal(app.byId['native-review-reject'].disabled, true);
 });
 
 test('a legacy OmniRoute session is labelled and read-only: no sending, no review', async () => {
@@ -633,8 +755,7 @@ test('changing project closes the live stream and stops polling', async () => {
   assert.equal(app.timers.filter(timer => timer.delay === 3000).length, 0);
 });
 
-test('the module never builds HTML from data and has no apply, reject or eval path', () => {
+test('the module never builds HTML from data or persists review consent in the browser', () => {
   assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function/);
-  assert.doesNotMatch(script, /\/api\/[^'"`\s]*\/(apply|reject)/i);
   assert.doesNotMatch(script, /localStorage|sessionStorage/);
 });

@@ -294,6 +294,8 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .native-files{display:grid;gap:2px}
 .native-file{text-align:left;padding:3px 6px;border:1px solid transparent;background:transparent;color:var(--text);font:10px 'Cascadia Code',Consolas,monospace;cursor:pointer}
 .native-file.is-selected,.native-file:hover{border-color:var(--accent-border);color:var(--accent)}
+.native-apply-confirm{display:flex;align-items:flex-start;gap:6px;line-height:1.5;letter-spacing:0!important;text-transform:none!important}
+.native-apply-confirm input{flex:none;margin:2px 0 0}
 .native-approval{display:grid;gap:4px;padding:6px 0;border-bottom:1px solid var(--border-soft);font:10px/1.5 'Cascadia Code',Consolas,monospace}
 .native-approval.is-pending{border-left:2px solid var(--warning);padding-left:7px}
 .native-approval-detail{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text)}

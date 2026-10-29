@@ -2,8 +2,8 @@
 //
 // Works only through the existing /api/dev routes (the same ones the
 // Development view uses). Every action that creates a session, runs inference,
-// decides an approval or records a review is a separate explicit click; nothing
-// is retried or decided automatically, and Apply/Reject are not offered here.
+// decides an approval, records a review, rejects, or applies it is a separate
+// explicit human click; nothing is retried or decided automatically.
 (() => {
   const host = window.NexusCockpit;
   const pane = document.getElementById('native-pane');
@@ -19,7 +19,8 @@
     projectId: null, generation: 0, gate: null, integrationGate: null, gateError: '',
     models: [], defaultModel: null, modelsError: '', sessions: [], sessionsError: '',
     session: null, turns: [], approvals: [], seenApprovals: new Set(), files: [], diff: null, changesError: '', selectedFile: null,
-    review: null, preflight: null, history: [], busy: new Set(), sessionNote: null, approvalPollFailed: false,
+    review: null, preflight: null, history: [], reviewDecisionUncertain: false,
+    busy: new Set(), sessionNote: null, approvalPollFailed: false,
     stream: null, cursor: null, activeTurnId: null, live: null, connection: 'idle', pollTimer: null, reconnectTimer: null,
   };
 
@@ -59,6 +60,9 @@
   const sessionPath = (suffix = '') => `/api/dev/sessions/${encodeURIComponent(state.session.session_id)}${suffix}`;
   const stale = generation => generation !== state.generation;
   const pendingApprovals = () => state.approvals.filter(item => item.status === 'PENDING');
+  const reviewableSnapshot = review => Boolean(review?.snapshot?.approval_ready &&
+    !review.snapshot.diff?.truncated && (review.snapshot.diff?.files || []).length &&
+    review.snapshot.diff.files.every(file => typeof file.patch === 'string' && !file.truncated && !file.content_omitted));
   const backendLabel = session => (isNative(session) ? 'Codex Native' : 'OmniRoute (legado)');
   const selectedModel = () => {
     const value = $('native-model').value;
@@ -239,11 +243,32 @@
       const snapshot = state.review.snapshot || {};
       summary.textContent = `Revisão ${String(state.review.review_id).slice(0, 12)} · ${state.review.status} · ${(snapshot.diff?.files || []).length} arquivo(s) · ${snapshot.approval_ready ? 'pronta para decisão humana' : 'NÃO revisável por completo'}`;
     }
+    const snapshot = state.review?.snapshot || {};
+    const files = snapshot.diff?.files || [];
+    $('native-review-target').textContent = state.review
+      ? `Destino: ${snapshot.target_branch || state.review.target_branch || 'desconhecido'} · HEAD ${String(snapshot.target_head || state.review.target_head || '?').slice(0, 12)}`
+      : 'Destino: registre ou selecione uma revisão.';
+    $('native-review-files').replaceChildren(...files.map(file => element('div', 'native-file',
+      `${file.status || '?'} ${file.path}${file.truncated || file.content_omitted ? ` · ${file.reason || 'conteúdo incompleto'}` : ''}`)));
+    $('native-review-diff').textContent = files.length
+      ? files.map(file => `${file.status || '?'} ${file.path}\n${file.patch == null ? file.reason || 'Patch indisponível' : redact(file.patch)}`).join('\n\n')
+      : 'Nenhum arquivo no snapshot.';
     $('native-preflight').textContent = state.preflight
-      ? `Preflight ${state.preflight.ready ? 'PRONTO' : 'BLOQUEADO'}${(state.preflight.issues || []).length ? ` · ${(state.preflight.issues || []).map(issue => issue.code).join(', ')}` : ''}`
+      ? `Preflight ${state.preflight.ready ? 'PRONTO' : 'BLOQUEADO'}${(state.preflight.issues || []).length ? ` · ${(state.preflight.issues || []).map(issue => `${issue.code}${issue.message ? `: ${issue.message}` : ''}`).join('; ')}` : ''}`
       : '';
+    const blockers = [];
+    if (state.review) {
+      if (state.reviewDecisionUncertain) blockers.push('Resultado da decisão incerto. Reabra a sessão e confira o histórico.');
+      if (state.review.status !== 'REVIEWED') blockers.push(`Revisão ${state.review.status}: Apply indisponível.`);
+      if (!reviewableSnapshot(state.review)) blockers.push('Snapshot ou diff incompleto.');
+      if (state.activeTurnId) blockers.push('Execução ativa. Aguarde a conclusão.');
+      if (state.integrationGate !== true) blockers.push('Integração desabilitada no servidor.');
+      if (!state.preflight || state.preflight.review_id !== state.review.review_id) blockers.push('Preflight atual necessário.');
+      else if (!state.preflight.ready) blockers.push(...(state.preflight.issues || []).map(issue => `${issue.code}: ${issue.message || 'bloqueado'}`));
+    }
+    $('native-review-blockers').textContent = blockers.join(' ');
     $('native-history').replaceChildren(...state.history.slice(0, 5).map(row => element('div', 'cockpit-event',
-      `${String(row.review_id).slice(0, 12)} · ${row.status}${row.result_sha ? ` · commit ${String(row.result_sha).slice(0, 10)}` : ''}`)));
+      `${String(row.review_id).slice(0, 12)} · ${row.status}${row.result_sha ? ` · commit ${String(row.result_sha).slice(0, 10)}` : ''}${row.error_message ? ` · ${row.error_message}` : ''}`)));
   };
   const renderControls = () => {
     const session = state.session;
@@ -257,8 +282,17 @@
     $('native-stop').hidden = !active;
     $('native-stop').disabled = state.busy.has('stop');
     const files = state.diff?.files || [];
-    $('native-review-create').disabled = !(native && session.status === 'ACTIVE' && !active && files.length && !state.busy.has('review'));
-    $('native-review-preflight').disabled = !(state.review && !state.busy.has('preflight'));
+    $('native-review-create').disabled = !(native && session.status === 'ACTIVE' && !active && files.length &&
+      !state.busy.has('review') && !state.busy.has('apply') && !state.busy.has('reject') && !state.reviewDecisionUncertain);
+    const reviewed = Boolean(native && session?.status === 'ACTIVE' && state.review?.status === 'REVIEWED');
+    const safeReview = Boolean(reviewed && !active && !state.reviewDecisionUncertain && reviewableSnapshot(state.review) &&
+      !state.busy.has('apply') && !state.busy.has('reject'));
+    $('native-review-preflight').disabled = !safeReview || state.busy.has('preflight');
+    $('native-review-reject').disabled = !reviewed || active || state.reviewDecisionUncertain ||
+      state.busy.has('apply') || state.busy.has('reject') || state.busy.has('preflight');
+    $('native-review-apply').disabled = !(safeReview && state.integrationGate === true &&
+      state.preflight?.ready === true && state.preflight.review_id === state.review.review_id &&
+      $('native-apply-confirm').checked && !state.busy.has('preflight'));
     $('native-refresh').disabled = !session || state.busy.has('changes');
     let notice = '';
     if (session && !native) notice = 'Sessão OmniRoute legada: somente leitura aqui. Use a interface Development para operá-la.';
@@ -299,9 +333,11 @@
   const resetSession = () => {
     closeStream(); stopPolling();
     Object.assign(state, { session: null, turns: [], approvals: [], files: [], diff: null, changesError: '', selectedFile: null,
-      review: null, preflight: null, history: [], activeTurnId: null, live: null, cursor: null, connection: 'idle' });
+      review: null, preflight: null, history: [], reviewDecisionUncertain: false,
+      activeTurnId: null, live: null, cursor: null, connection: 'idle' });
     state.seenApprovals = new Set();
     state.busy.clear();
+    $('native-apply-confirm').checked = false;
     state.sessionNote = null; state.approvalPollFailed = false;
     setNote('native-error', '');
     setNote('native-approval-note', '');
@@ -315,12 +351,13 @@
       state.files = changed.files || [];
       state.diff = diff;
       state.changesError = '';
+      if (state.preflight) { state.preflight = null; $('native-apply-confirm').checked = false; }
     } catch (error) {
       if (stale(generation)) return;
       state.changesError = error.message;
       state.diff = null;
     } finally {
-      if (!stale(generation)) { state.busy.delete('changes'); renderChanges(); renderControls(); }
+      if (!stale(generation)) { state.busy.delete('changes'); renderChanges(); renderReview(); renderControls(); }
     }
   };
   const loadApprovals = async generation => {
@@ -348,7 +385,18 @@
     if (!state.session) return;
     try {
       const data = await api(sessionPath('/integrations'));
-      if (!stale(generation)) { state.history = data.integrations || []; renderReview(); }
+      if (!stale(generation)) {
+        state.history = data.integrations || [];
+        const persisted = state.review
+          ? state.history.find(row => row.review_id === state.review.review_id)
+          : state.history[0];
+        if (persisted) {
+          if (state.review?.status !== persisted.status) { state.preflight = null; $('native-apply-confirm').checked = false; }
+          state.review = persisted;
+          if (persisted.status !== 'REVIEWED') state.reviewDecisionUncertain = false;
+        }
+        renderReview(); renderControls();
+      }
     } catch (_error) { /* history is informational; the review controls stay explicit */ }
   };
   const loadTurns = async generation => {
@@ -584,8 +632,9 @@
     try {
       const review = await api(sessionPath('/reviews'), { method: 'POST', body: {} });
       if (stale(generation)) return;
-      state.review = review; state.preflight = null;
-      setNote('native-review-note', 'Snapshot registrado. Aplicar ou rejeitar continua na interface Development.');
+      state.review = review; state.preflight = null; state.reviewDecisionUncertain = false;
+      $('native-apply-confirm').checked = false;
+      setNote('native-review-note', 'Snapshot registrado. Inspecione o diff e o destino antes de decidir.');
       await loadHistory(generation);
     } catch (error) {
       if (!stale(generation)) setNote('native-review-note', `Não foi possível registrar a revisão: ${error.message}`, true);
@@ -595,16 +644,88 @@
     }
   };
   const checkPreflight = async () => {
-    if (!state.session || !state.review || state.busy.has('preflight')) return;
+    if (!state.session || !state.review || state.review.status !== 'REVIEWED' || state.reviewDecisionUncertain ||
+        state.activeTurnId || state.busy.has('preflight')) return;
     const generation = state.generation;
     state.busy.add('preflight'); renderControls();
     try {
       const result = await api(sessionPath(`/preflight?review_id=${encodeURIComponent(state.review.review_id)}`));
-      if (!stale(generation)) { state.preflight = result; setNote('native-review-note', ''); }
+      if (!stale(generation)) {
+        state.preflight = result;
+        if (typeof result.gate_enabled === 'boolean') state.integrationGate = result.gate_enabled;
+        $('native-apply-confirm').checked = false;
+        setNote('native-review-note', '');
+      }
     } catch (error) {
-      if (!stale(generation)) setNote('native-review-note', `Preflight falhou: ${error.message}`, true);
+      if (!stale(generation)) { state.preflight = null; $('native-apply-confirm').checked = false; setNote('native-review-note', `Preflight falhou: ${error.message}`, true); }
     } finally {
       state.busy.delete('preflight');
+      if (!stale(generation)) { renderReview(); renderControls(); }
+    }
+  };
+  const applyReview = async () => {
+    const review = state.review;
+    if (!state.session || !isNative(state.session) || state.session.status !== 'ACTIVE' ||
+        !review || review.status !== 'REVIEWED' || state.reviewDecisionUncertain || !reviewableSnapshot(review) ||
+        state.integrationGate !== true || state.activeTurnId ||
+        !state.preflight?.ready || state.preflight.review_id !== review.review_id ||
+        !$('native-apply-confirm').checked || state.busy.has('apply')) return;
+    const generation = state.generation;
+    let submitted = false;
+    state.busy.add('apply'); renderControls();
+    try {
+      // Read current server preflight immediately before the explicit Apply.
+      // apply_review independently revalidates again under its project lock.
+      const current = await api(sessionPath(`/preflight?review_id=${encodeURIComponent(review.review_id)}`));
+      if (stale(generation)) return;
+      state.preflight = current;
+      if (typeof current.gate_enabled === 'boolean') state.integrationGate = current.gate_enabled;
+      if (!current.ready || state.integrationGate !== true || current.review_id !== review.review_id) {
+        $('native-apply-confirm').checked = false;
+        setNote('native-review-note', 'Aplicação bloqueada pelo preflight atual.', true);
+        return;
+      }
+      if (state.activeTurnId || state.review?.review_id !== review.review_id || !$('native-apply-confirm').checked) return;
+      submitted = true;
+      const result = await api(sessionPath('/apply'), { method: 'POST', body: { review_id: review.review_id, confirmed: true } });
+      if (stale(generation)) return;
+      state.review = { ...review, ...result };
+      state.preflight = null; state.reviewDecisionUncertain = false; $('native-apply-confirm').checked = false;
+      setNote('native-review-note', `Alterações aplicadas em ${result.branch || review.target_branch || 'destino'} · commit ${result.commit_sha || 'indisponível'}.`);
+      await Promise.all([loadHistory(generation), loadChanges(generation)]);
+    } catch (error) {
+      if (stale(generation)) return;
+      state.preflight = null; $('native-apply-confirm').checked = false;
+      if (submitted) state.reviewDecisionUncertain = true;
+      setNote('native-review-note', `${submitted ? 'Resultado do Apply incerto' : 'Aplicação bloqueada'}: ${error.message}. Consulte o histórico antes de qualquer nova decisão.`, true);
+      if (submitted) await loadHistory(generation);
+    } finally {
+      state.busy.delete('apply');
+      if (!stale(generation)) { renderReview(); renderControls(); }
+    }
+  };
+  const rejectReview = async () => {
+    const review = state.review;
+    if (!state.session || !isNative(state.session) || state.session.status !== 'ACTIVE' ||
+        !review || review.status !== 'REVIEWED' || state.reviewDecisionUncertain ||
+        state.activeTurnId || state.busy.has('reject')) return;
+    const generation = state.generation;
+    state.busy.add('reject'); renderControls();
+    try {
+      const result = await api(sessionPath('/reject'), { method: 'POST', body: { review_id: review.review_id } });
+      if (stale(generation)) return;
+      state.review = { ...review, ...result };
+      state.preflight = null; state.reviewDecisionUncertain = false; $('native-apply-confirm').checked = false;
+      setNote('native-review-note', 'Revisão rejeitada. Nenhuma alteração foi aplicada.');
+      await loadHistory(generation);
+    } catch (error) {
+      if (stale(generation)) return;
+      state.preflight = null; $('native-apply-confirm').checked = false;
+      state.reviewDecisionUncertain = true;
+      setNote('native-review-note', `Resultado da rejeição incerto: ${error.message}. Consulte o histórico antes de tentar novamente.`, true);
+      await loadHistory(generation);
+    } finally {
+      state.busy.delete('reject');
       if (!stale(generation)) { renderReview(); renderControls(); }
     }
   };
@@ -624,6 +745,9 @@
   $('native-refresh').addEventListener('click', () => { void loadChanges(state.generation); void loadApprovals(state.generation); });
   $('native-review-create').addEventListener('click', () => { void createReview(); });
   $('native-review-preflight').addEventListener('click', () => { void checkPreflight(); });
+  $('native-apply-confirm').addEventListener('change', renderControls);
+  $('native-review-apply').addEventListener('click', () => { void applyReview(); });
+  $('native-review-reject').addEventListener('click', () => { void rejectReview(); });
 
   host.onProject(projectId => { void loadProject(projectId); });
   render();

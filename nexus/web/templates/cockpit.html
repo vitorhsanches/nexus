@@ -159,13 +159,18 @@
               </details>
               <details class="native-section" id="native-review-section">
                 <summary>Revisão</summary>
-                <p class="native-note">Registra um snapshot do que um humano aprovaria. O cockpit não aplica nem rejeita alterações.</p>
+                <p class="native-note">Registre e inspecione o snapshot antes da decisão humana.</p>
                 <div class="native-actions"><button class="cockpit-send" id="native-review-create" type="button" disabled>Registrar revisão</button><button class="cockpit-send" id="native-review-preflight" type="button" disabled>Verificar preflight</button></div>
                 <p class="native-note" id="native-review" role="status"></p>
+                <p class="native-note" id="native-review-target"></p>
+                <div class="native-files" id="native-review-files"></div>
+                <details class="native-section" id="native-review-diff-section"><summary>Diff completo disponível do snapshot</summary><pre class="cockpit-mission-diff" id="native-review-diff"></pre></details>
                 <p class="native-note" id="native-preflight" role="status"></p>
+                <p class="native-note" id="native-review-blockers" role="status"></p>
+                <label class="native-apply-confirm" for="native-apply-confirm"><input id="native-apply-confirm" type="checkbox"> Confirmo aplicar esta revisão na branch de destino indicada acima</label>
+                <div class="native-actions"><button class="cockpit-send" id="native-review-apply" type="button" disabled>Aplicar alterações</button><button class="cockpit-send" id="native-review-reject" type="button" disabled>Rejeitar revisão</button></div>
                 <p class="native-note" id="native-review-note" role="status"></p>
                 <div id="native-history"></div>
-                <a class="native-link" id="native-open-dev" href="/nexus#development">Abrir a interface Development para aplicar ou rejeitar →</a>
               </details>
               <details class="native-session-menu" id="native-session-menu">
                 <summary id="native-session-summary">Sessões · selecione um projeto</summary>
