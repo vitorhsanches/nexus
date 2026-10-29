@@ -26,7 +26,10 @@ def _make_client():
     """Build a Starlette TestClient. Raises ImportError if not available."""
     from starlette.testclient import TestClient
     from nexus.web.app import create_app
-    return TestClient(create_app(), raise_server_exceptions=True)
+    return TestClient(
+        create_app(), base_url="http://127.0.0.1:8000",
+        client=("127.0.0.1", 50000), raise_server_exceptions=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +463,9 @@ class ProjectsEndpointTest(unittest.TestCase):
     """GET /api/projects"""
 
     def setUp(self):
+        projects_mock = patch("nexus.registry.projects.list_projects", return_value=[])
+        projects_mock.start()
+        self.addCleanup(projects_mock.stop)
         try:
             self.client = _make_client()
         except ImportError:

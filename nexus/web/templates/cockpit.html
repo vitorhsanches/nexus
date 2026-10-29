@@ -22,6 +22,16 @@
       <div class="sidebar-caption">ESPAÇO DE TRABALHO <span id="project-count">00</span></div>
       <button class="project active" id="project-toggle" type="button" aria-label="Selecionar projeto"><span class="project-icon">N</span><span><strong id="project-name">Selecione um projeto</strong><small id="project-detail">Carregando projetos</small></span><span class="chevron">⌄</span></button>
       <nav class="mission-nav" id="project-nav" aria-label="Projetos disponíveis" hidden></nav>
+      <div class="project-create" id="project-dev-controls" hidden>
+        <span id="project-dev-target"></span>
+        <label for="project-dev-token">Token administrativo local</label>
+        <input id="project-dev-token" type="password" maxlength="200" placeholder="NEXUS_ADMIN_TOKEN (não é salvo)" autocomplete="off">
+        <label class="project-dev-confirm" for="project-dev-confirm"><input id="project-dev-confirm" type="checkbox"> Confirmo autorizar Development neste projeto</label>
+        <button class="cockpit-send" id="project-dev-authorize" type="button">Autorizar Development</button>
+        <button class="cockpit-send" id="project-dev-revoke" type="button">Revogar autorização</button>
+        <p class="cockpit-compose-error" id="project-dev-error" role="status"></p>
+        <p class="native-note" id="project-dev-note" role="status">A execução global permanece independente.</p>
+      </div>
       <button class="sidebar-create" id="open-new-project" type="button">＋ Novo projeto</button>
       <div class="project-create" id="project-create-form" hidden>
         <label for="project-create-name">Nome</label>
