@@ -1,6 +1,7 @@
 ﻿"""JSON API routes for the Nexus Local Mission Board UI V1."""
 
 import asyncio
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -342,6 +343,55 @@ def create_project(request: ProjectCreateRequest, http_request: Request):
     try:
         model_management.require_local_operator(http_request, http_request.headers.get("authorization"))
         return register_local_project(request.name, request.path)
+    except DevServiceError as error:
+        raise _dev_error_response(error) from error
+
+
+class ProjectDevelopmentAuthorizationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
+@router.post("/projects/{project_id}/development-authorization")
+def set_project_development_authorization(
+    project_id: str,
+    request: ProjectDevelopmentAuthorizationRequest,
+    http_request: Request,
+):
+    """Change one project's authorization without touching the execution gate."""
+    from nexus.dev import model_management  # noqa: PLC0415
+    from nexus.dev.service import DevServiceError  # noqa: PLC0415
+    from nexus.registry.projects import get_project, list_projects, set_dev_enabled  # noqa: PLC0415
+
+    try:
+        model_management.require_local_operator(
+            http_request, http_request.headers.get("authorization")
+        )
+        project = get_project(project_id)
+        if project is None:
+            raise DevServiceError(
+                "PROJECT_NOT_FOUND", "Projeto não encontrado.", http_status=404
+            )
+        if request.enabled:
+            if not project["enabled"]:
+                raise DevServiceError(
+                    "PROJECT_DISABLED", "Projeto desativado não pode ser autorizado.",
+                    http_status=409,
+                )
+            path = Path(project["path"])
+            if not path.is_dir() or not (path / ".git").exists():
+                raise DevServiceError(
+                    "PROJECT_PATH_NOT_GIT_REPOSITORY",
+                    "O repositório Git do projeto não está disponível.",
+                    http_status=409,
+                )
+        set_dev_enabled(project_id, request.enabled)
+        updated = next((row for row in list_projects() if row["id"] == project_id), None)
+        if updated is None:
+            raise DevServiceError(
+                "PROJECT_NOT_FOUND", "Projeto não encontrado.", http_status=404
+            )
+        return dict(updated)
     except DevServiceError as error:
         raise _dev_error_response(error) from error
 

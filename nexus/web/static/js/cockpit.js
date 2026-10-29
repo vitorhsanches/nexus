@@ -650,7 +650,7 @@
   const api = async (path, options = {}) => {
     const response = await fetch(path, {
       method: options.method || 'GET',
-      headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(modelAdminToken && (options.method === 'POST' || options.admin) ? { Authorization: `Bearer ${modelAdminToken}` } : {}) },
+      headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...((options.adminToken || modelAdminToken) && (options.method === 'POST' || options.admin) ? { Authorization: `Bearer ${options.adminToken || modelAdminToken}` } : {}) },
       ...(options.body ? { body: JSON.stringify(options.body) } : {})
     });
     const data = await response.json();
@@ -1598,6 +1598,11 @@
         : !selected.dev_enabled ? 'Sem autorização de Development'
           : 'Projeto autorizado';
     document.getElementById('workspace-id').textContent = selected?.id || '—';
+    const devControls = document.getElementById('project-dev-controls');
+    devControls.hidden = !selected;
+    document.getElementById('project-dev-target').textContent = selected ? `Projeto: ${selected.name}` : '';
+    document.getElementById('project-dev-authorize').disabled = !selected || !selected.enabled || Boolean(selected.dev_enabled);
+    document.getElementById('project-dev-revoke').disabled = !selected || !selected.dev_enabled;
     renderModelCatalog();
   };
   const renderMissions = agents => {
@@ -1868,6 +1873,9 @@
     projectReady = false;
     projectLoadErrorMessage = '';
     projectId = id;
+    document.getElementById('project-dev-token').value = '';
+    document.getElementById('project-dev-confirm').checked = false;
+    document.getElementById('project-dev-error').textContent = '';
     aiSettings = null;
     aiSettingsRequest++;
     renderAiSettings();
@@ -1917,6 +1925,52 @@
     const nav = document.getElementById('project-nav');
     nav.hidden = !nav.hidden;
   });
+  let projectDevBusy = false;
+  const projectDevToken = document.getElementById('project-dev-token');
+  const projectDevConfirm = document.getElementById('project-dev-confirm');
+  const projectDevError = document.getElementById('project-dev-error');
+  const changeProjectDev = async enabled => {
+    if (projectDevBusy) return;
+    const selected = projects.find(project => project.id === projectId);
+    if (!selected || (enabled && !selected.enabled)) { projectDevError.textContent = 'Selecione um projeto cadastrado e ativo.'; return; }
+    if (enabled && !projectDevConfirm.checked) { projectDevError.textContent = 'Confirme explicitamente a autorização deste projeto.'; return; }
+    const typedToken = projectDevToken.value.trim();
+    const token = typedToken || modelAdminToken;
+    if (!token) { projectDevError.textContent = 'Informe o token administrativo.'; return; }
+    const targetId = selected.id;
+    projectDevBusy = true;
+    projectDevError.textContent = '';
+    document.getElementById('project-dev-authorize').disabled = true;
+    document.getElementById('project-dev-revoke').disabled = true;
+    try {
+      const updated = await api(`/api/projects/${encodeURIComponent(targetId)}/development-authorization`, {
+        method: 'POST', body: { enabled }, adminToken: token,
+      });
+      projectDevToken.value = '';
+      if (typedToken) modelAdminToken = token;
+      projects = projects.map(project => project.id === targetId ? updated : project);
+      if (projectId === targetId) {
+        selectProject(targetId);
+      }
+      notify(enabled ? 'Development autorizado para o projeto.' : 'Autorização Development revogada. Novas operações protegidas ficam bloqueadas.');
+    } catch (error) {
+      projectDevError.textContent = error.message;
+      if (typedToken) projectDevToken.value = '';
+      // A transport failure can leave the write outcome uncertain. Re-read
+      // persisted state; never repeat the administrative POST automatically.
+      try {
+        const data = await api('/api/projects');
+        projects = data.projects || [];
+      } catch (_readError) {
+        projectDevError.textContent += ' Não foi possível confirmar o estado; atualize os projetos.';
+      }
+    } finally {
+      projectDevBusy = false;
+      renderProjects();
+    }
+  };
+  document.getElementById('project-dev-authorize').addEventListener('click', () => { void changeProjectDev(true); });
+  document.getElementById('project-dev-revoke').addEventListener('click', () => { void changeProjectDev(false); });
   // Register a local Git repository as a project (P6.C2). Reuses the same
   // admin-token session state as Settings → Modelos -- never a separate
   // or weaker auth path -- and never enables Development Mode or global

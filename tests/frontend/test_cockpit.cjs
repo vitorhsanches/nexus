@@ -168,6 +168,14 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
           name: body.name, path: body.path, enabled: 1, dev_enabled: 0 };
         box.projects.push(created);
         data = created;
+      } else if (/^\/api\/projects\/[^/]+\/development-authorization$/.test(url)) {
+        if (box.projectDevError) return { ok: false, status: box.projectDevError.status || 401,
+          json: async () => ({ detail: { message: box.projectDevError.message } }) };
+        const id = decodeURIComponent(url.split('/')[3]);
+        const project = box.projects.find(row => row.id === id);
+        if (!project) return { ok: false, status: 404, json: async () => ({ detail: { message: 'Projeto não encontrado.' } }) };
+        project.dev_enabled = JSON.parse(options.body).enabled ? 1 : 0;
+        data = { ...project };
       } else throw new Error(`Unexpected POST: ${url}`);
       return { ok: true, json: async () => data };
     }
@@ -1186,4 +1194,45 @@ test('registration is blocked client-side without an admin token, with no reques
   await app.settle();
   assert.match(app.byId['project-create-error'].textContent, /token administrativo/);
   assert.equal(app.calls.some(call => call.method === 'POST' && call.url === '/api/projects'), false);
+});
+
+test('Development authorization requires explicit confirmation, updates badges, and revocation blocks new authorization state', async () => {
+  const app = harness([], { projects: [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 0 }] });
+  await app.settle();
+  app.byId['project-nav'].children[0].dispatch('click');
+  await app.settle();
+  app.byId['project-dev-token'].value = 'operator-token';
+  app.byId['project-dev-authorize'].dispatch('click');
+  await app.settle();
+  assert.equal(app.calls.some(call => call.url.includes('/development-authorization')), false);
+  assert.match(app.byId['project-dev-error'].textContent, /Confirme explicitamente/);
+  app.byId['project-dev-confirm'].checked = true;
+  app.byId['project-dev-authorize'].dispatch('click');
+  await app.settle();
+  const writes = () => app.calls.filter(call => call.url.endsWith('/development-authorization'));
+  assert.equal(writes().length, 1);
+  assert.deepEqual(writes()[0].body, { enabled: true });
+  assert.equal(writes()[0].authorization, 'Bearer operator-token');
+  assert.equal(app.byId['project-detail'].textContent, 'Projeto autorizado');
+  assert.equal(app.byId['project-dev-token'].value, '');
+  app.byId['project-dev-revoke'].dispatch('click');
+  await app.settle();
+  assert.equal(writes().length, 2);
+  assert.deepEqual(writes()[1].body, { enabled: false });
+  assert.equal(app.byId['project-detail'].textContent, 'Sem autorização de Development');
+});
+
+test('invalid project admin token leaves authorization and badges unchanged', async () => {
+  const app = harness([], { projects: [{ id: 'demo', name: 'Projeto real', enabled: 1, dev_enabled: 0 }] });
+  await app.settle();
+  app.byId['project-nav'].children[0].dispatch('click');
+  await app.settle();
+  app.byId['project-dev-confirm'].checked = true;
+  app.byId['project-dev-token'].value = 'invalid-token';
+  app.box.projectDevError = new Error('A valid Nexus administrator bearer token is required.');
+  app.byId['project-dev-authorize'].dispatch('click');
+  await app.settle();
+  assert.match(app.byId['project-dev-error'].textContent, /valid Nexus administrator/);
+  assert.equal(app.byId['project-detail'].textContent, 'Sem autorização de Development');
+  assert.equal(app.byId['project-dev-token'].value, '');
 });

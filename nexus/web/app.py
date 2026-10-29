@@ -113,12 +113,12 @@ def create_app():
 
     @app.middleware("http")
     async def protect_chat_localhost(request: Request, call_next):
-        # Chat and Development Mode can both execute Codex turns (the
-        # latter with workspace-write). Reject DNS rebinding and browser
-        # requests from a different origin before any route of either is
-        # reached -- the same loopback-authority + same-origin check,
-        # reused rather than re-implemented for /api/dev/.
-        if request.url.path.startswith(("/api/chat/", "/api/dev/", "/api/workspace/")):
+        # Protect local APIs, including project administration, from DNS
+        # rebinding and browser requests from a different origin.
+        protected = request.url.path.startswith(
+            ("/api/chat/", "/api/dev/", "/api/workspace/", "/api/projects/")
+        ) or request.url.path == "/api/projects"
+        if protected:
             hosts = request.headers.getlist("host")
             authority = _loopback_authority(hosts[0]) if len(hosts) == 1 else None
             origins = request.headers.getlist("origin")
@@ -127,7 +127,10 @@ def create_app():
             ):
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": {"code": "CHAT_ORIGIN_FORBIDDEN", "message": "Chat requires a local same-origin request."}},
+                    content={"detail": {
+                        "code": "CHAT_ORIGIN_FORBIDDEN",
+                        "message": "A local same-origin request is required.",
+                    }},
                 )
         return await call_next(request)
 

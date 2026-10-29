@@ -24,6 +24,10 @@ html,body{height:100%;overflow:hidden}
 .project-create label{color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace;letter-spacing:.05em;text-transform:uppercase}
 .project-create input{width:100%;min-width:0;padding:6px;background:var(--terminal);border:1px solid var(--border-strong);border-radius:2px;color:var(--text);font:10px 'Cascadia Code',Consolas,monospace}
 .project-create .native-actions{margin-top:2px}
+.project-dev-confirm{display:flex;align-items:flex-start;gap:6px;line-height:1.4;letter-spacing:0!important;text-transform:none!important}
+.project-create .project-dev-confirm input{width:auto;margin:1px 0 0;flex:none}
+#project-dev-target{font:10px 'Cascadia Code',Consolas,monospace;color:var(--accent-strong)}
+#project-dev-controls button:disabled{opacity:.5;cursor:not-allowed}
 .project-row{display:flex;align-items:center;gap:8px;min-height:38px}
 .project-row .mission-indicator{flex:none}
 .project-row-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

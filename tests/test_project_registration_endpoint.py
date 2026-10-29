@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 import nexus.registry.database as database
@@ -175,3 +176,90 @@ def test_endpoint_without_admin_token_configured_is_rejected(
         routes.create_project(body, request)
     assert error.value.status_code == 503
     assert error.value.detail["code"] == "ADMIN_AUTH_NOT_CONFIGURED"
+
+
+def test_development_authorization_and_revocation_are_project_scoped(
+    isolated_registry, tmp_path, monkeypatch
+):
+    from nexus.web.app import create_app
+
+    monkeypatch.setenv("NEXUS_ADMIN_TOKEN", "x" * 32)
+    monkeypatch.setenv("NEXUS_DEV_EXECUTION_ENABLED", "0")
+    first = register_local_project("First", str(make_git_repo(tmp_path / "first")))
+    second = register_local_project("Second", str(make_git_repo(tmp_path / "second")))
+    client = TestClient(
+        create_app(), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)
+    )
+    endpoint = f"/api/projects/{first['id']}/development-authorization"
+    headers = {"Authorization": f"Bearer {'x' * 32}"}
+
+    denied = client.post(
+        endpoint, json={"enabled": True}, headers={"Authorization": "Bearer wrong"}
+    )
+    assert denied.status_code == 401
+    assert projects.get_dev_enabled(first["id"]) is False
+
+    authorized = client.post(endpoint, json={"enabled": True}, headers=headers)
+    assert authorized.status_code == 200
+    assert authorized.json()["dev_enabled"] == 1
+    assert projects.get_dev_enabled(first["id"]) is True
+    assert projects.get_dev_enabled(second["id"]) is False
+    assert client.get("/api/dev/execution-status").json()["execution_enabled"] is False
+
+    revoked = client.post(endpoint, json={"enabled": False}, headers=headers)
+    assert revoked.status_code == 200
+    assert revoked.json()["dev_enabled"] == 0
+    assert projects.get_dev_enabled(first["id"]) is False
+
+
+def test_development_authorization_rejects_missing_ineligible_and_external_requests(
+    isolated_registry, tmp_path, monkeypatch
+):
+    from nexus.web.app import create_app
+
+    monkeypatch.setenv("NEXUS_ADMIN_TOKEN", "x" * 32)
+    repo = make_git_repo(tmp_path / "repo")
+    project = register_local_project("Repo", str(repo))
+    client = TestClient(
+        create_app(), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)
+    )
+    headers = {"Authorization": f"Bearer {'x' * 32}"}
+    endpoint = f"/api/projects/{project['id']}/development-authorization"
+
+    missing = client.post(
+        "/api/projects/missing/development-authorization",
+        json={"enabled": True}, headers=headers,
+    )
+    assert missing.status_code == 404
+    foreign_origin = client.post(
+        endpoint, json={"enabled": True},
+        headers={**headers, "Origin": "http://evil.example"},
+    )
+    assert foreign_origin.status_code == 403
+    foreign_host = client.post(
+        endpoint, json={"enabled": True}, headers={**headers, "Host": "evil.example"},
+    )
+    assert foreign_host.status_code == 403
+    registration = client.post(
+        "/api/projects", json={"name": "X", "path": str(repo)},
+        headers={**headers, "Origin": "http://evil.example"},
+    )
+    assert registration.status_code == 403
+    assert projects.get_dev_enabled(project["id"]) is False
+
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE projects SET enabled = 0 WHERE id = ?", (project["id"],)
+        )
+    assert client.post(
+        endpoint, json={"enabled": True}, headers=headers
+    ).status_code == 409
+    with database.get_connection() as connection:
+        connection.execute(
+            "UPDATE projects SET enabled = 1 WHERE id = ?", (project["id"],)
+        )
+    (repo / ".git").rename(repo / ".git-unavailable")
+    assert client.post(
+        endpoint, json={"enabled": True}, headers=headers
+    ).status_code == 409
+    assert projects.get_dev_enabled(project["id"]) is False
