@@ -239,14 +239,14 @@ def test_approved_maestro_plan_persists_parent_pane_on_each_agent(ws_env, monkey
     plan_id = workspace_store.create_plan(
         "demo", "Implement a feature", policy_version="test", complexity="simple",
         proposal={"complexity": "simple", "summary": "Feature", "agents": [{
-            "key": "impl", "role": "implementer", "title": "Implementer", "model": "free/model",
+            "key": "impl", "role": "implementer", "title": "Implementer", "model": "gpt-native",
             "task": "Implement feature", "acceptance_criteria": ["Works"], "depends_on": [],
         }]},
         source="llm", conversation_id=state["conversation_id"],
     )
     result = service.approve_plan(
-        plan_id, agent_models={"impl": "free/model"}, max_turns_per_agent=1,
-        mission_timeout_seconds=60, confirm_costs=False,
+        plan_id, agent_models={"impl": "gpt-native"}, max_turns_per_agent=1,
+        mission_timeout_seconds=60, confirm_costs=True,
     )
     assert result["panes"][0]["maestro_parent_pane_id"] == maestro_pane["pane_id"]
     database.initialize_database()

@@ -17,7 +17,7 @@ Plan shape (stored as workspace_plans.proposal_json, schema maestro-plan/1):
       "explanation": str,               # plain language, shown to the user
       "needs_clarification": str | None, # Maestro asks instead of planning
       "agents": [{
-          "key", "role", "title", "model", "cost_status", "task",
+          "key", "role", "title", "backend", "model", "effort", "cost_status", "task",
           "acceptance_criteria": [str], "depends_on": [key], "touches": [str],
           "independent": bool, "conflicts_with": [key]
       }],
@@ -45,7 +45,7 @@ MAX_RESPONSE_CHARS = 60_000
 MAX_EXPLANATION_CHARS = 4_000
 _KEY = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
 _TOP_KEYS = {"complexity", "summary", "agents", "needs_clarification"}
-_AGENT_KEYS = {"key", "role", "title", "model", "task", "acceptance_criteria", "depends_on", "touches"}
+_AGENT_KEYS = {"key", "role", "title", "backend", "model", "effort", "task", "acceptance_criteria", "depends_on", "touches"}
 
 ROLE_GUIDE = {
     "implementer": "implements a self-contained change end to end (default for most tasks)",
@@ -61,7 +61,11 @@ class PlanValidationError(ValueError):
 
 
 def build_prompt(*, user_text: str, project: dict, models: list[dict], panes: list[dict], limit: int, previous_summary: str | None) -> str:
-    model_lines = "\n".join(f"- {row['id']} (cost: {row.get('cost_status') or 'unknown'})" for row in models) or "- (none available)"
+    model_lines = "\n".join(
+        f"- {row.get('backend', 'omniroute')}:{row['id']} (cost: {row.get('cost_status') or 'unknown'}; "
+        f"efforts: {', '.join(row.get('supported_efforts') or []) or 'model default'})"
+        for row in models
+    ) or "- (none available)"
     role_lines = "\n".join(f"- {role}: {text}" for role, text in ROLE_GUIDE.items())
     pane_lines = "\n".join(f"- {pane['title']} (role {pane['role']}, model {pane['model'] or 'none'})" for pane in panes) or "- (none)"
     previous = f"\nYour previous plan summary in this conversation: {previous_summary}\n" if previous_summary else ""
@@ -71,7 +75,7 @@ You are in PLANNING MODE: you may read the repository to understand it, but you 
 Decide how many agents this request really needs (at most {limit}). Rules:
 - A simple, self-contained task gets exactly ONE agent ("complexity": "simple").
 - Split work only into genuinely separate responsibilities. Agents run one after another in isolated worktrees; never assume two agents can edit the same files at the same time. If two agents would touch the same files, make the later one depend on the earlier one.
-- Choose each agent's model ONLY from this approved list (exact ids). Prefer the cheapest suitable route:
+- Choose each agent's backend, model and effort ONLY from this live approved list. Preserve the backend prefix exactly; never invent a model or switch to an unavailable backend. Prefer the cheapest suitable route:
 {model_lines}
 - Roles:
 {role_lines}
@@ -84,7 +88,7 @@ Agents already open in the workspace:
 Answer in the user's language. First explain your decision in a few short, plain sentences (no JSON there). Then output exactly one JSON object between the markers, with no other keys:
 {PLAN_BEGIN}
 {{"complexity": "simple", "summary": "one line", "needs_clarification": null,
-  "agents": [{{"key": "impl", "role": "implementer", "title": "short name", "model": "<approved id>",
+  "agents": [{{"key": "impl", "role": "implementer", "title": "short name", "backend": "codex_native", "model": "<approved id>", "effort": "<supported effort or null for model default>",
     "task": "what this agent must do", "acceptance_criteria": ["checkable criterion"],
     "depends_on": [], "touches": ["path or area"]}}]}}
 {PLAN_END}
@@ -150,7 +154,13 @@ def validate(
     unknown = set(raw) - _TOP_KEYS
     if unknown:
         raise PlanValidationError(f"unknown plan fields: {sorted(unknown)}")
-    approved = {row["id"]: row for row in models}
+    approved = {
+        (row.get("backend", "omniroute"), row["id"]): row
+        for row in models
+    }
+    by_model = {}
+    for (backend, model_id), row in approved.items():
+        by_model.setdefault(model_id, []).append((backend, row))
     explanation = _text(explanation, "explanation", max_len=MAX_EXPLANATION_CHARS)
     clarification = raw.get("needs_clarification")
     clarification = _text(clarification, "needs_clarification", max_len=500, required=False) or None
@@ -187,13 +197,30 @@ def validate(
         if role not in policy.ROLES:
             raise PlanValidationError(f"agent {key} has an unknown role")
         model = item.get("model")
+        backend = item.get("backend")
         if model is None and allow_unselected_models:
             cost_status = None
-        elif model not in approved:
+            backend = backend or "omniroute"
+        elif backend is None:
+            matches = by_model.get(model, [])
+            if not matches:
+                raise PlanValidationError(f"agent {key} uses a model that is not an approved live route")
+            if len(matches) != 1:
+                raise PlanValidationError(f"agent {key} must name an exact backend for its model")
+            backend, model_row = matches[0]
+            cost_status = model_row.get("cost_status") or "unknown"
+        elif (backend, model) not in approved:
             # Never substitute another route: an unapproved model invalidates the plan.
-            raise PlanValidationError(f"agent {key} uses a model that is not an approved live route")
+            raise PlanValidationError(f"agent {key} uses a model/backend combination that is not an approved live route")
         else:
-            cost_status = approved[model].get("cost_status") or "unknown"
+            model_row = approved[(backend, model)]
+            cost_status = model_row.get("cost_status") or "unknown"
+        if backend not in {"omniroute", "codex_native", "claude_native"}:
+            raise PlanValidationError(f"agent {key} uses an unsupported runtime")
+        effort = item.get("effort")
+        model_row = approved.get((backend, model))
+        if effort is not None and (not isinstance(effort, str) or effort not in (model_row or {}).get("supported_efforts", [])):
+            raise PlanValidationError(f"agent {key} uses an effort not supported by its selected runtime/model")
         depends = _str_list(item.get("depends_on"), f"{key}.depends_on", max_items=policy.HARD_MAX_AUTO_PANES, max_len=24)
         for dependency in depends:
             if dependency not in seen:
@@ -202,7 +229,9 @@ def validate(
             "key": key,
             "role": role,
             "title": _text(item.get("title"), f"{key}.title", max_len=80),
+            "backend": backend,
             "model": model,
+            "effort": effort,
             "cost_status": cost_status,
             "task": _text(item.get("task"), f"{key}.task", max_len=4000),
             "acceptance_criteria": _str_list(item.get("acceptance_criteria"), f"{key}.acceptance_criteria", max_items=8, max_len=300, min_items=1),
@@ -260,7 +289,9 @@ def deterministic(task_text: str, *, models: list[dict], limit: int, reason: str
             "key": key[:24],
             "role": pane["role"],
             "title": pane["title"],
+            "backend": pane.get("backend", "omniroute"),
             "model": pane["model"],
+            "effort": None,
             "cost_status": pane["cost_status"],
             "task": " ".join(task_text.split())[:4000],
             "acceptance_criteria": ["A tarefa descrita está implementada e o perfil de testes confiável passa."],

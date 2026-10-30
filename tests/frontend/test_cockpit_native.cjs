@@ -48,12 +48,15 @@ function harness(overrides = {}) {
   }
   const server = {
     gate: true, integration: false, project: 'demo',
+    maestro: { conversation_id: 'MAESTRO-1', chat_session_id: 'CHAT-PLAN', busy: false,
+      planning: { backend: 'codex_native', authorized: true, model: 'gpt-x', cost_status: 'free' }, messages: [] },
+    costAuthorizations: [], approvalBodies: [], approvedPanes: [], failApproveAfterCommit: false,
     models: { models: [
-      { id: 'gpt-x', name: 'GPT X', selectable: true, supported_efforts: ['low', 'high'] },
+      { id: 'gpt-x', name: 'GPT X', selectable: true, cost_status: 'free', supported_efforts: ['low', 'high'] },
       { id: 'not-ready', name: 'Not ready', selectable: false },
     ], default_model: 'gpt-x', catalog_error: null },
     claudeModels: { models: [
-      { id: 'claude-opus-4-8', name: 'Opus', selectable: true, supported_efforts: ['low', 'high'] },
+      { id: 'claude-opus-4-8', name: 'Opus', selectable: true, cost_status: 'known', supported_efforts: ['low', 'high'] },
     ], default_model: 'claude-opus-4-8', catalog_error: null },
     operations: {},
     sessions: [
@@ -83,6 +86,37 @@ function harness(overrides = {}) {
     const sessionMatch = url.match(/^\/api\/dev\/sessions\/([^/?]+)(\/[^?]*)?(\?.*)?$/);
     if (url === '/api/dev/execution-status') return reply({ execution_enabled: server.gate });
     if (url === '/api/dev/integration-status') return reply({ integration_enabled: server.integration });
+    if (url.startsWith('/api/workspace/maestro?')) return reply(server.maestro);
+    if (url.startsWith('/api/workspace/cost-authorizations?')) return reply({ authorizations: server.costAuthorizations });
+    if (/^\/api\/workspace\/plans\/[^/]+$/.test(url) && method === 'GET') {
+      const id = decodeURIComponent(url.split('/').at(-1));
+      return reply(server.maestro.messages.find(item => item.plan?.plan_id === id)?.plan || { plan_id: id, status: 'PROPOSED' });
+    }
+    if (method === 'POST' && url === '/api/workspace/maestro/authorize') {
+      server.maestro = { ...server.maestro, chat_session_id: 'CHAT-PLAN-NEW', planning: {
+        backend: 'codex_native', authorized: true, model: body.model, cost_status: 'free',
+      } };
+      return reply(server.maestro);
+    }
+    if (method === 'POST' && url === '/api/workspace/maestro/messages') {
+      server.maestro.messages = [...server.maestro.messages,
+        { author: 'user', text: body.text, status: 'COMPLETED' },
+        { author: 'maestro', text: 'Proposta persistida', status: 'COMPLETED', plan: server.nextPlan },
+      ];
+      return reply(server.maestro);
+    }
+    if (method === 'POST' && /^\/api\/workspace\/plans\/[^/]+\/approve$/.test(url)) {
+      server.approvalBodies.push(body);
+      server.approvedPanes = body.selected_agent_keys.map((key, index) => ({ pane_id: `PANE-CHILD-${index + 1}`, plan_agent_key: key }));
+      const plan = server.maestro.messages.find(item => item.plan?.plan_id === decodeURIComponent(url.split('/')[4]))?.plan;
+      if (plan) { plan.status = 'APPROVED'; plan.approval = { panes: server.approvedPanes.map(pane => ({ key: pane.plan_agent_key, pane_id: pane.pane_id })) }; }
+      server.failApproveAfterCommit = false;
+      if (server.returnApproveUncertain) {
+        server.returnApproveUncertain = false;
+        return reply({ detail: { code: 'UNCERTAIN', message: 'timeout after commit' } }, 502);
+      }
+      return reply({ plan, panes: server.approvedPanes });
+    }
     if (url === '/api/dev/models?backend=codex_native') return reply(server.models);
     if (url === '/api/dev/models?backend=claude_native') return reply(server.claudeModels);
     if (url.startsWith('/api/dev/sessions?project_id=')) return reply({ sessions: server.sessions });
@@ -145,7 +179,7 @@ function harness(overrides = {}) {
   };
   const context = {
     document, fetch, window: { EventSource: overrides.noEventSource ? undefined : FakeEventSource,
-      NexusCockpit: { projectId: () => server.project, notify: message => toasts.push(message), onProject: callback => listeners.push(callback) } },
+      NexusCockpit: { projectId: () => server.project, notify: message => toasts.push(message), onProject: callback => listeners.push(callback), refreshWorkspace: async () => { server.workspaceRefreshes = (server.workspaceRefreshes || 0) + 1; } } },
     setTimeout(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimeout(timer) { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
   };
@@ -932,6 +966,96 @@ test('two fixed Native panes keep backend, transcript, SSE, approvals and interr
   assert.match(app.posts.find(call => call.url.includes('/interrupt')).url, /DEV-CLAUDE/);
   first.dispose(); second.dispose();
   assert.equal(app.sources.filter(source => !source.closed).length, 0);
+});
+
+test('a promoted Native pane keeps Development drafts and approves selected Codex/Claude agents in planning mode', async () => {
+  const app = harness();
+  app.server.maestro.messages = [{ author: 'user', text: 'Implemente e documente', status: 'COMPLETED' }, {
+    author: 'maestro', text: 'Plano persistido', status: 'COMPLETED', plan: {
+      plan_id: 'PLAN-NATIVE', status: 'PROPOSED', summary: 'Implementar e documentar', explanation: 'Duas tarefas isoladas.',
+      agents: [
+        { key: 'impl', title: 'Implementação', role: 'implementer', backend: 'codex_native', model: 'gpt-x', effort: 'high',
+          task: 'Implemente a função.', acceptance_criteria: ['A função passa nos testes.'], depends_on: [] },
+        { key: 'docs', title: 'Documentação', role: 'documenter', backend: 'claude_native', model: 'claude-opus-4-8', effort: 'low',
+          task: 'Documente a API.', acceptance_criteria: ['A API está descrita.'], depends_on: ['impl'] },
+      ],
+    },
+  }];
+  app.server.returnApproveUncertain = true;
+  const native = fixedPane('PANE-MAESTRO');
+  const controller = app.mount(native.pane, {
+    projectId: 'demo', sessionId: 'DEV-NATIVE', backend: 'codex_native',
+    paneId: 'PANE-MAESTRO', maestro: true,
+  });
+  controller.setMaestro(true);
+  await app.settle();
+  const devDraft = native.byId['native-prompt'];
+  devDraft.value = 'rascunho de Development';
+  const tabs = native.pane.querySelectorAll('.native-mode-tab');
+  assert.equal(tabs.length, 2);
+  tabs[1].dispatch('click');
+  await app.settle();
+  assert.ok(app.calls.some(call => call.url.includes('/api/workspace/maestro?project_id=demo')));
+  assert.ok(app.calls.some(call => call.url === '/api/dev/models?backend=claude_native'));
+  assert.equal(devDraft.value, 'rascunho de Development');
+  assert.equal(native.pane.querySelector('.native-planning-view').hidden, false);
+  const card = native.pane.querySelector('.native-planning-plan');
+  assert.ok(card);
+  assert.match(card.textContent, /Codex Native|Claude Native/);
+  const confirmCost = card.querySelector('.native-planning-cost input');
+  assert.ok(confirmCost);
+  confirmCost.checked = true;
+  confirmCost.dispatch('change');
+  await app.settle();
+  const refreshedCard = native.pane.querySelector('.native-planning-plan');
+  const approve = refreshedCard.querySelector('.cockpit-send');
+  assert.equal(approve.disabled, false);
+  approve.dispatch('click');
+  await app.settle();
+  assert.equal(app.server.approvalBodies.length, 1);
+  assert.deepEqual(app.server.approvalBodies[0].selected_agent_keys, ['impl', 'docs']);
+  assert.deepEqual(app.server.approvalBodies[0].agent_backends, { impl: 'codex_native', docs: 'claude_native' });
+  assert.deepEqual(app.server.approvalBodies[0].agent_models, { impl: 'gpt-x', docs: 'claude-opus-4-8' });
+  assert.deepEqual(app.server.approvalBodies[0].agent_efforts, { impl: 'high', docs: 'low' });
+  assert.equal(app.calls.filter(call => call.method === 'GET' && call.url === '/api/workspace/plans/PLAN-NATIVE').length, 1,
+    'an uncertain approval is reconciled by GET');
+  assert.equal(app.posts.some(call => /\/api\/dev\/(sessions|missions)/.test(call.url)), false,
+    'approval creates panes through the workspace API and starts no turns');
+  assert.equal(app.server.workspaceRefreshes, 1, 'created panes are loaded into the cockpit');
+  tabs[0].dispatch('click');
+  assert.equal(native.pane.querySelector('.native-planning-view').hidden, true);
+  assert.equal(devDraft.value, 'rascunho de Development');
+  controller.dispose();
+});
+
+test('the promoted pane does not replace an unavailable Claude Native catalog', async () => {
+  const app = harness({ claudeModels: { models: [], catalog_error: 'Claude CLI não instalado.' } });
+  app.server.maestro.messages = [{ author: 'maestro', text: 'Plano', status: 'COMPLETED', plan: {
+    plan_id: 'PLAN-CATALOG', status: 'PROPOSED', summary: 'Uma tarefa',
+    agents: [{ key: 'impl', title: 'Implementação', role: 'implementer', backend: 'codex_native', model: 'gpt-x',
+      task: 'Implemente.', acceptance_criteria: ['Feito.'], depends_on: [] }],
+  } }];
+  const native = fixedPane('PANE-MAESTRO');
+  const controller = app.mount(native.pane, {
+    projectId: 'demo', sessionId: 'DEV-NATIVE', backend: 'codex_native',
+    paneId: 'PANE-MAESTRO', maestro: true,
+  });
+  controller.setMaestro(true);
+  await app.settle();
+  native.pane.querySelectorAll('.native-mode-tab')[1].dispatch('click');
+  await app.settle();
+  const card = native.pane.querySelector('.native-planning-plan');
+  const runtime = card.querySelector('.native-planning-agent-controls select');
+  runtime.value = 'claude_native';
+  runtime.dispatch('change');
+  await app.settle();
+  const current = native.pane.querySelector('.native-planning-plan');
+  assert.match(current.textContent, /Claude CLI não instalado/);
+  const approval = current.querySelector('.cockpit-send');
+  assert.equal(approval.disabled, true);
+  assert.equal(app.calls.some(call => call.url.includes('backend=omniroute')), false);
+  assert.equal(app.posts.some(call => call.url.includes('/approve')), false);
+  controller.dispose();
 });
 
 test('one Native session failure does not block the other pane or create a replacement session', async () => {

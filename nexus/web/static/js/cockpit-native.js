@@ -831,6 +831,399 @@
     }
   };
 
+  // A promoted pane keeps its Development console and gains an adjacent,
+  // read-only planning mode. Both modes belong to the same pane identity;
+  // the planner's Chat session is shown explicitly as a separate session.
+  let maestroEnabled = Boolean(fixed?.maestro);
+  let planningUi = null;
+  const createPlanningUi = () => {
+    if (planningUi || !fixed?.paneId) return planningUi;
+    const body = pane.querySelector('.native-body');
+    if (!body) return null;
+    const tabs = element('div', 'native-mode-tabs');
+    const developmentTab = element('button', 'native-mode-tab is-active', 'Development');
+    const planningTab = element('button', 'native-mode-tab', 'Planejamento');
+    developmentTab.type = planningTab.type = 'button';
+    planningTab.hidden = true;
+    tabs.append(developmentTab, planningTab);
+    body.insertBefore(tabs, body.firstChild);
+
+    const panel = element('section', 'native-planning-view');
+    panel.hidden = true;
+    const heading = element('div', 'native-planning-heading');
+    heading.append(element('strong', '', 'Modo de planejamento · somente leitura'),
+      element('span', '', `Vinculado ao pane ${fixed.paneId}`));
+    const note = element('p', 'native-note', 'Carregando estado persistido do Maestro…');
+    const model = element('select', 'native-planning-model');
+    model.setAttribute('aria-label', 'Modelo Codex Native para planejar');
+    const effort = element('select', 'native-planning-effort');
+    effort.setAttribute('aria-label', 'Effort da sessão de planejamento');
+    const authorize = element('button', 'cockpit-send', 'Autorizar planejamento');
+    authorize.type = 'button';
+    const modelRow = element('div', 'native-planning-controls');
+    modelRow.append(model, effort, authorize);
+    const costNote = element('p', 'native-note', 'A autorização de planejamento não autoriza turnos Development nem cria agentes.');
+    const transcript = element('div', 'native-planning-transcript');
+    transcript.setAttribute('aria-live', 'polite');
+    const composer = element('form', 'native-planning-composer');
+    const prompt = element('textarea', 'cockpit-input');
+    prompt.rows = 2; prompt.maxLength = 20000;
+    prompt.placeholder = 'Descreva a missão para o Maestro';
+    prompt.setAttribute('aria-label', 'Missão para o Maestro');
+    const send = element('button', 'cockpit-send', 'Planejar ↵');
+    send.type = 'submit';
+    const error = element('p', 'cockpit-compose-error');
+    error.setAttribute('role', 'status');
+    composer.append(prompt, send, error);
+    panel.append(heading, note, modelRow, costNote, transcript, composer);
+    body.append(panel);
+
+    const devConsole = pane.querySelector('.native-console');
+    const devComposer = pane.querySelector('.native-composer');
+    const devSettings = pane.querySelector('.native-settings');
+    const host = window.NexusCockpit;
+    const planning = {
+      state: null, catalogs: {}, authorizations: [], busy: false, error: '',
+      mode: 'development', timer: null, generation: 0, drafts: new Map(),
+    };
+    const apiJson = async (path, options = {}) => {
+      const response = await fetch(path, {
+        method: options.method || 'GET',
+        headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
+        ...(options.body ? { body: JSON.stringify(options.body) } : {}),
+      });
+      let data = null;
+      try { data = await response.json(); } catch (_error) { data = null; }
+      if (!response.ok) {
+        const detail = data?.detail;
+        throw new Error((typeof detail === 'string' ? detail : detail?.message) || `HTTP ${response.status}`);
+      }
+      if (!data || typeof data !== 'object') throw new Error('Resposta inválida do Nexus');
+      return data;
+    };
+    const activateMode = mode => {
+      planning.mode = mode;
+      const shown = mode === 'planning';
+      if (devConsole) devConsole.hidden = shown;
+      if (devComposer) devComposer.hidden = shown;
+      if (devSettings) devSettings.hidden = shown;
+      panel.hidden = !shown;
+      if (shown) { developmentTab.classList.remove('is-active'); planningTab.classList.add('is-active'); }
+      else { developmentTab.classList.add('is-active'); planningTab.classList.remove('is-active'); }
+      if (shown) void loadPlanningState();
+      else if (planning.timer) { clearTimeout(planning.timer); planning.timer = null; }
+    };
+    const catalogFor = backend => planning.catalogs[backend] || { models: [], catalog_error: 'Catálogo ainda não carregado.' };
+    const selectedPlanningModel = () => model.value;
+    const grantFor = modelId => planning.authorizations.find(row => row.model === modelId && row.status === 'ACTIVE' && row.uses_remaining > 0);
+    const modelInfo = (backend, modelId) => (catalogFor(backend).models || []).find(row => row.id === modelId);
+    const renderPlanningControls = () => {
+      const data = planning.state;
+      const planningBackend = data?.planning?.backend || 'codex_native';
+      const catalog = catalogFor(planningBackend);
+      const previousModel = model.value || data?.planning?.model || '';
+      const modelPrompt = element('option', '', catalog.catalog_error && !catalog.models?.length
+        ? `${planningBackend}: catálogo indisponível` : 'Selecione um modelo anunciado');
+      modelPrompt.value = '';
+      model.replaceChildren(modelPrompt, ...(catalog.models || []).map(row => {
+        const option = element('option', '', `${row.name && row.name !== row.id ? `${row.name} · ` : ''}${row.id} · ${row.cost_status || 'custo desconhecido'}`);
+        option.value = row.id;
+        return option;
+      }));
+      model.value = (catalog.models || []).some(row => row.id === previousModel) ? previousModel : '';
+      const selected = modelInfo(planningBackend, model.value);
+      const oldEffort = effort.value || '';
+      const effortPrompt = element('option', '', 'Padrão do modelo'); effortPrompt.value = '';
+      effort.replaceChildren(effortPrompt, ...(selected?.supported_efforts || []).map(value => {
+        const option = element('option', '', value); option.value = value; return option;
+      }));
+      effort.value = (selected?.supported_efforts || []).includes(oldEffort) ? oldEffort : '';
+      const exactModel = model.value;
+      const hasGrant = Boolean(grantFor(exactModel));
+      const alreadyAuthorized = Boolean(data?.planning?.authorized && data.planning.model === exactModel &&
+        (data.planning.cost_status === 'free' || hasGrant));
+      authorize.textContent = data?.planning?.authorized ? 'Trocar sessão de planejamento' : 'Autorizar planejamento';
+      authorize.disabled = planning.busy || !exactModel || alreadyAuthorized ||
+        (selected?.cost_status !== 'free' && !hasGrant);
+      note.textContent = catalog.catalog_error && !catalog.models?.length
+        ? `${planningBackend} indisponível: ${catalog.catalog_error}. Nenhum runtime alternativo será escolhido.`
+        : data?.planning?.authorized
+          ? `Sessão de planejamento ${data.chat_session_id || 'pendente'} · ${data.planning.backend} · ${data.planning.model} · somente leitura`
+          : 'Sem autorização: as mensagens usam a proposta determinística. Para modelos pagos, configure antes os limites no Catálogo de modelos.';
+      send.disabled = planning.busy || Boolean(data?.busy) || !fixed.projectId;
+    };
+    const stateForDraft = plan => {
+      if (!planning.drafts.has(plan.plan_id)) {
+        const choices = {};
+        for (const agent of plan.agents || []) {
+          // Plans persisted before runtime fields were added came from the
+          // promoted Codex planner. Their exact model is retained only when
+          // it exists in that live catalog; no other route is substituted.
+          const backend = agent.backend || 'codex_native';
+          const modelRow = modelInfo(backend, agent.model);
+          choices[agent.key] = {
+            backend, model: modelRow ? agent.model : '',
+            effort: modelRow?.supported_efforts?.includes(agent.effort) ? agent.effort : '',
+          };
+        }
+        planning.drafts.set(plan.plan_id, {
+          selected: new Set((plan.agents || []).map(agent => agent.key)), choices,
+          confirmCosts: false, maxTurns: 1, timeoutSeconds: 600, uncertain: false,
+        });
+      }
+      return planning.drafts.get(plan.plan_id);
+    };
+    const renderPlan = plan => {
+      const draft = stateForDraft(plan);
+      const card = element('article', `native-planning-plan status-${String(plan.status || 'PROPOSED').toLowerCase()}`);
+      const title = element('div', 'native-planning-plan-title');
+      title.append(element('strong', '', `${plan.summary || 'Proposta do Maestro'} · ${plan.status || 'PROPOSED'}`));
+      if (plan.explanation) title.append(element('p', '', plan.explanation));
+      card.append(title);
+      let missing = false;
+      let hasPaid = false;
+      for (const agent of plan.agents || []) {
+        const choice = draft.choices[agent.key];
+        const row = element('section', 'native-planning-agent');
+        const selectedBox = element('input'); selectedBox.type = 'checkbox';
+        selectedBox.checked = draft.selected.has(agent.key);
+        selectedBox.disabled = plan.status !== 'PROPOSED' || draft.uncertain;
+        const includeLabel = element('label', 'native-planning-include');
+        includeLabel.append(selectedBox, element('span', '', `Criar ${agent.title} (${agent.role})`));
+        selectedBox.addEventListener('change', () => {
+          if (selectedBox.checked) draft.selected.add(agent.key); else draft.selected.delete(agent.key);
+          renderPlanningState();
+        });
+        const task = element('p', 'native-planning-task', agent.task);
+        const criteria = element('ul', 'native-planning-criteria');
+        (agent.acceptance_criteria || []).forEach(value => criteria.append(element('li', '', value)));
+        const dependency = element('p', 'native-note', `Dependências: ${(agent.depends_on || []).join(', ') || 'nenhuma'}`);
+        const controls = element('div', 'native-planning-agent-controls');
+        const runtime = element('select'); runtime.setAttribute('aria-label', `Runtime de ${agent.title}`);
+        for (const backend of ['codex_native', 'claude_native']) {
+          const option = element('option', '', backend === 'codex_native' ? 'Codex Native' : 'Claude Native');
+          option.value = backend; runtime.append(option);
+        }
+        runtime.value = choice.backend;
+        const modelSelect = element('select'); modelSelect.setAttribute('aria-label', `Modelo de ${agent.title}`);
+        const available = catalogFor(choice.backend).models || [];
+        const modelPrompt = element('option', '', available.length ? 'Selecione um modelo' : `${choice.backend} indisponível`);
+        modelPrompt.value = '';
+        modelSelect.replaceChildren(modelPrompt, ...available.map(entry => {
+          const option = element('option', '', `${entry.name && entry.name !== entry.id ? `${entry.name} · ` : ''}${entry.id} · ${entry.cost_status || 'custo desconhecido'}`);
+          option.value = entry.id; return option;
+        }));
+        modelSelect.value = available.some(entry => entry.id === choice.model) ? choice.model : '';
+        const agentModel = modelInfo(choice.backend, modelSelect.value);
+        const effortSelect = element('select'); effortSelect.setAttribute('aria-label', `Effort de ${agent.title}`);
+        const defaultEffort = element('option', '', 'Padrão do modelo'); defaultEffort.value = '';
+        effortSelect.replaceChildren(defaultEffort, ...(agentModel?.supported_efforts || []).map(value => {
+          const option = element('option', '', value); option.value = value; return option;
+        }));
+        effortSelect.value = (agentModel?.supported_efforts || []).includes(choice.effort) ? choice.effort : '';
+        const onChange = () => {
+          choice.backend = runtime.value;
+          choice.model = modelSelect.value;
+          choice.effort = effortSelect.value;
+          choice.costStatus = modelInfo(choice.backend, choice.model)?.cost_status || 'unknown';
+          renderPlanningState();
+        };
+        runtime.addEventListener('change', () => { choice.backend = runtime.value; choice.model = ''; choice.effort = ''; onChange(); });
+        modelSelect.addEventListener('change', () => { choice.model = modelSelect.value; choice.effort = ''; onChange(); });
+        effortSelect.addEventListener('change', onChange);
+        runtime.disabled = modelSelect.disabled = effortSelect.disabled = plan.status !== 'PROPOSED' || draft.uncertain;
+        controls.append(runtime, modelSelect, effortSelect);
+        const modelMeta = element('p', 'native-note');
+        const catalog = catalogFor(choice.backend);
+        modelMeta.textContent = catalog.catalog_error && !catalog.models?.length
+          ? `${choice.backend} indisponível: ${catalog.catalog_error}`
+          : modelSelect.value ? `Modelo ao vivo: ${modelSelect.value} · ${choice.backend} · ${effortSelect.value || 'effort padrão'}`
+            : 'Escolha uma combinação anunciada no catálogo local.';
+        if (draft.selected.has(agent.key)) {
+          if (!modelSelect.value) missing = true;
+          if (agentModel?.cost_status !== 'free') hasPaid = true;
+        }
+        row.append(includeLabel, task, dependency, criteria, controls, modelMeta);
+        card.append(row);
+      }
+      const selectedKeys = new Set(draft.selected);
+      const incompleteDependency = (plan.agents || []).some(agent => selectedKeys.has(agent.key) &&
+        (agent.depends_on || []).some(key => !selectedKeys.has(key)));
+      const status = element('p', 'native-note');
+      status.textContent = incompleteDependency ? 'Inclua as dependências selecionadas antes de aprovar.'
+        : draft.uncertain ? 'Aprovação com resultado incerto; consultando o registro persistido antes de liberar nova tentativa.'
+          : plan.status === 'APPROVED' ? `${(plan.approval?.panes || []).length} agente(s) criado(s). Nenhum turno foi iniciado.`
+            : 'A aprovação cria apenas os agentes selecionados, cada um com sessão e worktree próprios. Nenhum turno começa sozinho.';
+      card.append(status);
+      if (plan.status === 'PROPOSED') {
+        const limits = element('div', 'native-planning-limits');
+        const turns = element('select'); turns.setAttribute('aria-label', 'Turnos autorizados por agente');
+        for (let value = 1; value <= 6; value++) { const option = element('option', '', `${value} ${value === 1 ? 'turno' : 'turnos'} por agente`); option.value = String(value); turns.append(option); }
+        turns.value = String(draft.maxTurns);
+        turns.addEventListener('change', () => { draft.maxTurns = Number(turns.value); });
+        const timeout = element('select'); timeout.setAttribute('aria-label', 'Duração máxima da missão');
+        for (const value of [60, 300, 600, 900, 1800, 3600]) { const option = element('option', '', `até ${Math.floor(value / 60)} min por missão`); option.value = String(value); timeout.append(option); }
+        timeout.value = String(draft.timeoutSeconds);
+        timeout.addEventListener('change', () => { draft.timeoutSeconds = Number(timeout.value); });
+        limits.append(turns, timeout);
+        card.append(limits);
+        if (hasPaid) {
+          const costLabel = element('label', 'native-planning-cost');
+          const confirm = element('input'); confirm.type = 'checkbox'; confirm.checked = draft.confirmCosts; confirm.disabled = draft.uncertain;
+          confirm.addEventListener('change', () => { draft.confirmCosts = confirm.checked; renderPlanningState(); });
+          costLabel.append(confirm, element('span', '', 'Confirmo os modelos Native não gratuitos ou de custo desconhecido selecionados.'));
+          card.append(costLabel);
+        }
+        const approve = element('button', 'cockpit-send', `Aprovar e criar ${draft.selected.size} agente(s)`);
+        approve.type = 'button';
+        approve.disabled = planning.busy || draft.uncertain || !draft.selected.size || missing || incompleteDependency || (hasPaid && !draft.confirmCosts);
+        approve.addEventListener('click', () => { void approvePlan(plan, draft); });
+        card.append(approve);
+      }
+      return card;
+    };
+    const renderPlanningState = () => {
+      renderPlanningControls();
+      const data = planning.state;
+      transcript.replaceChildren();
+      if (!data) transcript.append(element('p', 'native-note', planning.error || 'Selecione um projeto para consultar o Maestro.'));
+      else {
+        transcript.append(element('p', 'native-note', `Conversa persistente ${data.conversation_id || ''} · sessão técnica ${data.chat_session_id || 'ainda não autorizada'} · planejador ${data.planning?.backend || 'codex_native'}`));
+        for (const message of data.messages || []) {
+          const bubble = element('article', `native-planning-message author-${message.author || 'user'}`);
+          bubble.append(element('strong', '', message.author === 'maestro' ? 'Maestro · plano salvo' : 'Você'), element('p', '', message.text || ''));
+          if (message.error_message) bubble.append(element('p', 'cockpit-error-text', message.error_message));
+          if (message.plan) bubble.append(renderPlan(message.plan));
+          transcript.append(bubble);
+        }
+        if (!data.messages?.length) transcript.append(element('p', 'native-note', 'Ainda não há mensagens de planejamento neste pane.'));
+      }
+      if (planning.error) error.textContent = planning.error;
+    };
+    const schedulePlanningRefresh = () => {
+      if (planning.timer) clearTimeout(planning.timer);
+      if (planning.mode !== 'planning' || !maestroEnabled) return;
+      planning.timer = setTimeout(() => { planning.timer = null; void loadPlanningState(); }, planning.state?.busy ? 2500 : 15000);
+    };
+    async function loadPlanningState() {
+      if (!maestroEnabled || !fixed.projectId || planning.busy && planning.mode !== 'planning') return;
+      const generation = ++planning.generation;
+      planning.catalogs.codex_native = { models: state.models, catalog_error: state.modelsError };
+      if (!planning.catalogs.claude_native) {
+        try { planning.catalogs.claude_native = await apiJson('/api/dev/models?backend=claude_native'); }
+        catch (loadError) { planning.catalogs.claude_native = { models: [], catalog_error: loadError.message }; }
+      }
+      try {
+        const [maestro, costs] = await Promise.all([
+          apiJson(`/api/workspace/maestro?project_id=${encodeURIComponent(fixed.projectId)}`),
+          apiJson(`/api/workspace/cost-authorizations?project_id=${encodeURIComponent(fixed.projectId)}`),
+        ]);
+        if (generation !== planning.generation) return;
+        planning.state = maestro;
+        planning.authorizations = costs.authorizations || [];
+        planning.error = '';
+      } catch (loadError) {
+        if (generation !== planning.generation) return;
+        planning.error = `Não foi possível reconciliar o estado salvo: ${loadError.message}`;
+      }
+      renderPlanningState();
+      schedulePlanningRefresh();
+    }
+    const authorizePlanning = async () => {
+      if (planning.busy || !model.value || !fixed.projectId) return;
+      planning.busy = true; renderPlanningControls();
+      try {
+        await apiJson('/api/workspace/maestro/authorize', { method: 'POST', body: {
+          project_id: fixed.projectId, model: model.value, ...(effort.value ? { effort: effort.value } : {}), confirm_cost: false,
+        } });
+        planning.error = '';
+      } catch (writeError) {
+        planning.error = `Autorização não confirmada: ${writeError.message}. Consultando o estado persistido antes de nova ação.`;
+      } finally {
+        planning.busy = false;
+        await loadPlanningState();
+      }
+    };
+    const sendPlanningMessage = async event => {
+      event.preventDefault();
+      const text = prompt.value.trim();
+      if (!text || planning.busy || planning.state?.busy) return;
+      planning.busy = true; renderPlanningControls();
+      try {
+        await apiJson('/api/workspace/maestro/messages', { method: 'POST', body: {
+          project_id: fixed.projectId, text, ...(effort.value ? { effort: effort.value } : {}),
+        } });
+        if (prompt.value.trim() === text) prompt.value = '';
+        planning.error = '';
+      } catch (writeError) {
+        planning.error = `Resultado do envio incerto: ${writeError.message}. Consultei o histórico; nada foi reenviado.`;
+      } finally {
+        planning.busy = false;
+        await loadPlanningState();
+      }
+    };
+    const approvePlan = async (plan, draft) => {
+      if (planning.busy || plan.status !== 'PROPOSED' || !draft.selected.size) return;
+      const selected = (plan.agents || []).filter(agent => draft.selected.has(agent.key));
+      const agent_models = {}, agent_backends = {}, agent_efforts = {};
+      for (const agent of selected) {
+        const choice = draft.choices[agent.key];
+        if (!choice?.model || !modelInfo(choice.backend, choice.model)) { planning.error = `Escolha um modelo ao vivo para ${agent.title}.`; renderPlanningState(); return; }
+        agent_models[agent.key] = choice.model;
+        agent_backends[agent.key] = choice.backend;
+        if (choice.effort) agent_efforts[agent.key] = choice.effort;
+      }
+      planning.busy = true; renderPlanningControls();
+      const body = {
+        selected_agent_keys: selected.map(agent => agent.key), agent_models, agent_backends, agent_efforts,
+        backend: 'codex_native', max_turns_per_agent: draft.maxTurns,
+        mission_timeout_seconds: draft.timeoutSeconds, confirm_costs: Boolean(draft.confirmCosts),
+      };
+      try {
+        const result = await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/approve`, { method: 'POST', body });
+        draft.uncertain = false;
+        planning.error = result.plan?.approval?.errors?.length
+          ? `Criação parcial: ${result.plan.approval.errors.map(item => `${item.key}: ${item.code}`).join('; ')}` : '';
+      } catch (writeError) {
+        planning.error = `A aprovação pode ter sido gravada: ${writeError.message}. Consultando o plano antes de permitir outra ação.`;
+        try {
+          const persisted = await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}`);
+          if (persisted.status === 'PROPOSED') draft.uncertain = false;
+          else draft.uncertain = true;
+        } catch (_readError) { draft.uncertain = true; }
+      } finally {
+        planning.busy = false;
+        await loadPlanningState();
+        await host?.refreshWorkspace?.();
+      }
+    };
+    developmentTab.addEventListener('click', () => activateMode('development'));
+    planningTab.addEventListener('click', () => activateMode('planning'));
+    model.addEventListener('change', renderPlanningControls);
+    effort.addEventListener('change', renderPlanningControls);
+    authorize.addEventListener('click', () => { void authorizePlanning(); });
+    composer.addEventListener('submit', sendPlanningMessage);
+    prompt.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); composer.requestSubmit(); }
+    });
+    planningUi = {
+      setEnabled(enabled) {
+        maestroEnabled = Boolean(enabled);
+        planningTab.hidden = !maestroEnabled;
+        if (!maestroEnabled) activateMode('development');
+        else if (planning.mode === 'planning') void loadPlanningState();
+      },
+      dispose() { planning.generation++; if (planning.timer) clearTimeout(planning.timer); },
+    };
+    planningUi.setEnabled(maestroEnabled);
+    return planningUi;
+  };
+  const setMaestroMode = enabled => {
+    if (!fixed?.paneId) return;
+    const ui = createPlanningUi();
+    ui?.setEnabled(enabled);
+  };
+
   $('native-session').addEventListener('change', event => { void selectSession(event.currentTarget.value); });
   $('native-model').addEventListener('change', () => { renderEfforts(); renderControls(); renderChrome(); });
   $('native-effort').addEventListener('change', () => { renderControls(); renderChrome(); });
@@ -862,7 +1255,8 @@
   }
   render();
   return {
-    dispose: () => { state.generation++; closeStream(); stopPolling(); },
+    setMaestro: setMaestroMode,
+    dispose: () => { state.generation++; closeStream(); stopPolling(); planningUi?.dispose(); },
   };
   };
   window.NexusNativePane = Object.freeze({ mount });

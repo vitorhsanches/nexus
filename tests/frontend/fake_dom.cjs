@@ -71,6 +71,15 @@ class Element {
       child.parentNode = this; this._kids.push(child);
     }
   }
+  insertBefore(node, reference) {
+    if (!reference) { this.append(node); return node; }
+    const index = this._kids.indexOf(reference);
+    if (index < 0) throw new Error('Reference node is not a child');
+    if (node.parentNode) node.parentNode._kids = node.parentNode._kids.filter(item => item !== node);
+    node.parentNode = this;
+    this._kids.splice(index, 0, node);
+    return node;
+  }
   replaceChildren(...nodes) { this._kids.forEach(child => { child.parentNode = null; }); this._kids = []; this._text = ''; this.append(...nodes); }
   remove() { if (this.parentNode) this.parentNode._kids = this.parentNode._kids.filter(item => item !== this); this.parentNode = null; }
   cloneNode(deep) {

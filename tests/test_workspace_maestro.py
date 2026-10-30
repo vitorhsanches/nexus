@@ -136,6 +136,34 @@ def test_valid_llm_plan_is_parsed_with_dependency_and_conflict_analysis():
     assert plan["explanation"] == "Uma explicação simples."
 
 
+def test_native_plan_contract_validates_each_runtime_model_and_effort():
+    models = [
+        {"id": "gpt-native", "backend": "codex_native", "cost_status": "free", "supported_efforts": ["high"]},
+        {"id": "sonnet", "backend": "claude_native", "cost_status": "known", "supported_efforts": ["medium"]},
+    ]
+    raw = {"complexity": "multi", "summary": "Implement and verify", "needs_clarification": None,
+        "agents": [
+            {"key": "impl", "role": "implementer", "title": "Implementation", "backend": "codex_native",
+             "model": "gpt-native", "effort": "high", "task": "Implement", "acceptance_criteria": ["Works"],
+             "depends_on": [], "touches": ["src/"]},
+            {"key": "review", "role": "tester", "title": "Review", "backend": "claude_native",
+             "model": "sonnet", "effort": "medium", "task": "Review", "acceptance_criteria": ["Reviewed"],
+             "depends_on": ["impl"], "touches": ["tests/"]},
+        ]}
+    plan = maestro_plan.parse(_answer(raw), models=models, limit=3)
+    assert [(agent["backend"], agent["model"], agent["effort"]) for agent in plan["agents"]] == [
+        ("codex_native", "gpt-native", "high"), ("claude_native", "sonnet", "medium"),
+    ]
+    wrong = json.loads(json.dumps(raw))
+    wrong["agents"][1]["model"] = "gpt-native"
+    with pytest.raises(maestro_plan.PlanValidationError, match="backend combination"):
+        maestro_plan.parse(_answer(wrong), models=models, limit=3)
+    wrong = json.loads(json.dumps(raw))
+    wrong["agents"][0]["effort"] = "ultra"
+    with pytest.raises(maestro_plan.PlanValidationError, match="effort not supported"):
+        maestro_plan.parse(_answer(wrong), models=models, limit=3)
+
+
 @pytest.mark.parametrize(
     "mutate, reason",
     [
@@ -418,6 +446,53 @@ def test_native_plan_persists_per_agent_efforts_and_survives_database_reinitiali
         for key, value in persisted["approval"]["agent_models"].items()
     }
     assert persisted_efforts == efforts
+
+
+def test_native_maestro_approves_only_selected_codex_and_claude_agents(env, monkeypatch):
+    catalogs = {
+        "codex_native": {"backend": "codex_native", "models": [
+            {"id": "gpt-native", "cost_status": "free", "supported_efforts": ["high"]},
+        ], "catalog_error": None},
+        "claude_native": {"backend": "claude_native", "models": [
+            {"id": "sonnet", "cost_status": "known", "supported_efforts": ["medium"]},
+        ], "catalog_error": None},
+    }
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda *, backend, **kwargs: catalogs[backend])
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
+    monkeypatch.setattr("nexus.dev.executor.validate_claude_choice", lambda model, effort: None)
+    maestro_pane = service.create_pane("demo", role="implementer", model="gpt-native", backend="codex_native")
+    service.promote_pane_to_maestro(maestro_pane["pane_id"])
+    conversation = store.get_conversation_for_project("demo")
+    plan_id = store.create_plan(
+        "demo", "Implement and review", policy_version=maestro_plan.SCHEMA_VERSION, complexity="multi",
+        source="llm", conversation_id=conversation["id"],
+        proposal={"complexity": "multi", "summary": "Implement and review", "agents": [
+            {"key": "impl", "role": "implementer", "title": "Implementation", "backend": "codex_native",
+             "model": "gpt-native", "effort": "high", "task": "Implement", "acceptance_criteria": ["Works"],
+             "depends_on": []},
+            {"key": "docs", "role": "documenter", "title": "Documentation", "backend": "claude_native",
+             "model": "sonnet", "effort": "medium", "task": "Document", "acceptance_criteria": ["Explains API"],
+             "depends_on": []},
+            {"key": "qa", "role": "tester", "title": "Tests", "backend": "codex_native",
+             "model": "gpt-native", "effort": "high", "task": "Test", "acceptance_criteria": ["Tests pass"],
+             "depends_on": ["impl"]},
+        ]},
+    )
+    result = service.approve_plan(
+        plan_id, agent_models={"impl": "gpt-native", "docs": "sonnet"},
+        agent_backends={"impl": "codex_native", "docs": "claude_native"},
+        agent_efforts={"impl": "high", "docs": "medium"}, selected_agent_keys=["impl", "docs"],
+        max_turns_per_agent=1, mission_timeout_seconds=60, confirm_costs=True,
+    )
+    assert [(pane["plan_agent_key"], pane["backend"], pane["effort"]) for pane in result["panes"]] == [
+        ("impl", "codex_native", "high"), ("docs", "claude_native", "medium"),
+    ]
+    assert all(pane["maestro_parent_pane_id"] == maestro_pane["pane_id"] for pane in result["panes"])
+    assert result["plan"]["approval"]["selected_agent_keys"] == ["impl", "docs"]
+    assert all(pane["session"]["status"] == "ACTIVE" for pane in result["panes"])
+    with database.get_connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM dev_autonomous_missions").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM dev_turns").fetchone()[0] == 0
 
 
 def test_native_plan_rejects_effort_unsupported_by_selected_model(env, monkeypatch):
