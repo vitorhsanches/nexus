@@ -146,7 +146,28 @@ def create_execution(
                 "SELECT status, approval_json FROM workspace_plans WHERE id = ?", (plan_id,)
             ).fetchone()
             approval = _json(plan["approval_json"], {}) if plan is not None else {}
-            if plan is None or plan["status"] != "APPROVED" or approval.get("agent_models") != expected_agent_models:
+            approved_models = approval.get("agent_models") or {}
+            approved_keys = approval.get("selected_agent_keys")
+            if not isinstance(approved_keys, list):
+                approved_keys = list(approved_models) if isinstance(approved_models, dict) else []
+            approved_panes = approval.get("panes")
+            if approved_panes is not None:
+                if (not isinstance(approved_panes, list)
+                        or any(not isinstance(item, dict) or not isinstance(item.get("key"), str)
+                               or not isinstance(item.get("pane_id"), str) for item in approved_panes)):
+                    raise ValueError("plan approval has an invalid created-pane record")
+                approved_pane_ids = {item["key"]: item["pane_id"] for item in approved_panes}
+                created_keys = set(approved_pane_ids)
+            else:
+                approved_pane_ids = {}
+                created_keys = approved_keys
+            if (plan is None or plan["status"] not in {"APPROVED", "APPROVED_PARTIAL"}
+                    or not isinstance(approved_models, dict)
+                    or not isinstance(approved_keys, list)
+                    or any(step["agent_key"] not in approved_keys or step["agent_key"] not in created_keys
+                           or approved_pane_ids and approved_pane_ids.get(step["agent_key"]) != step["pane_id"]
+                           for step in steps)
+                    or any(approved_models.get(key) != choice for key, choice in expected_agent_models.items())):
                 raise ValueError("plan approval changed before execution authorization")
             for step in steps:
                 pane = connection.execute(
@@ -260,14 +281,15 @@ def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) 
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            """SELECT e.*, p.status AS plan_status, p.approval_json
+            """SELECT e.*, p.status AS plan_status, p.approval_json, p.proposal_json
                FROM workspace_plan_executions e JOIN workspace_plans p ON p.id=e.plan_id
                WHERE e.plan_id=?""", (plan_id,),
         ).fetchone()
         if (row is None or row["status"] != "BLOCKED"
                 or row["error_code"] != "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
                 or row["current_index"] != index or row["interrupt_requested"]
-                or row["plan_status"] != "APPROVED" or row["approval_json"] != approval_json):
+                or row["plan_status"] not in {"APPROVED", "APPROVED_PARTIAL"}
+                or row["approval_json"] != approval_json):
             return None
         steps = connection.execute(
             "SELECT * FROM workspace_plan_execution_steps WHERE plan_id=? ORDER BY ordinal", (plan_id,)
@@ -275,10 +297,17 @@ def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) 
         keys = _json(row["agent_keys_json"], [])
         profiles = _json(row["test_profiles_json"], {})
         approval = _json(approval_json, {})
+        try:
+            proposal = json.loads(row["proposal_json"] or "{}")
+            agents = proposal.get("agents", []) if isinstance(proposal, dict) else None
+        except (TypeError, ValueError):
+            agents = None
         if (not isinstance(keys, list) or not isinstance(profiles, dict)
-                or not isinstance(approval, dict)
+                or not isinstance(approval, dict) or not isinstance(agents, list)
+                or any(not isinstance(agent, dict) for agent in agents)
                 or len(steps) != len(keys) or index < 1 or index >= len(steps)
                 or [step["agent_key"] for step in steps] != keys
+                or [agent.get("key") for agent in agents if agent.get("key") in keys] != keys
                 or approval.get("max_turns_per_agent") != row["max_turns_per_agent"]
                 or approval.get("mission_timeout_seconds") != row["mission_timeout_seconds"]):
             return None
@@ -374,15 +403,15 @@ def claim_resume(plan_id: str, index: int, handoff_id: str, approval_json: str) 
 
 
 def claim_native_review(plan_id: str, agent_key: str, review_id: str) -> str | None:
-    """Fence one explicit, human-confirmed AWAITING_NATIVE_REVIEW -> RUNNING
-    transition, mirroring claim_resume()'s shape for the handoff case.
+    """Fence one explicit, human-confirmed review binding and park the
+    execution for a separate dispatch (or final plan review).
 
     Purely mechanical: the caller (coordinator.bind_native_review) has
     already validated the review's identity, freshness and approval_ready
     state against the exact session and turn before calling this. This
     function only re-checks the durable preconditions that must hold at
     the moment of the claim, under one write reservation, and never
-    inspects the review itself.
+    inspects the review itself or launches a worker.
     """
     now = _now()
     token = uuid4().hex
@@ -412,12 +441,19 @@ def claim_native_review(plan_id: str, agent_key: str, review_id: str) -> str | N
                  AND native_review_id IS NULL""",
             (review_id, now, now, plan_id, agent_key),
         )
+        next_status = "AWAITING_REVIEW" if index == len(steps) - 1 else "AWAITING_EXECUTION"
+        final_result = json.dumps(
+            {"human_approval_required": True, "integration_applied": False},
+            ensure_ascii=False,
+        ) if next_status == "AWAITING_REVIEW" else None
         connection.execute(
-            """UPDATE workspace_plan_executions SET status='RUNNING', owner_host=?, owner_pid=?,
-               owner_acquired_at=?, owner_token=?, lease_renewed_at=?, updated_at=?,
-               error_code=NULL, error_message=NULL, finished_at=NULL
+            """UPDATE workspace_plan_executions SET status=?, owner_host=NULL, owner_pid=NULL,
+               owner_acquired_at=NULL, owner_token=NULL, lease_renewed_at=NULL, updated_at=?,
+               error_code=NULL, error_message=NULL,
+               result_json=COALESCE(?, result_json),
+               finished_at=CASE WHEN ?='AWAITING_REVIEW' THEN COALESCE(finished_at, ?) ELSE NULL END
                WHERE plan_id=? AND status='BLOCKED'""",
-            (socket.gethostname(), os.getpid(), now, token, now, now, plan_id),
+            (next_status, now, final_result, next_status, now, plan_id),
         )
     return token
 

@@ -885,6 +885,8 @@
     const planning = {
       state: null, catalogs: {}, authorizations: [], busy: false, error: '',
       mode: 'development', timer: null, generation: 0, drafts: new Map(),
+      panes: [], turnDetails: new Map(), reviews: new Map(), dispatchConfirmations: new Set(),
+      uncertainDispatches: new Set(),
     };
     const apiJson = async (path, options = {}) => {
       const response = await fetch(path, {
@@ -896,7 +898,10 @@
       try { data = await response.json(); } catch (_error) { data = null; }
       if (!response.ok) {
         const detail = data?.detail;
-        throw new Error((typeof detail === 'string' ? detail : detail?.message) || `HTTP ${response.status}`);
+        const error = new Error((typeof detail === 'string' ? detail : detail?.message) || `HTTP ${response.status}`);
+        error.code = detail && typeof detail === 'object' ? detail.code : null;
+        error.status = response.status;
+        throw error;
       }
       if (!data || typeof data !== 'object') throw new Error('Resposta inválida do Nexus');
       return data;
@@ -972,6 +977,197 @@
         });
       }
       return planning.drafts.get(plan.plan_id);
+    };
+    const dispatchableKeys = plan => {
+      const approval = plan.approval || {};
+      const models = approval.agent_models || {};
+      const created = new Set((approval.panes || []).map(item => item.key));
+      const approved = new Set(approval.selected_agent_keys || Object.keys(models));
+      const candidates = new Set((plan.agents || []).filter(agent => {
+        const choice = models[agent.key] || {};
+        return approved.has(agent.key) && created.has(agent.key)
+          && (choice.backend || agent.backend || approval.backend) === 'codex_native';
+      }).map(agent => agent.key));
+      // Claude agents remain visible. A Codex agent whose prerequisite is
+      // Claude is not silently detached from that prerequisite.
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const agent of plan.agents || []) {
+          if (candidates.has(agent.key) && (agent.depends_on || []).some(key => !candidates.has(key))) {
+            candidates.delete(agent.key); changed = true;
+          }
+        }
+      }
+      return (plan.agents || []).filter(agent => candidates.has(agent.key)).map(agent => agent.key);
+    };
+    const dispatchPlan = async (plan, agentKeys, targetKey, confirmed) => {
+      if (!confirmed || planning.busy || !agentKeys.length) return;
+      const approval = plan.approval || {};
+      const identity = `${plan.plan_id}:${targetKey}`;
+      planning.busy = true; renderPlanningState();
+      try {
+        await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execute`, { method: 'POST', body: {
+          agent_keys: agentKeys, test_profiles: {},
+          max_turns_per_agent: approval.max_turns_per_agent,
+          mission_timeout_seconds: approval.mission_timeout_seconds,
+          confirm_costs: true,
+        } });
+        planning.dispatchConfirmations.delete(identity);
+        planning.uncertainDispatches.delete(identity);
+        planning.error = '';
+      } catch (writeError) {
+        planning.error = `Despacho não confirmado: ${writeError.message}. Consultando a execução persistida; nenhum turno será reenviado automaticamente.`;
+        try {
+          await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execution`);
+          planning.uncertainDispatches.delete(identity);
+        } catch (readError) {
+          if (readError.code !== 'EXECUTION_NOT_AUTHORIZED') planning.uncertainDispatches.add(identity);
+        }
+      } finally {
+        planning.busy = false;
+        await loadPlanningState();
+      }
+    };
+    const bindReview = async (plan, step, pane) => {
+      const sessionId = pane?.session?.session_id;
+      const reviews = sessionId ? planning.reviews.get(sessionId) : null;
+      const review = Array.isArray(reviews) ? reviews.find(row => row.status === 'REVIEWED') : null;
+      if (!review || planning.busy) return;
+      planning.busy = true; renderPlanningState();
+      try {
+        await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/steps/${encodeURIComponent(step.agent_key)}/review`, {
+          method: 'POST', body: { review_id: review.review_id },
+        });
+        planning.error = '';
+      } catch (writeError) {
+        planning.error = `Vínculo da revisão incerto: ${writeError.message}. Consultando a execução persistida antes de qualquer nova ação.`;
+        try { await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execution`); }
+        catch (_readError) { /* the persisted state remains shown as uncertain */ }
+      } finally {
+        planning.busy = false;
+        await loadPlanningState();
+      }
+    };
+    const interruptExecution = async plan => {
+      if (planning.busy || plan.execution?.status !== 'RUNNING') return;
+      planning.busy = true; renderPlanningState();
+      try {
+        await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/interrupt`, { method: 'POST', body: {} });
+        planning.error = '';
+      } catch (writeError) {
+        planning.error = `Interrupção não confirmada: ${writeError.message}. Consultando o estado persistido; não repetirei o pedido.`;
+        try { await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execution`); }
+        catch (_readError) { /* retain the uncertain message and persisted state */ }
+      } finally {
+        planning.busy = false;
+        await loadPlanningState();
+      }
+    };
+    const resumeExecution = async plan => {
+      if (planning.busy || !plan.execution?.resume?.eligible) return;
+      planning.busy = true; renderPlanningState();
+      try {
+        await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/resume`, { method: 'POST', body: {} });
+        planning.error = '';
+      } catch (writeError) {
+        planning.error = `Continuação não confirmada: ${writeError.message}. Consultando o estado persistido; nenhum turno será repetido automaticamente.`;
+        try { await apiJson(`/api/workspace/plans/${encodeURIComponent(plan.plan_id)}/execution`); }
+        catch (_readError) { /* preserve uncertainty until an operator reviews the state */ }
+      } finally {
+        planning.busy = false;
+        await loadPlanningState();
+      }
+    };
+    const renderApprovedAgents = plan => {
+      if (!['APPROVED', 'APPROVED_PARTIAL'].includes(plan.status)) return null;
+      const section = element('section', 'native-planning-dispatch');
+      section.append(element('h4', '', 'Agentes criados e execução'));
+      const created = new Map((plan.approval?.panes || []).map(item => [item.key, item.pane_id]));
+      const choices = plan.approval?.agent_models || {};
+      const steps = new Map((plan.execution?.steps || []).map(step => [step.agent_key, step]));
+      for (const agent of plan.agents || []) {
+        const paneId = created.get(agent.key);
+        if (!paneId) continue;
+        const pane = planning.panes.find(row => row.pane_id === paneId);
+        const choice = choices[agent.key] || {};
+        const step = steps.get(agent.key);
+        const turn = step?.native_turn_id ? planning.turnDetails.get(step.native_turn_id) : null;
+        const card = element('article', 'native-planning-dispatch-agent');
+        const heading = element('strong', '', `${agent.title} · ${step?.status || 'APROVADO · AGUARDANDO DESPACHO'}`);
+        const meta = element('p', 'native-note', [
+          `Sessão ${pane?.session?.session_id || 'carregando'}`,
+          `${choice.backend || agent.backend || plan.approval?.backend || 'runtime legado'} · ${choice.model || agent.model || 'sem modelo'}`,
+          `effort ${choice.effort || 'padrão do modelo'}`,
+          `Dependências: ${(agent.depends_on || []).join(', ') || 'nenhuma'}`,
+        ].join(' · '));
+        card.append(heading, meta);
+        const focus = element('button', 'native-planning-link', 'Abrir pane do agente');
+        focus.type = 'button'; focus.addEventListener('click', () => { void host?.focusPane?.(paneId); });
+        card.append(focus);
+        if (step?.native_turn_id) card.append(element('p', 'native-note', `Turno ${step.native_turn_id} · estado real ${turn?.status || 'consultando'}`));
+        if (step?.error_code || step?.error_message || turn?.error_message) {
+          card.append(element('p', 'cockpit-error-text', [step.error_code, step.error_message, turn?.error_message].filter(Boolean).join(' · ')));
+        }
+        const summary = (turn?.response_text || step?.result?.summary || step?.result?.response_text || '').trim();
+        if (summary) card.append(element('p', 'native-planning-summary', `Resumo do turno: ${summary.slice(0, 1200)}${summary.length > 1200 ? '…' : ''}`));
+        if (step?.status === 'AWAITING_NATIVE_REVIEW') {
+          const reviews = pane?.session?.session_id ? planning.reviews.get(pane.session.session_id) : null;
+          const review = Array.isArray(reviews) ? reviews.find(row => row.status === 'REVIEWED') : null;
+          const bind = element('button', 'native-planning-link', review ? 'Vincular a revisão Native conferida' : 'Revise o turno no pane do agente');
+          bind.type = 'button'; bind.disabled = planning.busy || !review;
+          bind.addEventListener('click', () => { void bindReview(plan, step, pane); });
+          card.append(bind);
+        }
+        section.append(card);
+      }
+      const execution = plan.execution;
+      if (execution?.status === 'RUNNING') {
+        const interrupt = element('button', 'native-planning-link', execution.interrupt_requested ? 'Interrupção solicitada' : 'Interromper execução');
+        interrupt.type = 'button'; interrupt.disabled = planning.busy || execution.interrupt_requested;
+        interrupt.addEventListener('click', () => { void interruptExecution(plan); });
+        section.append(interrupt);
+      }
+      if (execution?.status === 'BLOCKED' && execution.error_code === 'DEPENDENCY_WORKTREE_NOT_TRANSFERRED') {
+        section.append(element('p', 'native-note', 'Continuação bloqueada: revise e transfira as alterações da dependência usando o handoff humano existente.'));
+      }
+      if (execution?.status === 'BLOCKED' && execution.error_code === 'AWAITING_NATIVE_REVIEW') {
+        section.append(element('p', 'native-note', 'O turno terminou; a revisão humana no pane subordinado e seu vínculo são necessários antes de continuar.'));
+      }
+      if (execution?.status === 'BLOCKED' && execution.resume?.eligible) {
+        const resume = element('button', 'native-planning-link', 'Continuar após handoff transferido');
+        resume.type = 'button'; resume.disabled = planning.busy;
+        resume.addEventListener('click', () => { void resumeExecution(plan); });
+        section.append(resume);
+      }
+      const keys = execution?.agent_keys || dispatchableKeys(plan);
+      const targetKey = execution?.steps?.find(step => step.status === 'PENDING')?.agent_key
+        || (!execution ? keys[0] : null);
+      const canDispatch = keys.length && targetKey && (!execution || execution.status === 'AWAITING_EXECUTION');
+      if (canDispatch) {
+        const target = (plan.agents || []).find(agent => agent.key === targetKey);
+        const choice = choices[targetKey] || {};
+        const identity = `${plan.plan_id}:${targetKey}`;
+        const confirmation = element('label', 'native-planning-dispatch-confirm');
+        const checkbox = element('input'); checkbox.type = 'checkbox';
+        checkbox.checked = planning.dispatchConfirmations.has(identity);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) planning.dispatchConfirmations.add(identity);
+          else planning.dispatchConfirmations.delete(identity);
+          renderPlanningState();
+        });
+        confirmation.append(checkbox, element('span', '', `Confirmo iniciar ${target?.title || targetKey} do plano ${plan.plan_id} · Codex Native · ${choice.model || 'modelo aprovado'} · effort ${choice.effort || 'padrão'} · ${plan.approval.max_turns_per_agent} turno(s) · limite ${plan.approval.mission_timeout_seconds}s. A continuação de cada agente exigirá nova ação humana.`));
+        section.append(confirmation);
+        const start = element('button', 'cockpit-send', `Iniciar ${target?.title || targetKey} pelo Coordinator`);
+        start.type = 'button'; start.disabled = planning.busy || !checkbox.checked || planning.uncertainDispatches.has(identity);
+        start.addEventListener('click', () => { void dispatchPlan(plan, keys, targetKey, checkbox.checked); });
+        section.append(start);
+      }
+      if (!canDispatch && !execution && !dispatchableKeys(plan).length) {
+        section.append(element('p', 'native-note', 'Despacho da versão atual atende apenas agentes Codex Native com dependências Codex aprovadas; os agentes Claude permanecem visíveis sem troca automática de runtime.'));
+      }
+      if (execution?.error_message) section.append(element('p', 'cockpit-error-text', `${execution.error_code || execution.status}: ${execution.error_message}`));
+      return section;
     };
     const renderPlan = plan => {
       const draft = stateForDraft(plan);
@@ -1052,9 +1248,11 @@
       const status = element('p', 'native-note');
       status.textContent = incompleteDependency ? 'Inclua as dependências selecionadas antes de aprovar.'
         : draft.uncertain ? 'Aprovação com resultado incerto; consultando o registro persistido antes de liberar nova tentativa.'
-          : plan.status === 'APPROVED' ? `${(plan.approval?.panes || []).length} agente(s) criado(s). Nenhum turno foi iniciado.`
+          : ['APPROVED', 'APPROVED_PARTIAL'].includes(plan.status) ? `${(plan.approval?.panes || []).length} pane(s) subordinado(s) persistidos. A aprovação não iniciou turnos.`
             : 'A aprovação cria apenas os agentes selecionados, cada um com sessão e worktree próprios. Nenhum turno começa sozinho.';
       card.append(status);
+      const approvedAgents = renderApprovedAgents(plan);
+      if (approvedAgents) card.append(approvedAgents);
       if (plan.status === 'PROPOSED') {
         const limits = element('div', 'native-planning-limits');
         const turns = element('select'); turns.setAttribute('aria-label', 'Turnos autorizados por agente');
@@ -1103,7 +1301,9 @@
     const schedulePlanningRefresh = () => {
       if (planning.timer) clearTimeout(planning.timer);
       if (planning.mode !== 'planning' || !maestroEnabled) return;
-      planning.timer = setTimeout(() => { planning.timer = null; void loadPlanningState(); }, planning.state?.busy ? 2500 : 15000);
+      const active = Boolean(planning.state?.busy || (planning.state?.messages || []).some(item =>
+        ['RUNNING', 'AWAITING_EXECUTION'].includes(item.plan?.execution?.status)));
+      planning.timer = setTimeout(() => { planning.timer = null; void loadPlanningState(); }, active ? 2500 : 15000);
     };
     async function loadPlanningState() {
       if (!maestroEnabled || !fixed.projectId || planning.busy && planning.mode !== 'planning') return;
@@ -1114,18 +1314,44 @@
         catch (loadError) { planning.catalogs.claude_native = { models: [], catalog_error: loadError.message }; }
       }
       try {
-        const [maestro, costs] = await Promise.all([
+        const [maestro, costs, workspace] = await Promise.all([
           apiJson(`/api/workspace/maestro?project_id=${encodeURIComponent(fixed.projectId)}`),
           apiJson(`/api/workspace/cost-authorizations?project_id=${encodeURIComponent(fixed.projectId)}`),
+          apiJson(`/api/workspace/state?project_id=${encodeURIComponent(fixed.projectId)}`),
         ]);
         if (generation !== planning.generation) return;
         planning.state = maestro;
         planning.authorizations = costs.authorizations || [];
+        planning.panes = workspace.panes || [];
         planning.error = '';
       } catch (loadError) {
         if (generation !== planning.generation) return;
         planning.error = `Não foi possível reconciliar o estado salvo: ${loadError.message}`;
       }
+      const evidenceReads = [];
+      for (const item of planning.state?.messages || []) {
+        const plan = item.plan;
+        if (!plan?.execution) continue;
+        for (const step of plan.execution.steps || []) {
+          const pane = planning.panes.find(row => row.pane_id === step.pane_id);
+          const sessionId = pane?.session?.session_id;
+          if (!sessionId) continue;
+          if (step.native_turn_id) evidenceReads.push((async () => {
+            try {
+              const detail = await apiJson(`/api/dev/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(step.native_turn_id)}`);
+              planning.turnDetails.set(step.native_turn_id, detail);
+            } catch (readError) { planning.turnDetails.set(step.native_turn_id, { status: 'UNKNOWN', error_message: readError.message }); }
+          })());
+          if (step.status === 'AWAITING_NATIVE_REVIEW') evidenceReads.push((async () => {
+            try {
+              const data = await apiJson(`/api/dev/sessions/${encodeURIComponent(sessionId)}/integrations`);
+              planning.reviews.set(sessionId, data.integrations || []);
+            } catch (readError) { planning.reviews.set(sessionId, { error: readError.message }); }
+          })());
+        }
+      }
+      await Promise.all(evidenceReads);
+      if (generation !== planning.generation) return;
       renderPlanningState();
       schedulePlanningRefresh();
     }

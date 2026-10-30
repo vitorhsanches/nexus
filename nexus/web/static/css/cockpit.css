@@ -392,6 +392,13 @@ button:focus-visible,.pane:focus-visible{outline-color:var(--accent)}
 .native-planning-message.author-maestro{border-left-color:var(--accent)}
 .native-planning-message>p,.native-planning-task{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .native-planning-plan{display:grid;gap:7px;min-width:0;margin-top:5px;padding:8px;border:1px solid var(--border-soft);background:var(--terminal)}
+.native-planning-dispatch{display:grid;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border-soft)}
+.native-planning-dispatch h4{margin:0;color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace;text-transform:uppercase}
+.native-planning-dispatch-agent{display:grid;gap:5px;min-width:0;padding:7px;border:1px solid var(--border-soft);background:var(--surface)}
+.native-planning-dispatch-agent>strong{font:10px 'Cascadia Code',Consolas,monospace}
+.native-planning-dispatch-confirm{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:8px;border:1px solid var(--border-strong);font:9px/1.45 'Cascadia Code',Consolas,monospace}
+.native-planning-dispatch-confirm input{flex:none;margin:2px 0 0}
+.native-planning-summary{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;line-height:1.5}
 .native-planning-plan-title{display:grid;gap:4px}
 .native-planning-plan-title strong{color:var(--accent)}
 .native-planning-plan-title p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}

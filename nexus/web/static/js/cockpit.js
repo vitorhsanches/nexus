@@ -2196,6 +2196,26 @@
     setPaneAvailable,
     refreshPaneLabels: updateSidebar,
     refreshWorkspace: () => refresh(),
+    focusPane: paneId => {
+      let pane = panes().find(item => item.dataset.pane === paneId);
+      if (!pane) {
+        const agent = knownAgents.get(paneId);
+        if (!agent) return false;
+        pane = createAgentPane(agent);
+        closedAgents.delete(paneId);
+        syncUI();
+      }
+      if (pane.classList.contains('minimized')) {
+        pane.classList.remove('minimized');
+        const button = pane.querySelector('.minimize');
+        if (button) { button.textContent = '−'; button.setAttribute('aria-label', `Minimizar ${paneTitle(pane)}`); }
+        syncUI();
+      }
+      selectPane(pane);
+      pane.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      pane.focus({ preventScroll: true });
+      return true;
+    },
     onProject: listener => { projectListeners.add(listener); if (projectId) listener(projectId); },
   });
   syncUI();

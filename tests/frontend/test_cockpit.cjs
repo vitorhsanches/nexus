@@ -874,6 +874,9 @@ test('multiple agents form groups and closed panes can be shown again without cr
   const pane = app.grid.querySelector('[data-pane="PANE-1"]');
   app.grid.dispatch('click', pane.querySelector('.close'));
   assert.equal(app.byId['pane-count'].textContent, '07');
+  assert.equal(app.context.window.NexusCockpit.focusPane('PANE-1'), true);
+  assert.equal(app.grid.querySelector('[data-pane="PANE-1"]').classList.contains('selected'), true,
+    'the Maestro can restore and focus a previously closed approved child pane');
   app.byId['add-pane'].dispatch('click');
   assert.equal(app.byId['pane-count'].textContent, '08');
   assert.ok(app.calls.every(call => call.method === 'GET'));
