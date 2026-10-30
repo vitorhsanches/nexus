@@ -180,12 +180,17 @@
               </details>
               <details class="native-section" id="native-new">
                 <summary>+ Nova sessão</summary>
-                <label for="native-model">Modelo anunciado pelo Codex local</label>
+                <label for="native-runtime">Runtime</label>
+                <select class="cockpit-model-select" id="native-runtime">
+                  <option value="codex_native">Codex Native</option>
+                  <option value="claude_native">Claude Native</option>
+                </select>
+                <label for="native-model">Modelo anunciado pela conta local</label>
                 <select class="cockpit-model-select" id="native-model"></select>
                 <label for="native-effort">Esforço (opcional)</label>
                 <select class="cockpit-model-select" id="native-effort"></select>
                 <p class="native-note" id="native-model-note" role="status"></p>
-                <button class="cockpit-send" id="native-create" type="button">Criar sessão Codex Native</button>
+                <button class="cockpit-send" id="native-create" type="button">Criar sessão Native</button>
               </details>
               <details class="native-section native-details" id="native-details">
                 <summary>Detalhes da sessão</summary>

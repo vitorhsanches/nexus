@@ -13,12 +13,20 @@
   const ACTIVE = ['PENDING', 'RUNNING'];
   const TERMINAL = ['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'];
   const TEXT_LIMIT = 20000;
-  const BACKEND = 'codex_native';
+  // The pane itself is runtime-agnostic: a session's own `backend` (persisted
+  // at creation, never switched) decides how it is labeled and rendered.
+  // `native-runtime` only picks which backend a NEW session is created with.
+  const NATIVE_BACKENDS = new Set(['codex_native', 'claude_native']);
+  const RUNTIME_LABELS = { codex_native: 'Codex Native', claude_native: 'Claude Native' };
+  const DEFAULT_BACKEND = 'codex_native';
 
   const state = {
     projectId: null, generation: 0, gate: null, integrationGate: null, gateError: '',
     models: [], defaultModel: null, modelsError: '', sessions: [], sessionsError: '',
     session: null, turns: [], approvals: [], seenApprovals: new Set(), files: [], diff: null, changesError: '', selectedFile: null,
+    // Claude Native only: approval_id -> {tool, operation, operation_sha256} fetched on demand,
+    // never pre-loaded -- the exact content is shown only once a human asks to see it.
+    operationDetails: new Map(),
     review: null, preflight: null, history: [], reviewDecisionUncertain: false,
     busy: new Set(), sessionNote: null, approvalPollFailed: false,
     stream: null, cursor: null, activeTurnId: null, live: null, connection: 'idle', pollTimer: null, reconnectTimer: null,
@@ -55,7 +63,12 @@
     return data;
   };
 
-  const isNative = session => session?.backend === BACKEND;
+  const isNative = session => NATIVE_BACKENDS.has(session?.backend);
+  const selectedRuntime = () => {
+    const field = $('native-runtime');
+    const value = field ? field.value : '';
+    return NATIVE_BACKENDS.has(value) ? value : DEFAULT_BACKEND;
+  };
   const turnIsActive = turn => ACTIVE.includes(turn?.status);
   const sessionPath = (suffix = '') => `/api/dev/sessions/${encodeURIComponent(state.session.session_id)}${suffix}`;
   const stale = generation => generation !== state.generation;
@@ -63,7 +76,7 @@
   const reviewableSnapshot = review => Boolean(review?.snapshot?.approval_ready &&
     !review.snapshot.diff?.truncated && (review.snapshot.diff?.files || []).length &&
     review.snapshot.diff.files.every(file => typeof file.patch === 'string' && !file.truncated && !file.content_omitted));
-  const backendLabel = session => (isNative(session) ? 'Codex Native' : 'OmniRoute (legado)');
+  const backendLabel = session => RUNTIME_LABELS[session?.backend] || 'OmniRoute (legado)';
   const selectedModel = () => {
     const value = $('native-model').value;
     return state.models.some(model => model.id === value) ? value : '';
@@ -105,9 +118,10 @@
       return option;
     }));
     select.value = state.models.some(model => model.id === previous) ? previous : '';
+    const runtimeLabel = RUNTIME_LABELS[selectedRuntime()];
     setNote('native-model-note', state.modelsError
-      ? `Catálogo Codex Native indisponível: ${state.modelsError}`
-      : `${state.models.length} modelo(s) anunciado(s) pelo Codex local. Escolha um explicitamente.`, Boolean(state.modelsError));
+      ? `Catálogo ${runtimeLabel} indisponível: ${state.modelsError}`
+      : `${state.models.length} modelo(s) anunciado(s) pela conta local ${runtimeLabel}. Escolha um explicitamente.`, Boolean(state.modelsError));
     renderEfforts();
   };
   const renderEfforts = () => {
@@ -164,7 +178,7 @@
     const scrollBody = pane.querySelector('.native-body');
     const stickToBottom = scrollBody ? scrollBody.scrollHeight - scrollBody.clientHeight - scrollBody.scrollTop < 32 : false;
     if (!state.session) {
-      log.replaceChildren(element('div', 'cockpit-event', state.projectId ? 'Selecione uma sessão ou crie uma sessão Codex Native.' : 'Selecione um projeto.'));
+      log.replaceChildren(element('div', 'cockpit-event', state.projectId ? 'Selecione uma sessão ou crie uma sessão Native.' : 'Selecione um projeto.'));
       return;
     }
     const items = state.turns.slice(-20).map(turn => {
@@ -198,17 +212,32 @@
     const shown = [...pending, ...state.approvals.filter(item => item.status !== 'PENDING').slice(0, 5)];
     list.replaceChildren(...(shown.length ? shown.map(approval => {
       const summary = approval.summary || {};
+      const isOperation = typeof summary.operation_sha256 === 'string';
       const row = element('div', `native-approval is-${String(approval.status).toLowerCase()}`);
       row.append(element('strong', '', `${approval.kind === 'file_change' ? 'Alteração de arquivo' : 'Comando'} · ${approval.status}`));
-      [['Comando', summary.command], ['Diretório', summary.cwd], ['Acesso de escrita', summary.grantRoot], ['Motivo', summary.reason]]
+      [['Comando', summary.command], ['Diretório', summary.cwd], ['Ferramenta', summary.tool],
+        ['Acesso de escrita', summary.grantRoot], ['Motivo', summary.reason]]
         .filter(([, value]) => value).forEach(([label, value]) => row.append(element('pre', 'native-approval-detail', `${label}: ${clip(value, 2000)}`)));
       if (approval.status === 'PENDING') {
+        const detail = state.operationDetails.get(approval.approval_id);
+        if (isOperation && !detail) {
+          const reveal = element('button', 'cockpit-send', 'Ver alteração completa');
+          reveal.type = 'button';
+          reveal.disabled = state.busy.has(`operation:${approval.approval_id}`);
+          reveal.addEventListener('click', () => { void loadOperationDetail(approval.approval_id); });
+          row.append(reveal);
+        } else if (isOperation && detail) {
+          row.append(element('pre', 'native-approval-detail', clip(detail.operation, 4000)));
+        }
         const actions = element('div', 'native-actions');
         [['accept', 'Aprovar uma vez'], ['decline', 'Recusar']].forEach(([decision, label]) => {
           const button = element('button', 'cockpit-send', label);
           button.type = 'button';
-          button.disabled = state.busy.has(`approval:${approval.approval_id}`);
-          button.addEventListener('click', () => { void decide(approval.approval_id, decision); });
+          // Claude Native: never approvable before the exact operation was
+          // fetched and shown -- there is nothing to silently trust here.
+          button.disabled = state.busy.has(`approval:${approval.approval_id}`) ||
+            (decision === 'accept' && isOperation && !detail);
+          button.addEventListener('click', () => { void decide(approval.approval_id, decision, detail?.operation_sha256); });
           actions.append(button);
         });
         row.append(actions);
@@ -309,7 +338,7 @@
     $('native-meta-model').textContent = state.session?.requested_model || selectedModel() || '—';
     $('native-meta-effort').textContent = $('native-effort').value ? `${$('native-effort').value} · próximo turno` : 'por turno';
     $('native-meta-session').textContent = state.session?.session_id || '—';
-    $('native-meta-backend').textContent = state.session ? (isNative(state.session) ? BACKEND : 'omniroute · legado') : BACKEND;
+    $('native-meta-backend').textContent = state.session ? (isNative(state.session) ? state.session.backend : 'omniroute · legado') : selectedRuntime();
     $('native-foot').textContent = state.session?.worktree_path || state.session?.branch || 'sem worktree ativo';
     $('native-foot').title = state.session?.worktree_path || state.session?.branch || '';
     $('native-runtime-model').textContent = state.session?.requested_model || 'Selecione uma sessão';
@@ -336,6 +365,7 @@
       review: null, preflight: null, history: [], reviewDecisionUncertain: false,
       activeTurnId: null, live: null, cursor: null, connection: 'idle' });
     state.seenApprovals = new Set();
+    state.operationDetails = new Map();
     state.busy.clear();
     $('native-apply-confirm').checked = false;
     state.sessionNote = null; state.approvalPollFailed = false;
@@ -371,7 +401,7 @@
       if (fresh.length) {
         $('native-settings').open = true;
         $('native-approvals-section').open = true;
-        host.notify('Codex Native aguarda sua aprovação');
+        host.notify(`${backendLabel(state.session)} aguarda sua aprovação`);
       }
       if (state.approvalPollFailed) { state.approvalPollFailed = false; setNote('native-approval-note', ''); }
     } catch (error) {
@@ -527,6 +557,17 @@
       if (!stale(generation)) { state.busy.delete('session'); render(); }
     }
   };
+  const loadModelsFor = async (generation, backend) => {
+    try {
+      const data = await api(`/api/dev/models?backend=${backend}`);
+      if (stale(generation)) return;
+      state.models = (data.models || []).filter(model => model.selectable === true && typeof model.id === 'string');
+      state.defaultModel = state.models.some(model => model.id === data.default_model) ? data.default_model : null;
+      state.modelsError = data.catalog_error || '';
+    } catch (error) {
+      if (!stale(generation)) { state.models = []; state.defaultModel = null; state.modelsError = error.message; }
+    }
+  };
   const loadProject = async projectId => {
     state.generation++;
     const generation = state.generation;
@@ -539,11 +580,7 @@
     await Promise.all([
       settle(api('/api/dev/execution-status'), data => { state.gate = data.execution_enabled === true; }, message => { state.gate = false; state.gateError = message; }),
       settle(api('/api/dev/integration-status'), data => { state.integrationGate = data.integration_enabled === true; }, () => { state.integrationGate = false; }),
-      settle(api(`/api/dev/models?backend=${BACKEND}`), data => {
-        state.models = (data.models || []).filter(model => model.selectable === true && typeof model.id === 'string');
-        state.defaultModel = state.models.some(model => model.id === data.default_model) ? data.default_model : null;
-        state.modelsError = data.catalog_error || '';
-      }, message => { state.modelsError = message; }),
+      loadModelsFor(generation, selectedRuntime()),
       settle(api(`/api/dev/sessions?project_id=${encodeURIComponent(projectId)}`), data => { state.sessions = data.sessions || []; },
         message => { state.sessionsError = message; }),
     ]);
@@ -552,13 +589,21 @@
   };
 
   // ---- explicit actions ---------------------------------------------------
+  const switchRuntime = async () => {
+    if (!state.projectId) return;
+    const generation = state.generation;
+    state.models = []; state.modelsError = ''; renderModels();
+    await loadModelsFor(generation, selectedRuntime());
+    if (!stale(generation)) { renderModels(); renderControls(); }
+  };
   const createSession = async () => {
     const model = selectedModel();
+    const backend = selectedRuntime();
     if (!state.projectId || !model || state.busy.has('create')) return;
     const generation = state.generation;
-    state.busy.add('create'); setSessionNote('Criando sessão Codex Native…'); renderControls();
+    state.busy.add('create'); setSessionNote(`Criando sessão ${RUNTIME_LABELS[backend]}…`); renderControls();
     try {
-      const session = await api('/api/dev/sessions', { method: 'POST', body: { project_id: state.projectId, backend: BACKEND, requested_model: model } });
+      const session = await api('/api/dev/sessions', { method: 'POST', body: { project_id: state.projectId, backend, requested_model: model } });
       if (stale(generation)) return;
       state.sessions = [session, ...state.sessions.filter(item => item.session_id !== session.session_id)];
       state.busy.delete('create');
@@ -610,18 +655,35 @@
       if (!stale(generation)) renderControls();
     }
   };
-  async function decide(approvalId, decision) {
+  async function loadOperationDetail(approvalId) {
+    const key = `operation:${approvalId}`;
+    if (!state.session || state.busy.has(key)) return;
+    const generation = state.generation;
+    state.busy.add(key); renderApprovals();
+    try {
+      const detail = await api(sessionPath(`/approvals/${encodeURIComponent(approvalId)}/operation`));
+      if (!stale(generation)) state.operationDetails.set(approvalId, detail);
+    } catch (error) {
+      if (!stale(generation)) setNote('native-approval-note', `Não foi possível carregar a alteração: ${error.message}`, true);
+    } finally {
+      state.busy.delete(key);
+      if (!stale(generation)) renderApprovals();
+    }
+  }
+  async function decide(approvalId, decision, operationSha256) {
     const key = `approval:${approvalId}`;
     if (!state.session || state.busy.has(key)) return;
     const generation = state.generation;
     state.busy.add(key); renderApprovals();
     try {
-      await api(sessionPath(`/approvals/${encodeURIComponent(approvalId)}`), { method: 'POST', body: { decision } });
+      const body = operationSha256 ? { decision, operation_sha256: operationSha256 } : { decision };
+      await api(sessionPath(`/approvals/${encodeURIComponent(approvalId)}`), { method: 'POST', body });
       if (!stale(generation)) setNote('native-approval-note', decision === 'accept' ? 'Aprovado uma vez.' : 'Recusado.');
     } catch (error) {
       if (!stale(generation)) setNote('native-approval-note', `Não foi possível registrar a decisão: ${error.message}`, true);
     } finally {
       state.busy.delete(key);
+      state.operationDetails.delete(approvalId);
       await loadApprovals(generation);
     }
   }
@@ -733,6 +795,7 @@
   $('native-session').addEventListener('change', event => { void selectSession(event.currentTarget.value); });
   $('native-model').addEventListener('change', () => { renderEfforts(); renderControls(); renderChrome(); });
   $('native-effort').addEventListener('change', () => { renderControls(); renderChrome(); });
+  $('native-runtime')?.addEventListener('change', () => { void switchRuntime(); });
   $('native-create').addEventListener('click', () => { void createSession(); });
   $('native-composer').addEventListener('submit', event => { event.preventDefault(); void sendTask(); });
   $('native-prompt').addEventListener('input', renderControls);
