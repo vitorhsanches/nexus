@@ -521,6 +521,7 @@
       status.dataset.maestroMarked = 'true';
     }
     addMaestroPromotionControl(pane, agent);
+    nativeControllers.get(agent.pane_id)?.setMaestro?.(agent.is_maestro);
   };
   panes().forEach(addCloseControl);
 
@@ -1633,7 +1634,7 @@
     grid.append(pane);
     nativeControllers.set(agent.pane_id, window.NexusNativePane.mount(pane, {
       projectId: agent.project_id, sessionId: agent.session.session_id,
-      backend: agent.backend, effort: agent.effort,
+      backend: agent.backend, effort: agent.effort, paneId: agent.pane_id, maestro: agent.is_maestro,
     }));
     return pane;
   };
@@ -2194,6 +2195,7 @@
     notify,
     setPaneAvailable,
     refreshPaneLabels: updateSidebar,
+    refreshWorkspace: () => refresh(),
     onProject: listener => { projectListeners.add(listener); if (projectId) listener(projectId); },
   });
   syncUI();

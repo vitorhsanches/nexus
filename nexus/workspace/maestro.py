@@ -55,6 +55,29 @@ def _catalog(project_id: str | None = None) -> dict:
     return list_dev_models()
 
 
+def _agent_models(project_id: str) -> list[dict]:
+    """Return only live models eligible for agents under this Maestro runtime."""
+    if _planning_backend(project_id) != "codex_native":
+        return [
+            {**row, "backend": "omniroute"}
+            for row in _catalog(project_id).get("models", [])
+        ]
+    from nexus.chat import service as chat_service
+
+    rows: list[dict] = []
+    for backend in (chat_service.BACKEND_CODEX_NATIVE, chat_service.BACKEND_CLAUDE_NATIVE):
+        try:
+            catalog = chat_service.list_models(backend=backend)
+        except chat_service.ChatError:
+            continue
+        # A backend mismatch means the source did not return the requested
+        # runtime's catalog. Fail closed rather than relabeling its models.
+        if catalog.get("backend") not in {None, backend}:
+            continue
+        rows.extend({**row, "backend": backend} for row in catalog.get("models", []))
+    return rows
+
+
 def _planning_model(project_id: str, model: str, effort: str | None = None, *, catalog: dict | None = None) -> dict | None:
     """Resolve one exact planning route before any new Chat turn."""
     from nexus.workspace import ai_settings
@@ -200,12 +223,13 @@ def send_message(project_id: str, text: str, *, effort: str | None = None) -> di
             )
         lease = reserved[0]
     limit = policy.max_auto_panes()
+    agent_models = _agent_models(project_id)
     # The user message is stored first (PENDING); every path below finishes
     # it through one atomic _answer(). An interruption anywhere in between
     # is recovered by reconcile() on the next read.
     message_id = store.add_message(conversation["id"], author="user", text=text, status="PENDING")
     if not conversation["chat_session_id"]:
-        plan = maestro_plan.deterministic(text, models=catalog["models"], limit=limit, reason=None)
+        plan = maestro_plan.deterministic(text, models=agent_models, limit=limit, reason=None)
         _answer(project_id, message_id, text, plan, reply=NOT_AUTHORIZED_REPLY, user_status="COMPLETED")
         return conversation_state(project_id)
 
@@ -213,7 +237,7 @@ def send_message(project_id: str, text: str, *, effort: str | None = None) -> di
     prompt = maestro_plan.build_prompt(
         user_text=text,
         project=project,
-        models=catalog["models"],
+        models=agent_models,
         panes=workspace_service.list_panes(project_id),
         limit=limit,
         previous_summary=previous,
@@ -224,7 +248,7 @@ def send_message(project_id: str, text: str, *, effort: str | None = None) -> di
         if lease:
             from nexus.workspace import cost_authorizations
             cost_authorizations.release(lease)
-        plan = maestro_plan.deterministic(text, models=catalog["models"], limit=limit, reason=f"Maestro indisponível ({error.code})")
+        plan = maestro_plan.deterministic(text, models=agent_models, limit=limit, reason=f"Maestro indisponível ({error.code})")
         _answer(project_id, message_id, text, plan, reply=UNREACHABLE_REPLY, user_status="FAILED",
                 error_code=error.code, error_message=str(error)[:1000])
         return conversation_state(project_id)
@@ -293,6 +317,7 @@ def reconcile(conversation_id: str) -> None:
 
     conversation = store.get_conversation(conversation_id)
     catalog = None
+    agent_models = None
     limit = policy.max_auto_panes()
     for row in store.list_messages(conversation_id):
         if row["author"] != "user" or row["status"] not in {"PENDING", "PROCESSING"}:
@@ -306,12 +331,13 @@ def reconcile(conversation_id: str) -> None:
                 store.set_message_turn(row["id"], turn_id)
         if catalog is None:
             catalog = _catalog(conversation["project_id"])
+            agent_models = _agent_models(conversation["project_id"])
         if not turn_id:
             if not conversation["chat_session_id"]:
-                plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit, reason=None)
+                plan = maestro_plan.deterministic(row["text"], models=agent_models, limit=limit, reason=None)
                 _answer(project_id, row["id"], row["text"], plan, reply=NOT_AUTHORIZED_REPLY, user_status="COMPLETED")
             elif _age_seconds(row["created_at"]) >= SEND_GRACE_SECONDS:
-                plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit,
+                plan = maestro_plan.deterministic(row["text"], models=agent_models, limit=limit,
                                                   reason="Envio ao Maestro interrompido")
                 _answer(project_id, row["id"], row["text"], plan, reply=INTERRUPTED_REPLY, user_status="FAILED",
                         error_code="MAESTRO_SEND_INTERRUPTED")
@@ -327,19 +353,19 @@ def reconcile(conversation_id: str) -> None:
             continue
         if turn["status"] == "COMPLETED":
             try:
-                plan = maestro_plan.parse(turn["response_text"] or "", models=catalog["models"], limit=limit)
+                plan = maestro_plan.parse(turn["response_text"] or "", models=agent_models, limit=limit)
                 reply = plan["explanation"]
                 if plan["needs_clarification"]:
                     reply = f"{reply}\n\n{plan['needs_clarification']}".strip()
                 _answer(project_id, row["id"], row["text"], plan, reply=reply, user_status="COMPLETED")
             except maestro_plan.PlanValidationError as error:
-                plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit,
+                plan = maestro_plan.deterministic(row["text"], models=agent_models, limit=limit,
                                                   reason=f"Resposta do Maestro inválida: {error}")
                 _answer(project_id, row["id"], row["text"], plan, reply=INVALID_REPLY, user_status="COMPLETED",
                         error_code="INVALID_MAESTRO_PLAN", error_message=str(error)[:1000])
         else:
             code = turn["error_code"] or turn["status"]
-            plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit,
+            plan = maestro_plan.deterministic(row["text"], models=agent_models, limit=limit,
                                               reason=f"Maestro indisponível ({code})")
             _answer(project_id, row["id"], row["text"], plan, reply=FAILED_REPLY, user_status="FAILED",
                     error_code=code, error_message=(turn["error_message"] or "")[:1000])

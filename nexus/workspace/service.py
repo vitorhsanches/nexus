@@ -722,6 +722,7 @@ def approve_plan(
     backend: str = "omniroute",
     agent_backends: dict[str, str] | None = None,
     agent_efforts: dict[str, str] | None = None,
+    selected_agent_keys: list[str] | None = None,
     max_turns_per_agent: int,
     mission_timeout_seconds: int,
     confirm_costs: bool,
@@ -749,16 +750,38 @@ def approve_plan(
     from nexus.dev.service import validate_dev_project
 
     validate_dev_project(plan["project_id"])
-    agents = plan["agents"]
-    if not agents:
+    all_agents = plan["agents"]
+    if not all_agents:
         raise DevServiceError("PLAN_HAS_NO_AGENTS", "This plan has no agents to create.", http_status=400)
-    if not isinstance(agent_models, dict) or set(agent_models) != {agent["key"] for agent in agents}:
+    all_agent_keys = {agent["key"] for agent in all_agents}
+    if selected_agent_keys is None:
+        selected_agent_keys = [agent["key"] for agent in all_agents]
+    if (not isinstance(selected_agent_keys, list) or not selected_agent_keys
+            or any(not isinstance(key, str) for key in selected_agent_keys)
+            or len(selected_agent_keys) != len(set(selected_agent_keys))
+            or not set(selected_agent_keys) <= all_agent_keys):
+        raise DevServiceError("AGENTS_NOT_CONFIRMED", "Select at least one valid agent for approval.", http_status=400)
+    selected_keys = set(selected_agent_keys)
+    all_by_key = {agent["key"]: agent for agent in all_agents}
+    if any(not set(all_by_key[key].get("depends_on") or []) <= selected_keys for key in selected_keys):
+        raise DevServiceError("DEPENDENCY_NOT_SELECTED", "Select every prerequisite of each approved agent.", http_status=400)
+    agents = [agent for agent in all_agents if agent["key"] in selected_keys]
+    maestro_parent_pane_id = None
+    maestro_parent_backend = None
+    if plan.get("conversation_id"):
+        conversation = store.get_conversation(plan["conversation_id"])
+        if conversation is not None and conversation["maestro_pane_id"]:
+            maestro_parent_pane_id = conversation["maestro_pane_id"]
+            parent_pane = store.get_pane(maestro_parent_pane_id)
+            if parent_pane is not None:
+                maestro_parent_backend = _pane_backend(parent_pane)
+    if not isinstance(agent_models, dict) or set(agent_models) != selected_keys:
         raise DevServiceError("MODELS_NOT_CONFIRMED", "Confirm the exact model for every planned agent.", http_status=400)
     if agent_backends is not None and (
         not isinstance(agent_backends, dict)
         or set(agent_backends) != set(agent_models)
         or any(
-            value not in {"omniroute", "codex_native"}
+            value not in {"omniroute", "codex_native", "claude_native"}
             for value in agent_backends.values()
         )
     ):
@@ -767,9 +790,19 @@ def approve_plan(
             "Confirm the exact backend for every planned agent.",
             http_status=400,
         )
+    def approved_backend(key: str) -> str:
+        if agent_backends is not None:
+            return agent_backends[key]
+        if backend != "omniroute":
+            return backend
+        return all_by_key[key].get(
+            "backend",
+            "codex_native" if maestro_parent_backend == "codex_native" else backend,
+        )
+
     native_agent_keys = {
         key for key in agent_models
-        if (agent_backends or {}).get(key, backend) == "codex_native"
+        if approved_backend(key) in {"codex_native", "claude_native"}
     }
     if plan.get("source") == "manual":
         approved_keys = {agent["key"] for agent in agents}
@@ -792,7 +825,7 @@ def approve_plan(
     ):
         raise DevServiceError(
             "EFFORTS_NOT_CONFIRMED",
-            "Choose reasoning efforts only for Codex Native agents.",
+            "Choose reasoning efforts only for Native agents.",
             http_status=400,
         )
     if not MIN_PLAN_TURNS <= max_turns_per_agent <= MAX_PLAN_TURNS:
@@ -810,9 +843,13 @@ def approve_plan(
     chosen = {}
     for agent in agents:
         model = agent_models[agent["key"]]
-        agent_backend = (
-            agent_backends[agent["key"]] if agent_backends is not None else backend
-        )
+        agent_backend = approved_backend(agent["key"])
+        if maestro_parent_backend == "codex_native" and agent_backend not in {"codex_native", "claude_native"}:
+            raise DevServiceError(
+                "NATIVE_MAESTRO_REQUIRES_NATIVE_AGENT",
+                "Agentes deste Maestro precisam usar um runtime Native explicitamente selecionado.",
+                http_status=422,
+            )
         row = _require_backend_model(model, agent_backend)
         choice = {
             "model": model,
@@ -821,12 +858,15 @@ def approve_plan(
             "recommended": agent.get("model"),
             "changed_by_user": model != agent.get("model"),
         }
-        if agent_backend == "codex_native":
-            effort = (agent_efforts or {}).get(agent["key"])
+        if agent_backend in {"codex_native", "claude_native"}:
+            effort = (agent_efforts or {}).get(agent["key"], agent.get("effort"))
             if effort is not None:
-                from nexus.dev.executor import validate_native_choice
+                from nexus.dev.executor import validate_claude_choice, validate_native_choice
 
-                validate_native_choice(model, effort)
+                if agent_backend == "codex_native":
+                    validate_native_choice(model, effort)
+                else:
+                    validate_claude_choice(model, effort)
                 choice["effort"] = effort
         chosen[agent["key"]] = choice
     paid = sorted({item["model"] for item in chosen.values() if item["cost_status"] != "free"})
@@ -839,6 +879,7 @@ def approve_plan(
     approval = {
         "backend": backend,
         "agent_models": chosen,
+        "selected_agent_keys": [agent["key"] for agent in agents],
         "max_turns_per_agent": max_turns_per_agent,
         "mission_timeout_seconds": mission_timeout_seconds,
         "cost_confirmed_for": paid,
@@ -849,11 +890,6 @@ def approve_plan(
     if not store.claim_plan_for_approval(plan_id, approval):
         raise DevServiceError("PLAN_NOT_PROPOSED", "This plan is already being approved.", http_status=409)
     created = []
-    maestro_parent_pane_id = None
-    if plan.get("conversation_id"):
-        conversation = store.get_conversation(plan["conversation_id"])
-        if conversation is not None:
-            maestro_parent_pane_id = conversation["maestro_pane_id"]
     for agent in agents:
         choice = chosen[agent["key"]]
         brief = {
@@ -877,6 +913,7 @@ def approve_plan(
                 title=agent["title"],
                 model=choice["model"],
                 backend=choice["backend"],
+                effort=choice.get("effort"),
                 plan_id=plan_id,
                 _origin="maestro",
                 _plan_agent_key=agent["key"],
