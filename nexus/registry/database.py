@@ -455,6 +455,8 @@ def initialize_database() -> None:
                 collapsed INTEGER NOT NULL DEFAULT 0,
                 expanded INTEGER NOT NULL DEFAULT 0,
                 hidden INTEGER NOT NULL DEFAULT 0,
+                capabilities_json TEXT NOT NULL DEFAULT '[]',
+                maestro_parent_pane_id TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (project_id) REFERENCES projects(id),
@@ -529,6 +531,7 @@ def initialize_database() -> None:
                 model TEXT,
                 planning_authorized_at TEXT,
                 cost_confirmed_model TEXT,
+                maestro_pane_id TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (project_id) REFERENCES projects(id)
@@ -582,6 +585,10 @@ def initialize_database() -> None:
             connection.execute(
                 "ALTER TABLE workspace_maestro_conversations ADD COLUMN cost_confirmed_model TEXT"
             )
+        if "maestro_pane_id" not in conversation_cols:
+            connection.execute(
+                "ALTER TABLE workspace_maestro_conversations ADD COLUMN maestro_pane_id TEXT"
+            )
         plan_cols = [r[1] for r in connection.execute("PRAGMA table_info(workspace_plans)").fetchall()]
         for column, ddl in (
             ("source", "TEXT NOT NULL DEFAULT 'deterministic'"),
@@ -603,6 +610,10 @@ def initialize_database() -> None:
         for column in ("plan_agent_key", "brief_json"):
             if column not in pane_cols:
                 connection.execute(f"ALTER TABLE workspace_panes ADD COLUMN {column} TEXT")
+        if "capabilities_json" not in pane_cols:
+            connection.execute("ALTER TABLE workspace_panes ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]'")
+        if "maestro_parent_pane_id" not in pane_cols:
+            connection.execute("ALTER TABLE workspace_panes ADD COLUMN maestro_parent_pane_id TEXT")
 
         # P2B.1 durable sequential plan execution. The coordinator is a
         # controller over existing Development missions; it is not another

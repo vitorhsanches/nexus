@@ -484,6 +484,44 @@
     button.setAttribute('aria-label', `Fechar ${paneTitle(pane)}`);
     pane.querySelector('.pane-tools').append(button);
   };
+
+  const addMaestroPromotionControl = (pane, agent) => {
+    const existing = pane.querySelector('.promote-maestro');
+    if (agent.is_maestro) { existing?.remove(); return; }
+    if (agent.backend !== 'codex_native' || existing) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'pane-tool promote-maestro';
+    button.textContent = 'M';
+    button.title = 'Promover este pane a Maestro';
+    button.setAttribute('aria-label', `Promover ${agent.title || agent.pane_id} a Maestro`);
+    button.addEventListener('click', async event => {
+      event.stopPropagation();
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        await api(`/api/workspace/panes/${encodeURIComponent(agent.pane_id)}/promote-maestro`, { method: 'POST' });
+        notify(`${agent.title || agent.pane_id} agora é o Maestro deste projeto`);
+        await refresh();
+      } catch (error) {
+        button.disabled = false;
+        notify(`Não foi possível promover o pane: ${error.message}`);
+      }
+    });
+    pane.querySelector('.pane-tools').append(button);
+  };
+  const updateMaestroPresentation = (pane, agent) => {
+    if (agent.is_maestro) pane.classList.add('maestro-assigned');
+    else pane.classList.remove('maestro-assigned');
+    const identity = pane.querySelector('.pane-identity div > span');
+    if (identity) identity.textContent = agent.is_maestro ? 'MAESTRO · COORDENAÇÃO' : (agent.role_label || agent.role || 'AGENTE');
+    const status = pane.querySelector('.pane-status');
+    if (status && agent.is_maestro && !status.dataset.maestroMarked) {
+      status.insertAdjacentText('afterbegin', '✳ ');
+      status.dataset.maestroMarked = 'true';
+    }
+    addMaestroPromotionControl(pane, agent);
+  };
   panes().forEach(addCloseControl);
 
   const paneCreatePanel = document.getElementById('pane-create-panel');
@@ -1590,6 +1628,7 @@
     pane.querySelectorAll('[for]').forEach(node => {
       node.htmlFor = `${agent.pane_id}-${node.htmlFor}`;
     });
+    updateMaestroPresentation(pane, agent);
     addCloseControl(pane);
     grid.append(pane);
     nativeControllers.set(agent.pane_id, window.NexusNativePane.mount(pane, {
@@ -1730,7 +1769,12 @@
   };
   const renderSystemPanes = (workspace, maestro) => {
     maestroPane.querySelector('.pane-status').lastChild.textContent = maestro?.busy ? ' Planejando' : ' Disponível';
-    maestroPane.querySelector('.pane-meta').replaceChildren(element('span', '', `MODELO  ${maestro?.planning?.model || 'Não autorizado'}`), element('span', '', `SESSÃO  ${maestro?.conversation_id || '—'}`));
+    maestroPane.querySelector('.pane-meta').replaceChildren(
+      element('span', '', `MODELO  ${maestro?.planning?.model || 'Não autorizado'}`),
+      element('span', '', `BACKEND  ${maestro?.planning?.backend || 'omniroute'}`),
+      element('span', '', `PANE  ${maestro?.maestro_pane_id || 'não vinculado'}`),
+      element('span', '', `SESSÃO  ${maestro?.conversation_id || '—'}`),
+    );
     const body = maestroPane.querySelector('.maestro-body');
     const signature = JSON.stringify(maestro?.messages || []);
     if (body.dataset.signature !== signature) {
@@ -1955,6 +1999,7 @@
       agents.forEach((agent, index) => {
         let pane = panes().find(item => item.dataset.pane === agent.pane_id);
         if (!pane && !closedAgents.has(agent.pane_id)) pane = createAgentPane(agent);
+        if (pane && ['codex_native', 'claude_native'].includes(agent.backend)) updateMaestroPresentation(pane, agent);
         if (pane && !['codex_native', 'claude_native'].includes(agent.backend)) {
           updateAgentPane(pane, agent, histories[index]); renderAgentControls(agent.pane_id);
         }

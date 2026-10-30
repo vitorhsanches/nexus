@@ -109,6 +109,8 @@ def create_pane(
     plan_id: str | None = None,
     plan_agent_key: str | None = None,
     brief: dict | None = None,
+    capabilities: list[str] | None = None,
+    maestro_parent_pane_id: str | None = None,
 ) -> str:
     pane_id = f"PANE-{uuid4().hex[:8].upper()}"
     now = _now()
@@ -121,10 +123,12 @@ def create_pane(
         connection.execute(
             """INSERT INTO workspace_panes
                (id, project_id, dev_session_id, plan_id, origin, role, title, model,
-                position, created_at, updated_at, plan_agent_key, brief_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               position, created_at, updated_at, plan_agent_key, brief_json, capabilities_json,
+               maestro_parent_pane_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (pane_id, project_id, dev_session_id, plan_id, origin, role, title, model, row["next"], now, now,
-             plan_agent_key, json.dumps(brief) if brief is not None else None),
+             plan_agent_key, json.dumps(brief) if brief is not None else None,
+             json.dumps(capabilities or []), maestro_parent_pane_id),
         )
         _insert_event(connection, pane_id, "CREATED", {"origin": origin, "role": role, "model": model, "plan_id": plan_id})
     return pane_id
@@ -192,6 +196,92 @@ def panes_for_plan(plan_id: str) -> list:
         return connection.execute(
             "SELECT * FROM workspace_panes WHERE plan_id = ? ORDER BY position", (plan_id,)
         ).fetchall()
+
+
+def _capabilities(row) -> list[str]:
+    try:
+        raw = row["capabilities_json"]
+    except (KeyError, IndexError):
+        raw = "[]"
+    try:
+        values = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        values = []
+    return [value for value in values if isinstance(value, str)] if isinstance(values, list) else []
+
+
+def maestro_pane_for_project(project_id: str):
+    for row in list_panes(project_id, include_hidden=True):
+        if "maestro" in _capabilities(row):
+            return row
+    return None
+
+
+def set_pane_capability(pane_id: str, capability: str, enabled: bool) -> None:
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT * FROM workspace_panes WHERE id = ?", (pane_id,)).fetchone()
+        if row is None:
+            raise KeyError(pane_id)
+        capabilities = _capabilities(row)
+        if enabled and capability not in capabilities:
+            capabilities.append(capability)
+        elif not enabled:
+            capabilities = [item for item in capabilities if item != capability]
+        connection.execute(
+            "UPDATE workspace_panes SET capabilities_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(capabilities), _now(), pane_id),
+        )
+        _insert_event(connection, pane_id, "CAPABILITY_CHANGED", {"capability": capability, "enabled": enabled})
+
+
+def bind_conversation_pane(conversation_id: str, pane_id: str) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE workspace_maestro_conversations SET maestro_pane_id = ?, updated_at = ? WHERE id = ?",
+            (pane_id, _now(), conversation_id),
+        )
+
+
+def promote_pane_to_maestro(pane_id: str) -> str:
+    """Atomically assign the project Maestro capability and bind its conversation."""
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        pane = connection.execute("SELECT * FROM workspace_panes WHERE id = ?", (pane_id,)).fetchone()
+        if pane is None:
+            raise KeyError(pane_id)
+        rows = connection.execute(
+            "SELECT id, capabilities_json FROM workspace_panes WHERE project_id = ?",
+            (pane["project_id"],),
+        ).fetchall()
+        if any(other["id"] != pane_id and "maestro" in _capabilities(other) for other in rows):
+            raise ValueError("MAESTRO_ALREADY_ASSIGNED")
+        capabilities = _capabilities(pane)
+        if "maestro" not in capabilities:
+            capabilities.append("maestro")
+        connection.execute(
+            "UPDATE workspace_panes SET capabilities_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(capabilities), _now(), pane_id),
+        )
+        conversation = connection.execute(
+            "SELECT id FROM workspace_maestro_conversations WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (pane["project_id"],),
+        ).fetchone()
+        if conversation is None:
+            conversation_id = f"MAESTRO-{uuid4().hex[:8].upper()}"
+            now = _now()
+            connection.execute(
+                "INSERT INTO workspace_maestro_conversations (id, project_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (conversation_id, pane["project_id"], now, now),
+            )
+        else:
+            conversation_id = conversation["id"]
+        connection.execute(
+            "UPDATE workspace_maestro_conversations SET maestro_pane_id = ?, updated_at = ? WHERE id = ?",
+            (pane_id, _now(), conversation_id),
+        )
+        _insert_event(connection, pane_id, "CAPABILITY_CHANGED", {"capability": "maestro", "enabled": True})
+        return conversation_id
 
 
 # -- Maestro conversation -------------------------------------------------

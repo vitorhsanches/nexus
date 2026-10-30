@@ -34,13 +34,28 @@ FREE_COSTS = frozenset({"free"})
 PENDING_TURN_STATUSES = frozenset({"PENDING", "RUNNING"})
 
 
-def _catalog() -> dict:
+def _planning_backend(project_id: str | None = None) -> str:
+    if project_id:
+        pane = store.maestro_pane_for_project(project_id)
+        if pane is not None:
+            from nexus.workspace import service as workspace_service
+
+            if workspace_service._pane_backend(pane) == "codex_native":
+                return "codex_native"
+    return "omniroute"
+
+
+def _catalog(project_id: str | None = None) -> dict:
+    if _planning_backend(project_id) == "codex_native":
+        from nexus.chat import service as chat_service
+
+        return chat_service.list_models(backend=chat_service.BACKEND_CODEX_NATIVE)
     from nexus.dev.models import list_dev_models
 
     return list_dev_models()
 
 
-def _planning_model(project_id: str, model: str, effort: str | None = None) -> dict | None:
+def _planning_model(project_id: str, model: str, effort: str | None = None, *, catalog: dict | None = None) -> dict | None:
     """Resolve one exact planning route before any new Chat turn."""
     from nexus.workspace import ai_settings
 
@@ -48,7 +63,8 @@ def _planning_model(project_id: str, model: str, effort: str | None = None) -> d
         selected = ai_settings.resolve_choice(project_id, "maestro", model, effort)
         return {"id": selected["model_id"], "cost_status": selected["cost_status"],
                 "effort": selected["effort"]}
-    row = next((item for item in _catalog()["models"] if item["id"] == model), None)
+    catalog = catalog or _catalog(project_id)
+    row = next((item for item in catalog["models"] if item["id"] == model), None)
     if row and effort is not None:
         if effort not in row.get("supported_efforts", []):
             raise DevServiceError("EFFORT_NOT_SUPPORTED", "Esforço não suportado para esta rota de planejamento.", http_status=422)
@@ -92,8 +108,9 @@ def authorize_planning(project_id: str, model: str, *, confirm_cost: bool, effor
     from nexus.chat import service as chat_service
 
     _project(project_id)
-    catalog = _catalog()
-    row = _planning_model(project_id, model, effort)
+    conversation = _conversation(project_id)
+    catalog = _catalog(project_id)
+    row = _planning_model(project_id, model, effort, catalog=catalog)
     if row is None:
         raise DevServiceError(
             "MODEL_NOT_ALLOWED",
@@ -108,8 +125,11 @@ def authorize_planning(project_id: str, model: str, *, confirm_cost: bool, effor
             f"{model} is classified as {row.get('cost_status') or 'unknown'} cost; create a persistent authorization with explicit usage limits first.",
             http_status=403,
         )
-    conversation = _conversation(project_id)
-    if (conversation["chat_session_id"] and conversation["model"] == exact_model
+    from nexus.registry import chat_sessions
+    existing = chat_sessions.get_session(conversation["chat_session_id"]) if conversation["chat_session_id"] else None
+    backend = _planning_backend(project_id)
+    if (existing and conversation["model"] == exact_model
+            and existing["backend"] == backend
             and _planning_session_matches(conversation["chat_session_id"], row)):
         # Reconfirmation of a legacy route retains the existing Chat thread.
         session_id = conversation["chat_session_id"]
@@ -117,7 +137,10 @@ def authorize_planning(project_id: str, model: str, *, confirm_cost: bool, effor
         try:
             # Chat's own catalog never knows prices; the confirmation above
             # authorizes the exact non-free route for planning only.
-            session = chat_service.create_session(project_id, exact_model, effort=row.get("effort"), allow_unknown_cost=True)
+            session_kwargs = {"effort": row.get("effort"), "allow_unknown_cost": True}
+            if backend != "omniroute":
+                session_kwargs["backend"] = backend
+            session = chat_service.create_session(project_id, exact_model, **session_kwargs)
         except chat_service.ChatError as error:
             raise _chat_error(error) from error
         session_id = session["session_id"]
@@ -141,17 +164,17 @@ def send_message(project_id: str, text: str, *, effort: str | None = None) -> di
     if any(row["author"] == "user" and row["status"] in {"PENDING", "PROCESSING"} for row in store.list_messages(conversation["id"])):
         raise DevServiceError("MAESTRO_BUSY", "The Maestro is still answering the previous message.", http_status=409)
 
-    catalog = _catalog()
+    catalog = _catalog(project_id)
     from nexus.registry import chat_sessions
     existing_session = chat_sessions.get_session(conversation["chat_session_id"]) if conversation["chat_session_id"] else None
     existing_effort = existing_session["requested_effort"] if existing_session else None
-    selected = _planning_model(project_id, conversation["model"], effort or existing_effort) if conversation["model"] else None
+    selected = _planning_model(project_id, conversation["model"], effort or existing_effort, catalog=catalog) if conversation["model"] else None
     if selected and conversation["chat_session_id"] and (
         selected["id"] != conversation["model"] or not _planning_session_matches(conversation["chat_session_id"], selected)
     ) and effort is not None:
         authorize_planning(project_id, conversation["model"], confirm_cost=False, effort=effort)
         conversation = _conversation(project_id)
-        selected = _planning_model(project_id, conversation["model"], effort)
+        selected = _planning_model(project_id, conversation["model"], effort, catalog=catalog)
     if selected and conversation["chat_session_id"] and not _planning_session_matches(conversation["chat_session_id"], selected):
         raise DevServiceError("AI_PREFERENCE_REAUTHORIZE", "Escolha e confirme o esforço antes de enviar outra mensagem.", http_status=409)
     from nexus.workspace import cost_authorizations
@@ -282,7 +305,7 @@ def reconcile(conversation_id: str) -> None:
                 turn_id = found["id"]
                 store.set_message_turn(row["id"], turn_id)
         if catalog is None:
-            catalog = _catalog()
+            catalog = _catalog(conversation["project_id"])
         if not turn_id:
             if not conversation["chat_session_id"]:
                 plan = maestro_plan.deterministic(row["text"], models=catalog["models"], limit=limit, reason=None)
@@ -350,7 +373,7 @@ def conversation_state(project_id: str) -> dict:
                            and row["chat_turn_id"]), None)
     if conversation["model"]:
         try:
-            model_row = _planning_model(project_id, conversation["model"])
+            model_row = _planning_model(project_id, conversation["model"], catalog=_catalog(project_id))
             if model_row and conversation["chat_session_id"] and not _planning_session_matches(conversation["chat_session_id"], model_row):
                 model_row = None
         except DevServiceError:
@@ -374,7 +397,9 @@ def conversation_state(project_id: str) -> dict:
             "authorized_at": conversation["planning_authorized_at"],
             "cost_authorization": grant,
             "mode": "read-only",
+            "backend": _planning_backend(project_id),
         },
+        "maestro_pane_id": conversation["maestro_pane_id"],
         "busy": any(item["author"] == "user" and item["status"] in {"PENDING", "PROCESSING"} for item in messages),
         "messages": messages,
     }
