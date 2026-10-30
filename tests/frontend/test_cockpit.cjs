@@ -81,6 +81,7 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
   let nextFrameId = 0;
   const windowListeners = {};
   const sources = [];
+  const nativeMounts = [];
   class FakeEventSource {
     static CLOSED = 2;
     constructor(url) { this.url = url; this.closed = false; this.readyState = 1; sources.push(this); }
@@ -145,6 +146,14 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
           cost_status: 'low_cost', max_uses: body.max_uses, uses_reserved: 0, uses_remaining: body.max_uses,
           max_concurrent: body.max_concurrent, active_executions: 0, expires_at: new Date(Date.now() + body.validity_seconds * 1000).toISOString(), status: 'ACTIVE' });
         data = box.authorizations.at(-1);
+      } else if (url === '/api/workspace/panes') {
+        const choice = JSON.parse(options.body);
+        const index = box.agents.length + 1;
+        data = { ...agent(index), pane_id: `PANE-${index}`, project_id: choice.project_id,
+          title: choice.title, backend: choice.backend, model: choice.model, effort: choice.effort,
+          latest_mission: null, mission_count: 0, session: { session_id: `DEV-${index}`,
+            backend: choice.backend, status: 'ACTIVE', branch: `dev/native-${index}` } };
+        box.agents.push(data);
       } else if (url.startsWith('/api/workspace/cost-authorizations/')) {
         box.authorizations = box.authorizations.map(auth => ({ ...auth, status: 'REVOKED' }));
         data = { status: 'REVOKED' };
@@ -192,6 +201,10 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
       data = box.discoveredCatalog;
     }
     else if (url === '/api/dev/models') data = { models: box.models };
+    else if (url.startsWith('/api/dev/models?backend=')) data = { models: [
+      { id: url.endsWith('claude_native') ? 'sonnet' : 'gpt-x', name: 'Native', selectable: true,
+        supported_efforts: ['medium', 'high'] },
+    ], catalog_error: null };
     else if (url.startsWith('/api/dev/test-profiles?')) {
       if (box.profileError) throw box.profileError;
       data = { profiles: box.profiles };
@@ -206,6 +219,11 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
   };
   const context = {
     document, fetch, window: { matchMedia: () => ({ matches: false }),
+      NexusNativePane: { mount(pane, fixed) {
+        const record = { pane, fixed, disposed: false };
+        nativeMounts.push(record);
+        return { dispose() { record.disposed = true; } };
+      } },
       addEventListener(name, callback) { windowListeners[name] = callback; }, EventSource: FakeEventSource },
     ResizeObserver: class { observe() {} },
     setTimeout(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
@@ -235,7 +253,7 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
     frames.clear();
     frame?.();
   };
-  return { byId, grid, box, calls, settle, refresh, sources, tick, resize, context };
+  return { byId, grid, box, calls, settle, refresh, sources, nativeMounts, tick, resize, context };
 }
 
 test('compact cockpit header keeps project counts and actions above the grid', () => {
@@ -428,6 +446,64 @@ const agent = index => ({
   layout: { position: index }, session: { session_id: `DEV-${index}`, status: 'ACTIVE', branch: `dev/agent-${index}` },
   mission_count: 1, latest_mission: { mission_id: `MISSION-${index}`, status: 'RUNNING', tests: [], changed_files: [] },
   messages: [], dependencies: [],
+});
+
+test('Codex and Claude workspace identities mount side by side and survive refresh without duplicate sessions', async () => {
+  const codex = { ...agent(1), project_id: 'demo', backend: 'codex_native', model: 'gpt-x', effort: 'high',
+    latest_mission: null, active_turn_id: 'TURN-C', session: { ...agent(1).session, backend: 'codex_native' } };
+  const claude = { ...agent(2), project_id: 'demo', backend: 'claude_native', model: 'sonnet', effort: 'medium',
+    latest_mission: null, active_turn_id: 'TURN-D', session: { ...agent(2).session, backend: 'claude_native' } };
+  const projects = [{ id: 'demo', name: 'Demo', enabled: 1, dev_enabled: 1 },
+    { id: 'other', name: 'Other', enabled: 1, dev_enabled: 1 }];
+  const app = harness([codex, claude], { withNative: true, compact: true, projects });
+  await app.settle();
+  const first = app.grid.querySelector('[data-pane="PANE-1"]');
+  const second = app.grid.querySelector('[data-pane="PANE-2"]');
+  assert.ok(first && second);
+  assert.notEqual(first, second);
+  assert.deepEqual(app.nativeMounts.map(item => [item.fixed.sessionId, item.fixed.backend, item.fixed.effort]), [
+    ['DEV-1', 'codex_native', 'high'], ['DEV-2', 'claude_native', 'medium'],
+  ]);
+  assert.equal(app.sources.length, 0, 'cockpit.js must leave Native SSE to each pane controller');
+  await app.refresh();
+  assert.equal(app.grid.querySelector('[data-pane="PANE-1"]'), first);
+  assert.equal(app.grid.querySelector('[data-pane="PANE-2"]'), second);
+  assert.equal(app.nativeMounts.length, 2);
+  assert.equal(app.calls.filter(call => call.method === 'POST').length, 0);
+  app.box.agents = [];
+  app.byId['project-nav'].children[1].dispatch('click');
+  await app.settle();
+  assert.equal(app.nativeMounts.every(item => item.disposed), true);
+  assert.equal(app.grid.querySelector('[data-pane="PANE-1"]'), null);
+  assert.equal(app.grid.querySelector('[data-pane="PANE-2"]'), null);
+  const reloaded = harness([codex, claude], { withNative: true, compact: true });
+  await reloaded.settle();
+  assert.equal(reloaded.nativeMounts.length, 2);
+  assert.equal(reloaded.calls.filter(call => call.method === 'POST').length, 0);
+});
+
+test('+ Pane creates a Claude session only after explicit runtime, model and effort selection', async () => {
+  const app = harness([], { withNative: true, compact: true });
+  await app.settle();
+  app.byId['add-pane'].dispatch('click');
+  assert.equal(app.byId['pane-create-panel'].hidden, false);
+  assert.equal(app.calls.filter(call => call.method === 'POST').length, 0);
+  app.byId['pane-create-runtime'].value = 'claude_native';
+  app.byId['pane-create-runtime'].dispatch('change');
+  await app.settle();
+  app.byId['pane-create-model'].value = 'sonnet';
+  app.byId['pane-create-model'].dispatch('change');
+  app.byId['pane-create-effort'].value = 'medium';
+  app.byId['pane-create-name'].value = 'Claude revisão';
+  app.byId['pane-create-form'].dispatch('submit');
+  await app.settle();
+  const posts = app.calls.filter(call => call.method === 'POST' && call.url === '/api/workspace/panes');
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].body, { project_id: 'demo', role: 'implementer', title: 'Claude revisão',
+    backend: 'claude_native', model: 'sonnet', effort: 'medium' });
+  assert.equal(app.nativeMounts.length, 1);
+  assert.equal(app.nativeMounts[0].fixed.backend, 'claude_native');
+  assert.equal(app.byId['pane-create-panel'].hidden, true);
 });
 
 test('agent SSE renders incremental text once and reconciles completion by GET', async () => {

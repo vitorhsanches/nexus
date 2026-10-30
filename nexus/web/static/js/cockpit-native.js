@@ -6,9 +6,13 @@
 // explicit human click; nothing is retried or decided automatically.
 (() => {
   const host = window.NexusCockpit;
-  const pane = document.getElementById('native-pane');
-  if (!host || !pane) return;
-  const $ = id => document.getElementById(id);
+  if (!host) return;
+  // A controller owns exactly one pane and one set of async resources. The
+  // historical system pane uses the same controller with a movable session.
+  const mount = (pane, fixed = null) => {
+  const $ = id => fixed
+    ? pane.querySelector(`[data-native-id="${id}"]`)
+    : document.getElementById(id);
   const POLL_MS = 3000;
   const ACTIVE = ['PENDING', 'RUNNING'];
   const TERMINAL = ['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'];
@@ -30,6 +34,7 @@
     review: null, preflight: null, history: [], reviewDecisionUncertain: false,
     busy: new Set(), sessionNote: null, approvalPollFailed: false,
     stream: null, cursor: null, activeTurnId: null, live: null, connection: 'idle', pollTimer: null, reconnectTimer: null,
+    fixedEffortValid: !fixed?.effort,
   };
 
   const element = (tag, className, text) => {
@@ -65,6 +70,7 @@
 
   const isNative = session => NATIVE_BACKENDS.has(session?.backend);
   const selectedRuntime = () => {
+    if (fixed) return fixed.backend;
     const field = $('native-runtime');
     const value = field ? field.value : '';
     return NATIVE_BACKENDS.has(value) ? value : DEFAULT_BACKEND;
@@ -185,7 +191,7 @@
       const item = element('div', 'cockpit-message');
       item.append(element('strong', '', `Você · ${turn.created_at || ''}`), element('p', 'native-text', clip(turn.prompt || '')));
       const response = element('div', 'cockpit-response');
-      response.append(element('strong', '', `${isNative(state.session) ? 'Codex' : 'Agente'} · ${turn.status}`));
+      response.append(element('strong', '', `${backendLabel(state.session)} · ${turn.status}`));
       if (turn.response_text) response.append(element('p', 'native-text', clip(turn.response_text)));
       if (turn.error_code) response.append(element('p', 'cockpit-error-text', `${turn.error_code}: ${clip(turn.error_message || '', 600)}`));
       item.append(response);
@@ -303,8 +309,9 @@
     const session = state.session;
     const native = isNative(session);
     const active = Boolean(state.activeTurnId);
-    $('native-create').disabled = !state.projectId || !selectedModel() || state.busy.has('create');
-    const canSend = Boolean(native && session.status === 'ACTIVE' && state.gate === true && !active && selectedModel() &&
+    $('native-create').disabled = Boolean(fixed) || !state.projectId || !selectedModel() || state.busy.has('create');
+    const canSend = Boolean(native && session.status === 'ACTIVE' && state.gate === true && !active && selectedModel() && state.fixedEffortValid &&
+      (!fixed || selectedModel() === session.requested_model) &&
       $('native-prompt').value.trim() && !state.busy.has('send'));
     $('native-send').disabled = !canSend;
     $('native-prompt').disabled = !native || session?.status !== 'ACTIVE';
@@ -339,6 +346,23 @@
     $('native-meta-effort').textContent = $('native-effort').value ? `${$('native-effort').value} · próximo turno` : 'por turno';
     $('native-meta-session').textContent = state.session?.session_id || '—';
     $('native-meta-backend').textContent = state.session ? (isNative(state.session) ? state.session.backend : 'omniroute · legado') : selectedRuntime();
+    const backend = state.session?.backend || selectedRuntime();
+    const runtimeLabel = backendLabel({ backend });
+    const nextTitle = `${runtimeLabel} · ${state.session?.session_id || fixed?.sessionId || 'sem sessão'}`;
+    const titleChanged = pane.dataset.title !== nextTitle;
+    pane.dataset.title = nextTitle;
+    pane.setAttribute('aria-label', `Pane ${pane.dataset.title}`);
+    const titleNode = pane.querySelector('.pane-identity strong');
+    if (titleNode) titleNode.textContent = runtimeLabel;
+    const icon = pane.querySelector('.pane-icon');
+    if (icon) icon.textContent = backend === 'claude_native' ? 'CL' : 'CX';
+    const runtimeTitle = pane.querySelector('.native-runtime-copy strong');
+    if (runtimeTitle?.firstChild) runtimeTitle.firstChild.textContent = `${runtimeLabel} `;
+    pane.querySelectorAll('.minimize, .expand').forEach(button => {
+      button.setAttribute('aria-label', `${button.classList.contains('minimize') ? 'Minimizar' : 'Expandir'} ${runtimeLabel}`);
+    });
+    $('native-prompt').setAttribute('aria-label', `Tarefa para ${runtimeLabel}`);
+    if (titleChanged) host.refreshPaneLabels?.();
     $('native-foot').textContent = state.session?.worktree_path || state.session?.branch || 'sem worktree ativo';
     $('native-foot').title = state.session?.worktree_path || state.session?.branch || '';
     $('native-runtime-model').textContent = state.session?.requested_model || 'Selecione uma sessão';
@@ -349,7 +373,7 @@
   };
   const render = () => {
     renderGate(); renderModels(); renderSessions(); renderLog(); renderLive(); renderApprovals(); renderChanges(); renderReview(); renderControls(); renderChrome();
-    if (state.session) host.setPaneAvailable?.('native', true);
+    if (state.session && !fixed) host.setPaneAvailable?.('native', true);
   };
 
   // ---- loading ------------------------------------------------------------
@@ -541,6 +565,9 @@
     try {
       const session = await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}`);
       if (stale(generation)) return;
+      if (fixed && (session.session_id !== fixed.sessionId || session.backend !== fixed.backend || session.project_id !== fixed.projectId)) {
+        throw new Error('Identidade ou backend da sessão divergente do pane persistido.');
+      }
       state.session = session;
       if (state.models.some(model => model.id === session.requested_model)) $('native-model').value = session.requested_model;
       const latest = await loadTurns(generation);
@@ -586,6 +613,16 @@
     ]);
     if (stale(generation)) return;
     render();
+    if (fixed) {
+      await selectSession(fixed.sessionId);
+      if (state.session && fixed.effort) {
+        const choice = $('native-effort');
+        state.fixedEffortValid = [...choice.children].some(option => option.value === fixed.effort);
+        if (state.fixedEffortValid) choice.value = fixed.effort;
+        else setNote('native-error', 'Effort persistido não está mais no catálogo. Envio bloqueado.', true);
+        renderControls(); renderChrome();
+      }
+    }
   };
 
   // ---- explicit actions ---------------------------------------------------
@@ -597,6 +634,7 @@
     if (!stale(generation)) { renderModels(); renderControls(); }
   };
   const createSession = async () => {
+    if (fixed) return;
     const model = selectedModel();
     const backend = selectedRuntime();
     if (!state.projectId || !model || state.busy.has('create')) return;
@@ -621,7 +659,8 @@
     const session = state.session;
     const prompt = $('native-prompt').value.trim();
     if (!session || !isNative(session) || session.status !== 'ACTIVE' || state.gate !== true || state.activeTurnId ||
-        !prompt || !selectedModel() || state.busy.has('send')) return;
+        !prompt || !selectedModel() || !state.fixedEffortValid ||
+        (fixed && selectedModel() !== session.requested_model) || state.busy.has('send')) return;
     const generation = state.generation;
     const body = { prompt, model: selectedModel(), ...($('native-effort').value ? { effort: $('native-effort').value } : {}) };
     state.busy.add('send'); setNote('native-error', ''); renderControls();
@@ -812,6 +851,21 @@
   $('native-review-apply').addEventListener('click', () => { void applyReview(); });
   $('native-review-reject').addEventListener('click', () => { void rejectReview(); });
 
-  host.onProject(projectId => { void loadProject(projectId); });
+  if (!fixed) host.onProject(projectId => { void loadProject(projectId); });
+  else {
+    $('native-session-menu').hidden = true;
+    $('native-new').hidden = true;
+    $('native-model').disabled = true;
+    $('native-effort').disabled = true;
+    $('native-runtime').value = fixed.backend;
+    void loadProject(fixed.projectId);
+  }
   render();
+  return {
+    dispose: () => { state.generation++; closeStream(); stopPolling(); },
+  };
+  };
+  window.NexusNativePane = Object.freeze({ mount });
+  const systemPane = document.getElementById('native-pane');
+  if (systemPane) mount(systemPane);
 })();

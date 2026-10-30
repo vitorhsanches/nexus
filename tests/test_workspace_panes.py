@@ -180,6 +180,79 @@ def test_codex_native_invalid_model_and_session_failure_do_not_persist_panes(ws_
     assert service.list_panes("demo") == []
 
 
+def test_codex_and_claude_panes_keep_distinct_sessions_backends_and_efforts(
+    ws_env, monkeypatch,
+):
+    catalogs = {
+        "codex_native": {"models": [
+            {"id": "gpt-native", "supported_efforts": ["high"]},
+        ]},
+        "claude_native": {"models": [
+            {"id": "sonnet", "supported_efforts": ["medium"]},
+        ]},
+    }
+    monkeypatch.setattr(
+        "nexus.chat.service.list_models", lambda *, backend: catalogs[backend],
+    )
+    codex_calls, claude_calls = [], []
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_native_choice",
+        lambda model, effort: codex_calls.append((model, effort)),
+    )
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_claude_choice",
+        lambda model, effort: claude_calls.append((model, effort)),
+    )
+    monkeypatch.setattr(
+        "nexus.dev.models.list_dev_models",
+        lambda: pytest.fail("OmniRoute catalog used"),
+    )
+
+    codex = service.create_pane(
+        "demo", role="implementer", model="gpt-native",
+        backend="codex_native", effort="high",
+    )
+    claude = service.create_pane(
+        "demo", role="implementer", model="sonnet",
+        backend="claude_native", effort="medium",
+    )
+    assert codex["pane_id"] != claude["pane_id"]
+    assert codex["session"]["session_id"] != claude["session"]["session_id"]
+    assert codex["session"]["worktree_path"] != claude["session"]["worktree_path"]
+    assert [(pane["backend"], pane["session"]["backend"], pane["model"], pane["effort"])
+            for pane in service.list_panes("demo")] == [
+                ("codex_native", "codex_native", "gpt-native", "high"),
+                ("claude_native", "claude_native", "sonnet", "medium"),
+            ]
+    assert ("gpt-native", "high") in codex_calls
+    assert ("sonnet", "medium") in claude_calls
+
+
+def test_native_pane_rejects_unsupported_effort_before_session_creation(
+    ws_env, monkeypatch,
+):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda *, backend: {
+        "models": [{"id": "sonnet", "supported_efforts": ["medium"]}],
+        "catalog_error": None,
+    })
+
+    def validate(model, effort):
+        if effort != "medium":
+            raise DevServiceError(
+                "INVALID_EFFORT", "unsupported effort", http_status=422,
+            )
+
+    monkeypatch.setattr("nexus.dev.executor.validate_claude_choice", validate)
+    with pytest.raises(DevServiceError, match="unsupported effort"):
+        service.create_pane(
+            "demo", role="implementer", model="sonnet",
+            backend="claude_native", effort="xhigh",
+        )
+    assert service.list_panes("demo", include_hidden=True) == []
+    with database.get_connection() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM dev_sessions").fetchone()[0]
+        assert count == 0
+
 def test_open_pane_limit_blocks_new_sessions(ws_env, monkeypatch):
     monkeypatch.setenv("NEXUS_WORKSPACE_MAX_PANES", "1")
     service.create_pane("demo", role="implementer")
@@ -336,6 +409,32 @@ def test_workspace_pane_route_accepts_codex_native_backend(ws_env, monkeypatch):
     assert response.status_code == 200, response.text
     assert response.json()["backend"] == response.json()["session"]["backend"] == "codex_native"
     assert response.json()["session"]["status"] == "ACTIVE"
+
+
+def test_workspace_pane_route_accepts_claude_native_with_explicit_effort(
+    ws_env, monkeypatch,
+):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "claude_native",
+        "models": [{"id": "sonnet", "supported_efforts": ["medium"]}],
+        "catalog_error": None,
+    })
+    monkeypatch.setattr(
+        "nexus.dev.executor.validate_claude_choice", lambda model, effort: None,
+    )
+    client = _client()
+    response = client.post("/api/workspace/panes", json={
+        "project_id": "demo", "role": "implementer", "model": "sonnet",
+        "backend": "claude_native",
+        "effort": "medium", "title": "Claude Native",
+    })
+    assert response.status_code == 200, response.text
+    pane = response.json()
+    assert pane["backend"] == pane["session"]["backend"] == "claude_native"
+    assert pane["effort"] == "medium" and pane["model"] == "sonnet"
+    loaded = client.get(f"/api/workspace/panes/{pane['pane_id']}").json()
+    assert loaded["session"]["session_id"] == pane["session"]["session_id"]
+    assert loaded["effort"] == "medium"
 
 
 def test_workspace_routes_report_errors_and_reject_unknown_fields(ws_env):

@@ -152,7 +152,7 @@ function harness(overrides = {}) {
   vm.runInNewContext(script, context, { filename: 'cockpit-native.js' });
   const settle = async () => { for (let count = 0; count < 12; count++) await new Promise(resolve => setImmediate(resolve)); };
   return {
-    byId, calls, toasts, timers, sources, server, settle,
+    byId, calls, toasts, timers, sources, server, settle, mount: context.window.NexusNativePane.mount,
     get posts() { return calls.filter(call => call.method === 'POST'); },
     async selectProject(id = 'demo') { listeners.forEach(callback => callback(id)); await settle(); },
     async selectSession(id) { byId['native-session'].value = id; byId['native-session'].dispatch('change'); await settle(); },
@@ -835,4 +835,125 @@ test('changing project closes the live stream and stops polling', async () => {
 test('the module never builds HTML from data or persists review consent in the browser', () => {
   assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function/);
   assert.doesNotMatch(script, /localStorage|sessionStorage/);
+});
+
+function fixedPane(paneId) {
+  const byId = buildDom();
+  const pane = el('article', 'pane native-pane');
+  pane.dataset.pane = paneId;
+  const icon = el('span', 'pane-icon');
+  const identity = el('div', 'pane-identity');
+  const identityCopy = el('div');
+  identityCopy.append(el('strong'));
+  identity.append(icon, identityCopy);
+  const runtimeCopy = el('div', 'native-runtime-copy');
+  const runtimeTitle = el('strong');
+  runtimeTitle.append(new TextNode('Codex Native '), byId['native-connection']);
+  runtimeCopy.append(runtimeTitle);
+  const body = el('div', 'native-body');
+  body.append(byId['native-log']);
+  pane.append(identity, runtimeCopy, body);
+  for (const [id, node] of Object.entries(byId)) {
+    node.dataset.nativeId = id;
+    node.id = `${paneId}-${id}`;
+    if (!node.parentNode) pane.append(node);
+  }
+  return { pane, byId };
+}
+
+test('two fixed Native panes keep backend, transcript, SSE, approvals and interrupt isolated', async () => {
+  const app = harness();
+  const claude = { session_id: 'DEV-CLAUDE', project_id: 'demo', status: 'ACTIVE', backend: 'claude_native',
+    requested_model: 'sonnet', branch: 'nexus/dev/DEV-CLAUDE', created_at: 't2' };
+  app.server.sessions.push(claude);
+  app.server.claudeModels.models = [{ id: 'sonnet', name: 'Sonnet', selectable: true, supported_efforts: ['medium'] }];
+  app.server.turns['DEV-CLAUDE'] = [];
+  app.server.approvals['DEV-CLAUDE'] = [];
+  app.server.approvals['DEV-CLAUDE'].push({ approval_id: 'APP-C', status: 'PENDING', kind: 'file_change',
+    summary: { tool: 'Edit', operation_sha256: 'digest-c' } });
+  app.server.operations['APP-C'] = { operation: 'Edit only Claude worktree', operation_sha256: 'digest-c' };
+  app.server.changed['DEV-CLAUDE'] = [];
+  app.server.diff['DEV-CLAUDE'] = { files: [] };
+  const codexPane = fixedPane('PANE-CODEX');
+  const claudePane = fixedPane('PANE-CLAUDE');
+  const first = app.mount(codexPane.pane, { projectId: 'demo', sessionId: 'DEV-NATIVE', backend: 'codex_native', effort: 'high' });
+  const second = app.mount(claudePane.pane, { projectId: 'demo', sessionId: 'DEV-CLAUDE', backend: 'claude_native', effort: 'medium' });
+  await app.settle();
+  assert.match(codexPane.pane.dataset.title, /Codex Native/);
+  assert.match(claudePane.pane.dataset.title, /Claude Native/);
+  assert.equal(codexPane.byId['native-meta-session'].textContent, 'DEV-NATIVE');
+  assert.equal(claudePane.byId['native-meta-session'].textContent, 'DEV-CLAUDE');
+  assert.equal(codexPane.byId['native-effort'].value, 'high');
+  assert.equal(claudePane.byId['native-effort'].value, 'medium');
+  assert.equal(codexPane.byId['native-approval-count'].textContent, '0');
+  assert.equal(claudePane.byId['native-approval-count'].textContent, '1');
+  const approvalRow = claudePane.byId['native-approvals'].children[0];
+  const reveal = [...approvalRow.querySelectorAll('button')].find(button => button.textContent === 'Ver alteração completa');
+  reveal.dispatch('click');
+  await app.settle();
+  const accept = [...claudePane.byId['native-approvals'].querySelectorAll('button')].find(button => button.textContent === 'Aprovar uma vez');
+  assert.equal(accept.disabled, false);
+  accept.dispatch('click');
+  await app.settle();
+  const decision = app.posts.find(call => call.url.endsWith('/approvals/APP-C'));
+  assert.match(decision.url, /DEV-CLAUDE/);
+  assert.equal(decision.body.operation_sha256, 'digest-c');
+  assert.equal(codexPane.byId['native-approval-count'].textContent, '0');
+
+  codexPane.byId['native-prompt'].value = 'Codex only';
+  codexPane.byId['native-prompt'].dispatch('input');
+  codexPane.byId['native-composer'].dispatch('submit');
+  claudePane.byId['native-prompt'].value = 'Claude only';
+  claudePane.byId['native-prompt'].dispatch('input');
+  claudePane.byId['native-composer'].dispatch('submit');
+  await app.settle();
+  const posts = app.posts.filter(call => call.url.endsWith('/turns'));
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts.map(call => [call.url, call.body.model, call.body.effort]), [
+    ['/api/dev/sessions/DEV-NATIVE/turns', 'gpt-x', 'high'],
+    ['/api/dev/sessions/DEV-CLAUDE/turns', 'sonnet', 'medium'],
+  ]);
+  assert.equal(app.sources.filter(source => !source.closed).length, 2);
+  const codexStream = app.sources.find(source => source.url.includes('DEV-NATIVE'));
+  const claudeStream = app.sources.find(source => source.url.includes('DEV-CLAUDE'));
+  codexStream.emit({ method: 'item/agentMessage/delta', params: { delta: 'Codex stream' } }, 'cursor-c');
+  codexStream.failClosed();
+  await app.tick(1000);
+  assert.match(app.sources.at(-1).url, /DEV-NATIVE.*cursor=cursor-c/);
+  assert.equal(claudeStream.closed, false, 'Claude stream must survive Codex reconnect');
+  assert.match(codexPane.byId['native-log'].textContent, /Codex only/);
+  assert.doesNotMatch(codexPane.byId['native-log'].textContent, /Claude only/);
+  assert.match(claudePane.byId['native-log'].textContent, /Claude only/);
+  assert.doesNotMatch(claudePane.byId['native-log'].textContent, /Codex only/);
+
+  claudePane.byId['native-stop'].dispatch('click');
+  await app.settle();
+  assert.equal(app.posts.filter(call => call.url.includes('/interrupt')).length, 1);
+  assert.match(app.posts.find(call => call.url.includes('/interrupt')).url, /DEV-CLAUDE/);
+  first.dispose(); second.dispose();
+  assert.equal(app.sources.filter(source => !source.closed).length, 0);
+});
+
+test('one Native session failure does not block the other pane or create a replacement session', async () => {
+  const app = harness({
+    sessions: [
+      { session_id: 'DEV-NATIVE', project_id: 'demo', status: 'ACTIVE', backend: 'codex_native', requested_model: 'gpt-x' },
+      { session_id: 'DEV-CLAUDE', project_id: 'demo', status: 'ACTIVE', backend: 'claude_native', requested_model: 'sonnet' },
+    ],
+    turns: { 'DEV-NATIVE': [], 'DEV-CLAUDE': [] }, approvals: { 'DEV-NATIVE': [], 'DEV-CLAUDE': [] },
+    changed: { 'DEV-NATIVE': [], 'DEV-CLAUDE': [] },
+    diff: { 'DEV-NATIVE': { files: [] }, 'DEV-CLAUDE': { files: [] } },
+    claudeModels: { models: [{ id: 'sonnet', selectable: true, supported_efforts: ['medium'] }] },
+    fail: { 'GET /api/dev/sessions/DEV-NATIVE': 'session unavailable' },
+  });
+  const codexPane = fixedPane('PANE-CODEX-FAIL');
+  const claudePane = fixedPane('PANE-CLAUDE-OK');
+  const first = app.mount(codexPane.pane, { projectId: 'demo', sessionId: 'DEV-NATIVE', backend: 'codex_native' });
+  const second = app.mount(claudePane.pane, { projectId: 'demo', sessionId: 'DEV-CLAUDE', backend: 'claude_native', effort: 'medium' });
+  await app.settle();
+  assert.match(codexPane.byId['native-session-note'].textContent, /session unavailable/);
+  assert.equal(codexPane.byId['native-send'].disabled, true);
+  assert.equal(claudePane.byId['native-meta-session'].textContent, 'DEV-CLAUDE');
+  assert.equal(app.posts.length, 0);
+  first.dispose(); second.dispose();
 });
