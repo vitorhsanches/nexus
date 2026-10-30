@@ -1981,9 +1981,9 @@ def test_resume_refuses_if_the_pending_step_already_has_native_evidence(coord_en
 
 def test_resume_is_refused_once_the_sequence_has_already_advanced(coord_env, monkeypatch):
     """Scenario 12 (duplicate resume): once the sequence has moved past
-    BLOCKED (here: no changes, so the second agent launches on its own, no
-    handoff needed), a stray resume() call must be refused outright, never
-    silently re-launch the already-started step."""
+    BLOCKED (here: no changes, so an explicit dispatch starts the second
+    agent without a handoff), a stray resume() call must be refused outright,
+    never silently re-launch the already-started step."""
     _set_backend("DEV-API", "codex_native")
     _set_backend("DEV-TESTS", "codex_native")
     plan_id, turns = _launch_first_native_step(coord_env, monkeypatch)
@@ -1991,10 +1991,12 @@ def test_resume_is_refused_once_the_sequence_has_already_advanced(coord_env, mon
     _wait(plan_id, {"BLOCKED"})
     review = _save_review("DEV-API", _review_id("dup-resume"))  # no changes: no handoff required
     coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    assert coordinator.state(plan_id)["status"] == "AWAITING_EXECUTION"
+    coordinator.start(plan_id)
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and len(turns) < 2:
         time.sleep(0.02)
-    assert len(turns) == 2, "the second agent should have launched on its own"
+    assert len(turns) == 2, "the second agent should launch only after explicit dispatch"
     state = coordinator.state(plan_id)
     assert state["status"] == "RUNNING"
     with pytest.raises(DevServiceError) as error:
