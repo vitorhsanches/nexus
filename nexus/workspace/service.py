@@ -751,6 +751,8 @@ def approve_plan(
 
     validate_dev_project(plan["project_id"])
     all_agents = plan["agents"]
+    if not all_agents:
+        raise DevServiceError("PLAN_HAS_NO_AGENTS", "This plan has no agents to create.", http_status=400)
     all_agent_keys = {agent["key"] for agent in all_agents}
     if selected_agent_keys is None:
         selected_agent_keys = [agent["key"] for agent in all_agents]
@@ -773,8 +775,6 @@ def approve_plan(
             parent_pane = store.get_pane(maestro_parent_pane_id)
             if parent_pane is not None:
                 maestro_parent_backend = _pane_backend(parent_pane)
-    if not agents:
-        raise DevServiceError("PLAN_HAS_NO_AGENTS", "This plan has no agents to create.", http_status=400)
     if not isinstance(agent_models, dict) or set(agent_models) != selected_keys:
         raise DevServiceError("MODELS_NOT_CONFIRMED", "Confirm the exact model for every planned agent.", http_status=400)
     if agent_backends is not None and (

@@ -1099,7 +1099,7 @@ test('Maestro dispatch requires human confirmation, calls Coordinator for the ap
   await app.settle();
   assert.deepEqual(app.server.executeBodies, [{
     agent_keys: ['api'], test_profiles: {}, max_turns_per_agent: 2,
-    mission_timeout_seconds: 420, confirm_costs: true,
+    mission_timeout_seconds: 420, confirm_costs: false,
   }], 'only the persisted selected and created subset is dispatched');
   assert.equal(app.posts.some(call => /\/api\/dev\/sessions\/[^/]+\/turns$/.test(call.url)), false,
     'the pane never bypasses the Coordinator with its own Development turn');

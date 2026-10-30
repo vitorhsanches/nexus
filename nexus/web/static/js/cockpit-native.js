@@ -1011,7 +1011,7 @@
           agent_keys: agentKeys, test_profiles: {},
           max_turns_per_agent: approval.max_turns_per_agent,
           mission_timeout_seconds: approval.mission_timeout_seconds,
-          confirm_costs: true,
+          confirm_costs: false,
         } });
         planning.dispatchConfirmations.delete(identity);
         planning.uncertainDispatches.delete(identity);

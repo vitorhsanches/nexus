@@ -195,7 +195,9 @@ def test_prompt_is_read_only_planning_with_only_approved_models():
     prompt = maestro_plan.build_prompt(user_text="faça X", project={"id": "demo", "name": "Demo"}, models=MODELS,
                                        panes=[], limit=3, previous_summary="antes")
     assert "PLANNING MODE" in prompt and "must not create, modify or delete" in prompt
-    assert "free/model (cost: free)" in prompt and "std/model (cost: standard)" in prompt
+    assert "omniroute:free/model (cost: free; efforts: model default)" in prompt
+    assert "omniroute:std/model (cost: standard; efforts: model default)" in prompt
+    assert "backend, model and effort ONLY from this live approved list" in prompt
     assert maestro_plan.PLAN_BEGIN in prompt and "faça X" in prompt and "antes" in prompt
 
 
