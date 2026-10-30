@@ -309,7 +309,7 @@
     const session = state.session;
     const native = isNative(session);
     const active = Boolean(state.activeTurnId);
-    $('native-create').disabled = !state.projectId || !selectedModel() || state.busy.has('create');
+    $('native-create').disabled = Boolean(fixed) || !state.projectId || !selectedModel() || state.busy.has('create');
     const canSend = Boolean(native && session.status === 'ACTIVE' && state.gate === true && !active && selectedModel() && state.fixedEffortValid &&
       (!fixed || selectedModel() === session.requested_model) &&
       $('native-prompt').value.trim() && !state.busy.has('send'));
@@ -634,6 +634,7 @@
     if (!stale(generation)) { renderModels(); renderControls(); }
   };
   const createSession = async () => {
+    if (fixed) return;
     const model = selectedModel();
     const backend = selectedRuntime();
     if (!state.projectId || !model || state.busy.has('create')) return;
