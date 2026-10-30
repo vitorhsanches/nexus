@@ -118,7 +118,19 @@
       </section>
       </details>
 
-      <div class="section-heading"><div><span class="section-kicker">SESSÕES E AGENTES</span><h2>Workspace <span id="pane-count">00</span></h2></div><div class="view-controls"><div class="group-controls" id="group-controls" hidden><button id="previous-group" type="button" aria-label="Grupo anterior">‹</button><span id="group-label" aria-live="polite">Grupo 1/1</span><button id="next-group" type="button" aria-label="Próximo grupo">›</button></div><button class="restore-layout-button" id="restore-layout" type="button" title="Restaurar layout automático" aria-label="Restaurar layout automático">↺ <span>Restaurar layout</span></button><button class="restore-layout-button" id="toggle-layout" type="button" title="Alternar entre colunas e linhas" aria-label="Alternar disposição dos panes" hidden>↕ <span>Disposição</span></button><span class="view-selected" id="grid-layout-label">▦ &nbsp; Grade</span><button class="add-pane-button" id="add-pane" type="button" aria-label="Mostrar próximo agente registrado">+ Pane</button></div></div>
+      <div class="section-heading"><div><span class="section-kicker">SESSÕES E AGENTES</span><h2>Workspace <span id="pane-count">00</span></h2></div><div class="view-controls"><div class="group-controls" id="group-controls" hidden><button id="previous-group" type="button" aria-label="Grupo anterior">‹</button><span id="group-label" aria-live="polite">Grupo 1/1</span><button id="next-group" type="button" aria-label="Próximo grupo">›</button></div><button class="restore-layout-button" id="restore-layout" type="button" title="Restaurar layout automático" aria-label="Restaurar layout automático">↺ <span>Restaurar layout</span></button><button class="restore-layout-button" id="toggle-layout" type="button" title="Alternar entre colunas e linhas" aria-label="Alternar disposição dos panes" hidden>↕ <span>Disposição</span></button><span class="view-selected" id="grid-layout-label">▦ &nbsp; Grade</span><button class="add-pane-button" id="add-pane" type="button" aria-label="Criar ou restaurar pane">+ Pane</button></div></div>
+      <section class="pane-create-panel plan-authoring" id="pane-create-panel" role="dialog" aria-modal="true" aria-labelledby="pane-create-title" hidden>
+        <div class="plan-authoring-heading"><div><span class="plan-authoring-kicker">NOVO AGENTE</span><h2 id="pane-create-title">Criar pane Native</h2></div><button class="drawer-close" id="pane-create-close" type="button" aria-label="Fechar">×</button></div>
+        <p class="plan-authoring-intro">A sessão terá identidade e worktree próprios. Criar um pane não inicia um turno.</p>
+        <form class="plan-authoring-form" id="pane-create-form">
+          <label>Runtime<select class="cockpit-model-select" id="pane-create-runtime"><option value="codex_native">Codex Native</option><option value="claude_native">Claude Native</option></select></label>
+          <label>Título<input class="cockpit-input" id="pane-create-name" maxlength="80" placeholder="Agente Native"></label>
+          <label>Modelo anunciado<select class="cockpit-model-select" id="pane-create-model" required></select></label>
+          <label>Effort<select class="cockpit-model-select" id="pane-create-effort" required></select></label>
+          <div class="plan-authoring-actions"><button class="cockpit-send" id="pane-create-submit" type="submit">Criar pane</button></div>
+        </form>
+        <p class="plan-authoring-error" id="pane-create-error" role="status" hidden></p>
+      </section>
 
       <section class="pane-grid" id="pane-grid" data-count="2" data-empty-message="Selecione um projeto ou crie uma missão para abrir sessões reais." aria-label="Grade de panes do projeto">
         <article class="pane maestro-pane" data-pane="maestro" data-workspace-inactive="true" tabindex="0" aria-label="Pane Maestro">

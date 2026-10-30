@@ -36,10 +36,10 @@ ACTIVE_MISSION_STATUSES = frozenset({"PENDING", "RUNNING", "TESTING", "REPAIRING
 
 
 def _catalog(backend: str = "omniroute") -> dict:
-    if backend == "codex_native":
+    if backend in {"codex_native", "claude_native"}:
         from nexus.chat.service import list_models
 
-        return list_models(backend="codex_native")
+        return list_models(backend=backend)
     if backend != "omniroute":
         raise DevServiceError("UNSUPPORTED_BACKEND", f"Unsupported Development backend: {backend!r}", http_status=422)
     from nexus.dev.models import list_dev_models
@@ -54,13 +54,17 @@ def _require_approved_model(model: str, backend: str = "omniroute") -> dict:
         # Reuse Development's exact local-account validation. This checks the
         # Codex catalog only and never starts a turn or performs inference.
         validate_native_choice(model, None)
+    if backend == "claude_native":
+        from nexus.dev.executor import validate_claude_choice
+
+        validate_claude_choice(model, None)
     catalog = _catalog(backend)
     for row in catalog["models"]:
         if row["id"] == model:
             return row
     message = catalog.get("catalog_error") or (
         "The selected model is not offered by the local Codex account."
-        if backend == "codex_native"
+        if backend in {"codex_native", "claude_native"}
         else "The selected model is not an approved live Development route."
     )
     raise DevServiceError("MODEL_NOT_ALLOWED", message, http_status=403)
@@ -139,6 +143,7 @@ def pane_view(row) -> dict:
         if session is not None and "backend" in session.keys() and session["backend"]
         else "omniroute"
     )
+    pane_brief = _brief(row) or {}
     return {
         "pane_id": row["id"],
         "project_id": row["project_id"],
@@ -149,6 +154,9 @@ def pane_view(row) -> dict:
         "role_label": policy.ROLES.get(row["role"], row["role"]),
         "title": row["title"],
         "model": row["model"],
+        "effort": pane_brief.get("native_effort") or (
+            pane_brief.get("authorization") or {}
+        ).get("effort"),
         "layout": {name: (row[name] if name == "position" else bool(row[name])) for name in store.LAYOUT_FIELDS},
         "session": None if session is None else {
             "session_id": session["id"],
@@ -584,6 +592,7 @@ def create_pane(
     title: str | None = None,
     model: str | None = None,
     backend: str = "omniroute",
+    effort: str | None = None,
     plan_id: str | None = None,
     _origin: str | None = None,
     _plan_agent_key: str | None = None,
@@ -618,6 +627,21 @@ def create_pane(
             model = ai_settings.require_saved(project_id, "development")["model_id"]
     if model is not None:
         _require_backend_model(model, backend)
+    if effort is not None:
+        if backend == "codex_native":
+            from nexus.dev.executor import validate_native_choice
+
+            validate_native_choice(model, effort)
+        elif backend == "claude_native":
+            from nexus.dev.executor import validate_claude_choice
+
+            validate_claude_choice(model, effort)
+        else:
+            raise DevServiceError(
+                "INVALID_EFFORT",
+                "Effort is supported only for Native panes.",
+                http_status=422,
+            )
     # Authorization, worktree isolation and persistence of the session all
     # come from the existing Development service.
     session = (
@@ -634,7 +658,10 @@ def create_pane(
         model=model,
         plan_id=plan_id,
         plan_agent_key=_plan_agent_key,
-        brief=_brief,
+        brief=(
+            {**(_brief or {}), "native_effort": effort}
+            if effort is not None else _brief
+        ),
     )
     return pane_view(store.get_pane(pane_id))
 

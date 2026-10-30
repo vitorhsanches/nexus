@@ -47,7 +47,8 @@ class PaneCreateRequest(BaseModel):
     role: str = Field(min_length=1, max_length=32)
     title: str | None = Field(default=None, max_length=200)
     model: str | None = Field(default=None, min_length=1, max_length=128)
-    backend: Literal["omniroute", "codex_native"] = "omniroute"
+    backend: Literal["omniroute", "codex_native", "claude_native"] = "omniroute"
+    effort: str | None = Field(default=None, min_length=1, max_length=32)
     plan_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -238,6 +239,7 @@ def create_pane(request: PaneCreateRequest):
         title=request.title,
         model=request.model,
         backend=request.backend,
+        effort=request.effort,
         plan_id=request.plan_id,
     )
 

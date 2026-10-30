@@ -26,12 +26,14 @@
   const minimumWidth = 300;
   const minimumHeight = 210;
   const agentTemplate = grid.querySelector('[data-pane="agent-a"]').cloneNode(true);
+  const nativeTemplate = grid.querySelector('[data-pane="native"]')?.cloneNode(true);
   grid.querySelector('[data-pane="agent-a"]').remove();
   grid.querySelector('[data-pane="agent-b"]').remove();
   // Panes owned by the cockpit itself (not per-agent): never created or removed from agent data.
   const systemPanes = ['maestro', 'native', 'review'];
   const compactSystemPanes = grid.querySelector('[data-pane="maestro"]')?.dataset.workspaceInactive === 'true';
   const knownAgents = new Map();
+  const nativeControllers = new Map();
   const projectListeners = new Set();
   const closedAgents = new Set();
   const pending = new Set();
@@ -448,6 +450,8 @@
     const index = current.indexOf(pane);
     const wasSelected = pane.classList.contains('selected');
     const wasMaximized = pane.classList.contains('maximized');
+    nativeControllers.get(pane.dataset.pane)?.dispose();
+    nativeControllers.delete(pane.dataset.pane);
     pane.remove();
     if (wasMaximized) grid.classList.remove('has-maximized');
     syncUI();
@@ -482,9 +486,83 @@
   };
   panes().forEach(addCloseControl);
 
+  const paneCreatePanel = document.getElementById('pane-create-panel');
+  const paneCreateRuntime = document.getElementById('pane-create-runtime');
+  const paneCreateModel = document.getElementById('pane-create-model');
+  const paneCreateEffort = document.getElementById('pane-create-effort');
+  const paneCreateError = document.getElementById('pane-create-error');
+  let paneCreateModels = [];
+  let paneCreateRequest = 0;
+  let paneCreateBusy = false;
+  const paneCreateMessage = message => {
+    paneCreateError.textContent = message;
+    paneCreateError.hidden = !message;
+  };
+  const populatePaneEfforts = () => {
+    const model = paneCreateModels.find(item => item.id === paneCreateModel.value);
+    const prompt = element('option', '', 'Selecione o effort explicitamente'); prompt.value = '';
+    paneCreateEffort.replaceChildren(prompt, ...(model?.supported_efforts || []).map(effort => {
+      const option = element('option', '', effort); option.value = effort; return option;
+    }));
+  };
+  const loadPaneModels = async () => {
+    const request = ++paneCreateRequest;
+    const runtime = paneCreateRuntime.value;
+    paneCreateModels = [];
+    const prompt = element('option', '', 'Carregando catálogo…'); prompt.value = '';
+    paneCreateModel.replaceChildren(prompt); populatePaneEfforts(); paneCreateMessage('');
+    try {
+      const data = await api(`/api/dev/models?backend=${encodeURIComponent(runtime)}`);
+      if (request !== paneCreateRequest || runtime !== paneCreateRuntime.value) return;
+      paneCreateModels = (data.models || []).filter(item => item.selectable === true && item.id && item.supported_efforts?.length);
+      const choose = element('option', '', 'Selecione um modelo anunciado'); choose.value = '';
+      paneCreateModel.replaceChildren(choose, ...paneCreateModels.map(model => {
+        const option = element('option', '', model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id);
+        option.value = model.id; return option;
+      }));
+      if (data.catalog_error || !paneCreateModels.length) paneCreateMessage(data.catalog_error || 'Nenhum modelo com effort anunciado.');
+    } catch (error) {
+      if (request === paneCreateRequest) paneCreateMessage(`Catálogo indisponível: ${error.message}`);
+    }
+  };
+  const openPaneCreate = () => {
+    if (!projectId) { notify('Selecione um projeto autorizado'); return; }
+    paneCreatePanel.hidden = false;
+    void loadPaneModels();
+  };
+  document.getElementById('pane-create-close').addEventListener('click', () => { paneCreatePanel.hidden = true; paneCreateRequest++; });
+  paneCreateRuntime.addEventListener('change', () => { void loadPaneModels(); });
+  paneCreateModel.addEventListener('change', populatePaneEfforts);
+  document.getElementById('pane-create-form').addEventListener('submit', event => {
+    event.preventDefault();
+    if (paneCreateBusy || !projectId) return;
+    const model = paneCreateModels.find(item => item.id === paneCreateModel.value);
+    const effort = paneCreateEffort.value;
+    if (!model || !model.supported_efforts.includes(effort)) { paneCreateMessage('Escolha modelo e effort anunciados.'); return; }
+    const selectedProject = projectId;
+    const request = ++paneCreateRequest;
+    const backend = paneCreateRuntime.value;
+    const title = document.getElementById('pane-create-name').value.trim() || `${backend === 'claude_native' ? 'Claude' : 'Codex'} Native`;
+    paneCreateBusy = true;
+    document.getElementById('pane-create-submit').disabled = true;
+    paneCreateMessage('');
+    void api('/api/workspace/panes', { method: 'POST', body: { project_id: selectedProject, role: 'implementer', title, backend, model: model.id, effort } })
+      .then(async agent => {
+        if (selectedProject !== projectId || request !== paneCreateRequest) return;
+        paneCreatePanel.hidden = true;
+        await refresh();
+        const pane = panes().find(item => item.dataset.pane === agent.pane_id);
+        if (pane) selectPane(pane);
+        notify(`${title} criado em sessão isolada`);
+      })
+      .catch(error => { if (selectedProject === projectId && request === paneCreateRequest)
+        paneCreateMessage(`${error.message}. Resultado incerto: confira os panes antes de tentar novamente.`); })
+      .finally(() => { paneCreateBusy = false; document.getElementById('pane-create-submit').disabled = false; });
+  });
+
   document.getElementById('add-pane').addEventListener('click', () => {
     const agent = [...knownAgents.values()].find(item => !panes().some(pane => pane.dataset.pane === item.pane_id));
-    if (!agent) { notify('Todos os agentes registrados já estão visíveis'); return; }
+    if (!agent) { openPaneCreate(); return; }
     const pane = createAgentPane(agent);
     closedAgents.delete(agent.pane_id);
     syncUI();
@@ -1320,7 +1398,7 @@
   const renderAgentControls = paneId => {
     const pane = panes().find(item => item.dataset.pane === paneId);
     const agent = knownAgents.get(paneId);
-    if (!pane || !agent) return;
+    if (!pane || !agent || ['codex_native', 'claude_native'].includes(agent.backend)) return;
     const composer = pane.composer;
     const route = modelCatalog.find(item => item.id === agent.model);
     const oauthProvider = agent.model?.startsWith('cc/') ? 'claude_code' : agent.model?.startsWith('cx/') ? 'codex' : null;
@@ -1495,7 +1573,33 @@
     const close = pane.querySelector('.close');
     if (close) close.setAttribute('aria-label', `Fechar ${pane.dataset.title}`);
   };
+  const createNativeAgentPane = agent => {
+    if (!nativeTemplate || !window.NexusNativePane || !agent.session?.session_id) return null;
+    const pane = nativeTemplate.cloneNode(true);
+    pane.removeAttribute('id');
+    pane.dataset.pane = agent.pane_id;
+    pane.dataset.title = agent.title || agent.pane_id;
+    pane.dataset.workspaceInactive = 'false';
+    pane.hidden = false;
+    pane.classList.remove('selected', 'minimized', 'maximized');
+    pane.querySelectorAll('[id]').forEach(node => {
+      const oldId = node.id;
+      node.dataset.nativeId = oldId;
+      node.id = `${agent.pane_id}-${oldId}`;
+    });
+    pane.querySelectorAll('[for]').forEach(node => {
+      node.htmlFor = `${agent.pane_id}-${node.htmlFor}`;
+    });
+    addCloseControl(pane);
+    grid.append(pane);
+    nativeControllers.set(agent.pane_id, window.NexusNativePane.mount(pane, {
+      projectId: agent.project_id, sessionId: agent.session.session_id,
+      backend: agent.backend, effort: agent.effort,
+    }));
+    return pane;
+  };
   const createAgentPane = agent => {
+    if (['codex_native', 'claude_native'].includes(agent.backend)) return createNativeAgentPane(agent);
     const pane = agentTemplate.cloneNode(true);
     pane.hidden = false;
     pane.dataset.pane = agent.pane_id;
@@ -1712,7 +1816,10 @@
       specs.push({ key, kind, sessionId, turnId, project: projectId, selected: pane.classList.contains('selected') });
     };
     if (maestroState?.busy) add('maestro', 'chat', maestroState.chat_session_id, maestroState.active_turn_id);
-    knownAgents.forEach(agent => add(agent.pane_id, 'dev', agent.session?.session_id, agent.active_turn_id));
+    knownAgents.forEach(agent => {
+      if (!['codex_native', 'claude_native'].includes(agent.backend))
+        add(agent.pane_id, 'dev', agent.session?.session_id, agent.active_turn_id);
+    });
     specs.sort((a, b) => Number(b.selected) - Number(a.selected));
     return specs.slice(0, maxStreams);
   };
@@ -1839,14 +1946,18 @@
       const agents = (workspace.panes || []).slice().sort((a, b) => (a.layout?.position || 0) - (b.layout?.position || 0));
       knownAgents.clear();
       agents.forEach(agent => knownAgents.set(agent.pane_id, agent));
-      panes().filter(pane => !systemPanes.includes(pane.dataset.pane) && !knownAgents.has(pane.dataset.pane)).forEach(pane => pane.remove());
+      panes().filter(pane => !systemPanes.includes(pane.dataset.pane) && !knownAgents.has(pane.dataset.pane)).forEach(pane => {
+        nativeControllers.get(pane.dataset.pane)?.dispose(); nativeControllers.delete(pane.dataset.pane); pane.remove();
+      });
       if (!panes().some(pane => pane.classList.contains('selected'))) selectPane(grid.querySelector('[data-pane="maestro"]'));
       const histories = await Promise.all(agents.map(agent => api(`/api/workspace/panes/${encodeURIComponent(agent.pane_id)}/history`).catch(() => null)));
       if (generation !== refreshGeneration || request !== refreshRequest) return;
       agents.forEach((agent, index) => {
         let pane = panes().find(item => item.dataset.pane === agent.pane_id);
         if (!pane && !closedAgents.has(agent.pane_id)) pane = createAgentPane(agent);
-        if (pane) { updateAgentPane(pane, agent, histories[index]); renderAgentControls(agent.pane_id); }
+        if (pane && !['codex_native', 'claude_native'].includes(agent.backend)) {
+          updateAgentPane(pane, agent, histories[index]); renderAgentControls(agent.pane_id);
+        }
       });
       renderMissions(agents);
       renderSystemPanes(workspace, maestro);
@@ -1869,6 +1980,8 @@
   };
   const selectProject = id => {
     stopAllStreams();
+    paneCreatePanel.hidden = true;
+    paneCreateRequest++;
     if (projectId) maestroDrafts.set(projectId, maestroComposer.input.value);
     projectReady = false;
     projectLoadErrorMessage = '';
@@ -1893,7 +2006,9 @@
     testProfilesError = '';
     workspaceState = null;
     maestroState = null;
-    panes().filter(pane => !systemPanes.includes(pane.dataset.pane)).forEach(pane => pane.remove());
+    panes().filter(pane => !systemPanes.includes(pane.dataset.pane)).forEach(pane => {
+      nativeControllers.get(pane.dataset.pane)?.dispose(); nativeControllers.delete(pane.dataset.pane); pane.remove();
+    });
     renderProjects();
     syncUI();
     if (compactSystemPanes) systemPanes.forEach(kind => setPaneAvailable(kind, false));
@@ -2033,6 +2148,7 @@
     projectId: () => projectId,
     notify,
     setPaneAvailable,
+    refreshPaneLabels: updateSidebar,
     onProject: listener => { projectListeners.add(listener); if (projectId) listener(projectId); },
   });
   syncUI();

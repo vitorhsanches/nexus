@@ -60,6 +60,7 @@ class Element {
   get textContent() { return this._text + this._kids.map(child => child.textContent).join(''); }
   set textContent(value) { this._text = String(value); this._kids.forEach(child => { child.parentNode = null; }); this._kids = []; }
   get lastChild() { return this._kids.at(-1) || null; }
+  get firstChild() { return this._kids[0] || null; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
   removeAttribute(name) { delete this.attributes[name]; }
@@ -89,9 +90,13 @@ class Element {
   scrollIntoView() {}
   matches(selector) {
     if (selector === ':last-child') return this.parentNode?._kids.at(-1) === this;
+    if (selector === '[id]') return Boolean(this.id);
+    if (selector === '[for]') return Boolean(this.htmlFor);
+    const nativeId = selector.match(/\[data-native-id="([^"]+)"\]/);
+    if (nativeId && this.dataset.nativeId !== nativeId[1]) return false;
     const attribute = selector.match(/\[data-pane="([^"]+)"\]/);
     if (attribute && this.dataset.pane !== attribute[1]) return false;
-    const withoutAttribute = selector.replace(/\[data-pane="[^"]+"\]/, '');
+    const withoutAttribute = selector.replace(/\[data-pane="[^"]+"\]/, '').replace(/\[data-native-id="[^"]+"\]/, '');
     const classes = [...withoutAttribute.matchAll(/\.([\w-]+)/g)].map(match => match[1]);
     if (classes.some(name => !this.classList.contains(name))) return false;
     const tag = withoutAttribute.split(/[.:[\s]/)[0];
