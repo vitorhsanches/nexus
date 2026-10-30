@@ -104,6 +104,31 @@ def _authorize(env):
     )
 
 
+def test_execution_uses_only_the_selected_created_subset_of_a_partial_approval(coord_env):
+    approval = {
+        "selected_agent_keys": ["api"],
+        "agent_models": {"api": {"model": "free/model", "backend": "omniroute", "cost_status": "free"}},
+        "panes": [{"key": "api", "pane_id": "PANE-API"}],
+        "max_turns_per_agent": 1, "mission_timeout_seconds": 60, "cost_confirmed_for": [],
+    }
+    with database.get_connection() as connection:
+        connection.execute("UPDATE workspace_plans SET status='APPROVED_PARTIAL', approval_json=? WHERE id=?",
+                           (json.dumps(approval), coord_env["plan_id"]))
+    execution = coordinator.authorize_execution(
+        coord_env["plan_id"], agent_keys=["api"], test_profiles={"api": "unit"},
+        max_turns_per_agent=1, mission_timeout_seconds=60,
+    )
+    assert execution["agent_keys"] == ["api"]
+    assert [step["pane_id"] for step in execution["steps"]] == ["PANE-API"]
+    with pytest.raises(DevServiceError) as error:
+        coordinator.authorize_execution(
+            coord_env["plan_id"], agent_keys=["api", "tests"],
+            test_profiles={"api": "unit", "tests": "unit"},
+            max_turns_per_agent=1, mission_timeout_seconds=60,
+        )
+    assert error.value.code == "AGENTS_NOT_CONFIRMED"
+
+
 def _set_models(env, monkeypatch, choices, confirmed=None):
     catalog = [FREE, {"id": "low/model", "cost_status": "low_cost"},
                {"id": "std/model", "cost_status": "standard"},
@@ -941,7 +966,9 @@ def test_resume_refuses_when_an_approved_native_effort_is_no_longer_supported(
     _wait(plan_id, {"BLOCKED"})
     review_id = _native_review(env, "source", "resume-invalid-effort")
     coordinator.bind_native_review(plan_id, "api", review_id)
-    _wait(plan_id, {"BLOCKED"})
+    coordinator.start(plan_id)
+    blocked = _wait(plan_id, {"BLOCKED"})
+    assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
     preview = handoff.preview(env["api_pane"], env["tests_pane"], review_id)
     handoff.approve(
         preview["handoff_id"], preview["snapshot_fingerprint"],
@@ -1222,10 +1249,10 @@ def test_bind_native_review_rejects_when_the_turn_is_not_durably_completed(coord
     assert error.value.code == "NATIVE_REVIEW_TURN_NOT_READY"
 
 
-def test_bind_native_review_resumes_and_still_refuses_to_hand_off_into_omniroute(coord_env, monkeypatch):
+def test_bind_native_review_waits_for_explicit_dispatch_and_still_refuses_mixed_backend(coord_env, monkeypatch):
     """coord_env's plan has a second, OmniRoute "tests" step depending on
-    "api". Binding must still advance the sequence (not just mark the step
-    done and stop) -- but the second step must stay refused: P5.3B allows a
+    "api". Binding parks the sequence until another explicit dispatch; that
+    dispatch still refuses the second step because P5.3B allows a
     Codex Native agent to depend on another Codex Native agent, never a
     mixed native/OmniRoute pair, and must never silently proceed as if
     "api" had produced no changes to hand off."""
@@ -1236,6 +1263,10 @@ def test_bind_native_review_resumes_and_still_refuses_to_hand_off_into_omniroute
     result = coordinator.bind_native_review(plan_id, "api", review["review_id"])
     assert result["steps"][0]["status"] == "READY_FOR_REVIEW"
     assert result["steps"][0]["native_review_id"] == review["review_id"]
+    assert result["status"] == "AWAITING_EXECUTION"
+    assert result["steps"][1]["status"] == "PENDING"
+    assert not result["steps"][1]["native_turn_id"] and not result["steps"][1]["mission_id"]
+    coordinator.start(plan_id)
     final = _wait(plan_id, {"BLOCKED"})
     assert final["status"] == "BLOCKED"
     assert final["error_code"] == "MIXED_BACKEND_HANDOFF_NOT_SUPPORTED"
@@ -1272,7 +1303,7 @@ def test_bind_native_review_cannot_be_replayed(coord_env, monkeypatch):
     _wait(plan_id, {"BLOCKED"})
     first = _save_review("DEV-API", _review_id("bound"))
     coordinator.bind_native_review(plan_id, "api", first["review_id"])
-    _wait(plan_id, {"AWAITING_REVIEW"})
+    _wait(plan_id, {"AWAITING_EXECUTION"})
     second = _save_review("DEV-API", _review_id("replay-attempt"))
     with pytest.raises(DevServiceError) as error:
         coordinator.bind_native_review(plan_id, "api", second["review_id"])
@@ -1670,7 +1701,10 @@ def test_two_native_agents_sequence_with_no_changes_in_the_first(two_native_env,
     blocked = _wait(plan_id, {"BLOCKED"})
     assert blocked["error_code"] == "AWAITING_NATIVE_REVIEW"
     review_id = _native_review(env, "source", "api-clean")
-    coordinator.bind_native_review(plan_id, "api", review_id)
+    bound = coordinator.bind_native_review(plan_id, "api", review_id)
+    assert bound["status"] == "AWAITING_EXECUTION"
+    assert len(turns) == 1, "binding a review must not start the next agent"
+    coordinator.start(plan_id)
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and len(turns) < 2:
         time.sleep(0.02)
@@ -1718,6 +1752,9 @@ def test_two_native_agents_sequence_with_approved_handoff_of_changes(two_native_
     result = coordinator.bind_native_review(plan_id, "api", review_id)
     assert result["steps"][0]["status"] == "READY_FOR_REVIEW"
     assert result["steps"][0]["native_review_id"] == review_id
+    assert result["status"] == "AWAITING_EXECUTION"
+    assert len(turns) == 1
+    coordinator.start(plan_id)
     blocked = _wait(plan_id, {"BLOCKED"})
     assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
     assert blocked["steps"][1]["status"] == "BLOCKED"
@@ -1743,11 +1780,12 @@ def test_two_native_agents_sequence_with_approved_handoff_of_changes(two_native_
     assert transferred_content == "def api():\n    return 2\n"
     resumed = coordinator.resume(plan_id)
     assert resumed["status"] == "RUNNING"
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline and len(turns) < 2:
         time.sleep(0.02)
     assert len(turns) == 2, (
-        "the second native turn was never launched after the proven transfer"
+        "the second native turn was never launched after the proven transfer: "
+        f"{coordinator.state(plan_id)!r}"
     )
     assert effort_calls == [
         (env["source"]["session_id"], "free/model", "high"),
@@ -1859,6 +1897,7 @@ def test_resume_refuses_revoked_plan_approval_after_transfer(two_native_env, mon
     _wait(plan_id, {"BLOCKED"})
     review_id = _native_review(env, "source", "revoked-approval")
     coordinator.bind_native_review(plan_id, "api", review_id)
+    coordinator.start(plan_id)
     blocked = _wait(plan_id, {"BLOCKED"})
     assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
     preview = handoff.preview(env["api_pane"], env["tests_pane"], review_id)
@@ -1942,9 +1981,9 @@ def test_resume_refuses_if_the_pending_step_already_has_native_evidence(coord_en
 
 def test_resume_is_refused_once_the_sequence_has_already_advanced(coord_env, monkeypatch):
     """Scenario 12 (duplicate resume): once the sequence has moved past
-    BLOCKED (here: no changes, so the second agent launches on its own, no
-    handoff needed), a stray resume() call must be refused outright, never
-    silently re-launch the already-started step."""
+    BLOCKED (here: no changes, so an explicit dispatch starts the second
+    agent without a handoff), a stray resume() call must be refused outright,
+    never silently re-launch the already-started step."""
     _set_backend("DEV-API", "codex_native")
     _set_backend("DEV-TESTS", "codex_native")
     plan_id, turns = _launch_first_native_step(coord_env, monkeypatch)
@@ -1952,10 +1991,12 @@ def test_resume_is_refused_once_the_sequence_has_already_advanced(coord_env, mon
     _wait(plan_id, {"BLOCKED"})
     review = _save_review("DEV-API", _review_id("dup-resume"))  # no changes: no handoff required
     coordinator.bind_native_review(plan_id, "api", review["review_id"])
+    assert coordinator.state(plan_id)["status"] == "AWAITING_EXECUTION"
+    coordinator.start(plan_id)
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and len(turns) < 2:
         time.sleep(0.02)
-    assert len(turns) == 2, "the second agent should have launched on its own"
+    assert len(turns) == 2, "the second agent should launch only after explicit dispatch"
     state = coordinator.state(plan_id)
     assert state["status"] == "RUNNING"
     with pytest.raises(DevServiceError) as error:

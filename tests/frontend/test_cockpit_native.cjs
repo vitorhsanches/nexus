@@ -58,7 +58,7 @@ function harness(overrides = {}) {
     claudeModels: { models: [
       { id: 'claude-opus-4-8', name: 'Opus', selectable: true, cost_status: 'known', supported_efforts: ['low', 'high'] },
     ], default_model: 'claude-opus-4-8', catalog_error: null },
-    operations: {},
+    operations: {}, workspacePanes: [], executions: {}, turnDetails: {}, focusCalls: [], reviewHistory: {},
     sessions: [
       { session_id: 'DEV-NATIVE', project_id: 'demo', status: 'ACTIVE', backend: 'codex_native', requested_model: 'gpt-x', branch: 'nexus/dev/DEV-NATIVE', created_at: 't1' },
       { session_id: 'DEV-LEGACY', project_id: 'demo', status: 'ACTIVE', backend: 'omniroute', requested_model: 'cx/old', branch: 'nexus/dev/DEV-LEGACY', created_at: 't0' },
@@ -117,6 +117,35 @@ function harness(overrides = {}) {
       }
       return reply({ plan, panes: server.approvedPanes });
     }
+    if (url.startsWith('/api/workspace/state?')) return reply({ panes: server.workspacePanes });
+    const executionMatch = url.match(/^\/api\/workspace\/plans\/([^/]+)\/execution$/);
+    if (executionMatch && method === 'GET') {
+      const execution = server.executions[decodeURIComponent(executionMatch[1])];
+      return execution ? reply(execution) : reply({ detail: { code: 'EXECUTION_NOT_AUTHORIZED', message: 'not started' } }, 404);
+    }
+    if (method === 'POST' && /^\/api\/workspace\/plans\/[^/]+\/execute$/.test(url)) {
+      const planId = decodeURIComponent(url.split('/')[4]);
+      server.executeBodies = [...(server.executeBodies || []), body];
+      server.executions[planId] = server.nextExecution || {
+        plan_id: planId, status: 'RUNNING', agent_keys: body.agent_keys,
+        steps: [{ agent_key: body.agent_keys[0], pane_id: 'PANE-CHILD', status: 'RUNNING', native_turn_id: 'TURN-COORD' },
+          ...body.agent_keys.slice(1).map(agent_key => ({ agent_key, pane_id: 'PANE-CHILD-2', status: 'PENDING' }))],
+      };
+      const plan = server.maestro.messages.find(item => item.plan?.plan_id === planId)?.plan;
+      if (plan) plan.execution = server.executions[planId];
+      return reply(server.executions[planId]);
+    }
+    if (method === 'POST' && /^\/api\/workspace\/plans\/[^/]+\/steps\/[^/]+\/review$/.test(url)) {
+      const planId = decodeURIComponent(url.split('/')[4]);
+      const key = decodeURIComponent(url.split('/')[6]);
+      const execution = server.executions[planId];
+      const step = execution.steps.find(item => item.agent_key === key);
+      step.status = 'READY_FOR_REVIEW'; step.native_review_id = body.review_id;
+      execution.status = execution.steps.some(item => item.status === 'PENDING') ? 'AWAITING_EXECUTION' : 'AWAITING_REVIEW';
+      const plan = server.maestro.messages.find(item => item.plan?.plan_id === planId)?.plan;
+      if (plan) plan.execution = execution;
+      return reply(execution);
+    }
     if (url === '/api/dev/models?backend=codex_native') return reply(server.models);
     if (url === '/api/dev/models?backend=claude_native') return reply(server.claudeModels);
     if (url.startsWith('/api/dev/sessions?project_id=')) return reply({ sessions: server.sessions });
@@ -130,6 +159,10 @@ function harness(overrides = {}) {
       const id = sessionMatch[1];
       const rest = sessionMatch[2] || '';
       if (!rest) return reply(server.sessions.find(item => item.session_id === id));
+      if (method === 'GET' && rest.startsWith('/turns/')) {
+        const turnId = decodeURIComponent(rest.slice('/turns/'.length));
+        if (server.turnDetails[turnId]) return reply(server.turnDetails[turnId]);
+      }
       if (method === 'GET' && rest === '/turns') return reply({ turns: server.turns[id] });
       if (method === 'GET' && rest.startsWith('/turns/')) return reply(server.turns[id].find(turn => rest.endsWith(turn.turn_id)));
       if (method === 'POST' && rest === '/turns') {
@@ -179,7 +212,7 @@ function harness(overrides = {}) {
   };
   const context = {
     document, fetch, window: { EventSource: overrides.noEventSource ? undefined : FakeEventSource,
-      NexusCockpit: { projectId: () => server.project, notify: message => toasts.push(message), onProject: callback => listeners.push(callback), refreshWorkspace: async () => { server.workspaceRefreshes = (server.workspaceRefreshes || 0) + 1; } } },
+      NexusCockpit: { projectId: () => server.project, notify: message => toasts.push(message), onProject: callback => listeners.push(callback), refreshWorkspace: async () => { server.workspaceRefreshes = (server.workspaceRefreshes || 0) + 1; }, focusPane: async id => { server.focusCalls.push(id); } } },
     setTimeout(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimeout(timer) { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
   };
@@ -1025,6 +1058,65 @@ test('a promoted Native pane keeps Development drafts and approves selected Code
   tabs[0].dispatch('click');
   assert.equal(native.pane.querySelector('.native-planning-view').hidden, true);
   assert.equal(devDraft.value, 'rascunho de Development');
+  controller.dispose();
+});
+
+test('Maestro dispatch requires human confirmation, calls Coordinator for the approved subset, and recovers turn state without replay', async () => {
+  const app = harness();
+  const plan = {
+    plan_id: 'PLAN-DISPATCH', status: 'APPROVED_PARTIAL', summary: 'Entrega nativa',
+    agents: [
+      { key: 'api', title: 'API', backend: 'codex_native', model: 'gpt-x', effort: 'high', task: 'Implemente', acceptance_criteria: ['Concluído'], depends_on: [] },
+      { key: 'claude', title: 'Documentação', backend: 'claude_native', model: 'claude-opus-4-8', effort: 'low', task: 'Documente', acceptance_criteria: ['Pronto'], depends_on: ['api'] },
+    ],
+    approval: {
+      selected_agent_keys: ['api'], agent_models: { api: { backend: 'codex_native', model: 'gpt-x', effort: 'high' } },
+      panes: [{ key: 'api', pane_id: 'PANE-CHILD' }], max_turns_per_agent: 2, mission_timeout_seconds: 420,
+    },
+  };
+  app.server.maestro.messages = [{ author: 'maestro', text: 'Plano salvo', status: 'COMPLETED', plan }];
+  app.server.workspacePanes = [{ pane_id: 'PANE-CHILD', session: { session_id: 'DEV-CHILD', backend: 'codex_native' } }];
+  const native = fixedPane('PANE-MAESTRO');
+  const controller = app.mount(native.pane, {
+    projectId: 'demo', sessionId: 'DEV-NATIVE', backend: 'codex_native', paneId: 'PANE-MAESTRO', maestro: true,
+  });
+  controller.setMaestro(true);
+  native.pane.querySelectorAll('.native-mode-tab')[1].dispatch('click');
+  await app.settle();
+  let card = native.pane.querySelector('.native-planning-plan');
+  assert.match(card.textContent, /API/);
+  assert.match(card.textContent, /claude/);
+  let confirmation = card.querySelector('.native-planning-dispatch-confirm input');
+  let start = card.querySelector('.cockpit-send');
+  assert.equal(start.disabled, true, 'the first dispatch must be confirmed by a person');
+  confirmation.checked = true;
+  confirmation.dispatch('change');
+  await app.settle();
+  card = native.pane.querySelector('.native-planning-plan');
+  start = card.querySelector('.cockpit-send');
+  assert.equal(start.disabled, false);
+  start.dispatch('click');
+  await app.settle();
+  assert.deepEqual(app.server.executeBodies, [{
+    agent_keys: ['api'], test_profiles: {}, max_turns_per_agent: 2,
+    mission_timeout_seconds: 420, confirm_costs: false,
+  }], 'only the persisted selected and created subset is dispatched');
+  assert.equal(app.posts.some(call => /\/api\/dev\/sessions\/[^/]+\/turns$/.test(call.url)), false,
+    'the pane never bypasses the Coordinator with its own Development turn');
+  assert.match(native.pane.querySelector('.native-planning-plan').textContent, /TURN-COORD/);
+  assert.match(native.pane.querySelector('.native-planning-plan').textContent, /Codex Native/);
+
+  app.server.turnDetails['TURN-COORD'] = { turn_id: 'TURN-COORD', status: 'RUNNING', response_text: 'Executando' };
+  app.server.maestro.messages[0].plan.execution = app.server.executions['PLAN-DISPATCH'];
+  const readsBeforeReload = app.calls.filter(call => call.method === 'GET' && call.url.includes('/turns/TURN-COORD')).length;
+  await app.tick(2500);
+  assert.ok(app.calls.filter(call => call.method === 'GET' && call.url.includes('/turns/TURN-COORD')).length > readsBeforeReload,
+    'reload reconciliation reads the persisted real turn');
+  assert.equal(app.server.executeBodies.length, 1, 'recovery does not dispatch again');
+  const focus = native.pane.querySelector('.native-planning-link');
+  focus.dispatch('click');
+  await app.settle();
+  assert.deepEqual(app.server.focusCalls, ['PANE-CHILD']);
   controller.dispose();
 });
 

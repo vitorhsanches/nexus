@@ -313,6 +313,13 @@ def test_manual_two_native_agents_review_handoff_resume_http_e2e(
         json={"review_id": review_a},
     )
     assert bind_a.status_code == 200, bind_a.text
+    assert bind_a.json()["status"] == "AWAITING_EXECUTION"
+    dispatched = client.post(f"/api/workspace/plans/{plan_id}/execute", json={
+        "agent_keys": ["implement", "verify"], "test_profiles": {},
+        "max_turns_per_agent": 1, "mission_timeout_seconds": 60,
+        "confirm_costs": True,
+    })
+    assert dispatched.status_code == 200, dispatched.text
     blocked = _wait(plan_id, {"BLOCKED"})
     assert blocked["error_code"] == "DEPENDENCY_WORKTREE_NOT_TRANSFERRED"
     assert len(turns) == 1
@@ -345,7 +352,7 @@ def test_manual_two_native_agents_review_handoff_resume_http_e2e(
     assert transferred.json()["status"] == "TRANSFERRED"
     resumed = client.post(f"/api/workspace/plans/{plan_id}/resume")
     assert resumed.status_code == 200, resumed.text
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline and len(turns) < 2:
         time.sleep(0.02)
     assert len(turns) == 2

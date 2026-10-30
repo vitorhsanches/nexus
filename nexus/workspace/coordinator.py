@@ -57,24 +57,50 @@ def authorize_execution(
     plan = store.get_plan(plan_id)
     if plan is None:
         _fail("PLAN_NOT_FOUND", f"Unknown plan: {plan_id!r}", 404)
-    if plan["status"] != "APPROVED":
-        _fail("PLAN_NOT_APPROVED", "Only a fully approved plan can be executed.")
+    if plan["status"] not in {"APPROVED", "APPROVED_PARTIAL"}:
+        _fail("PLAN_NOT_APPROVED", "Only an approved plan with created agent panes can be executed.")
     approval = _approval(plan)
-    planned = {agent["key"]: agent for agent in json.loads(plan["proposal_json"]).get("agents", [])}
+    proposal = json.loads(plan["proposal_json"])
+    agents = proposal.get("agents", []) if isinstance(proposal, dict) else []
+    planned = {agent["key"]: agent for agent in agents
+               if isinstance(agent, dict) and isinstance(agent.get("key"), str)}
     keys = list(agent_keys)
-    expected_order = list(planned)
-    if keys != expected_order:
-        _fail("AGENTS_NOT_CONFIRMED", "Execution must use the exact approved agent order.", 400)
     selected = approval.get("agent_models") or {}
     panes = {pane["plan_agent_key"]: pane for pane in store.panes_for_plan(plan_id)}
-    if (not isinstance(selected, dict) or set(selected) != set(planned)
-            or any(not isinstance(selected[key], dict) for key in planned)
-            or set(panes) != set(planned)
-            or any(
-                panes[key]["model"] != selected[key].get("model")
-                for key in planned
-            )):
-        _fail("PANES_NOT_READY", "The approved plan does not have the exact authorized agents and models.")
+    if not isinstance(selected, dict):
+        _fail("PANES_NOT_READY", "The approved plan has no persisted model authorization.")
+    approved_keys = approval.get("selected_agent_keys")
+    if not isinstance(approved_keys, list):
+        # Plans approved before P9.A2 authorized every model entry.
+        approved_keys = [agent["key"] for agent in agents if agent.get("key") in selected]
+    approved_panes = approval.get("panes")
+    if approved_panes is not None:
+        if (not isinstance(approved_panes, list)
+                or any(not isinstance(item, dict) or not isinstance(item.get("key"), str)
+                       or not isinstance(item.get("pane_id"), str) for item in approved_panes)):
+            _fail("PANES_NOT_READY", "The approved plan has an invalid created-pane record.")
+        approved_pane_ids = {item["key"]: item["pane_id"] for item in approved_panes}
+        created_keys = {key for key, pane_id in approved_pane_ids.items()
+                        if key in panes and panes[key]["id"] == pane_id}
+    else:
+        # Older approvals did not persist the created-pane list.
+        created_keys = set(panes)
+    expected_order = [agent["key"] for agent in agents
+                      if agent.get("key") in approved_keys
+                      and agent.get("key") in created_keys
+                      and agent.get("key") in panes
+                      and agent.get("key") in selected]
+    requested = set(keys) if all(isinstance(key, str) for key in keys) else set()
+    if (not keys or len(keys) != len(requested)
+            or keys != [key for key in expected_order if key in requested]):
+        _fail("AGENTS_NOT_CONFIRMED", "Choose created, approved agents in their persisted plan order.", 400)
+    if any(not isinstance(selected[key], dict) or panes[key]["model"] != selected[key].get("model") for key in keys):
+        _fail("PANES_NOT_READY", "An approved agent pane or model no longer matches its persisted authorization.")
+    for key in keys:
+        dependencies = planned[key].get("depends_on") or []
+        if not set(dependencies) <= requested:
+            _fail("DEPENDENCY_NOT_SELECTED", f"Include the approved prerequisites of agent {key} before dispatch.", 409)
+    selected_models = {key: selected[key] for key in keys}
     from nexus.dev.executor import session_backend
     from nexus.registry import dev_sessions
     from nexus.workspace import service
@@ -90,7 +116,8 @@ def authorize_execution(
             "Test profiles must be keyed by approved agent.", 400,
         )
     native_keys = set()
-    for key, pane in panes.items():
+    for key in keys:
+        pane = panes[key]
         session = dev_sessions.get_session(pane["dev_session_id"])
         if session is None or session["project_id"] != plan["project_id"]:
             _fail("PANES_NOT_READY", "Approved pane has no Development session.")
@@ -116,7 +143,7 @@ def authorize_execution(
             _fail("UNSUPPORTED_BACKEND", "Persisted backend is not supported.")
     if set(test_profiles) & native_keys:
         _fail("TEST_PROFILE_NOT_APPLICABLE", "Codex Native agents have no test profile; omit them.", 400)
-    required_profiles = set(planned) - native_keys
+    required_profiles = set(keys) - native_keys
     if set(test_profiles) != required_profiles or any(not isinstance(value, str) or not value.strip() for value in test_profiles.values()):
         _fail("TEST_PROFILES_NOT_CONFIRMED", "Choose one trusted test profile for every OmniRoute agent.", 400)
     if max_turns_per_agent != approval.get("max_turns_per_agent") or mission_timeout_seconds != approval.get("mission_timeout_seconds"):
@@ -130,10 +157,6 @@ def authorize_execution(
                 "TEST_PROFILE_NOT_FOUND",
                 "Trusted test profile unavailable: " + ", ".join(missing), 409,
             )
-    if len(selected) != len(planned) or any(
-        not isinstance(selected.get(key), dict) for key in planned
-    ):
-        _fail("MODEL_NOT_AVAILABLE", "Approved model is unavailable.", 409)
     charged = set()
     for key in keys:
         model = selected[key]["model"]
@@ -166,7 +189,7 @@ def authorize_execution(
             max_turns_per_agent=max_turns_per_agent,
             mission_timeout_seconds=mission_timeout_seconds,
             confirmed_model_ids=sorted(missing_consent) if confirm_costs else [],
-            expected_agent_models=selected,
+            expected_agent_models=selected_models,
         )
     except ValueError as error:
         code = ("EXECUTION_AUTHORIZATION_CHANGED" if "changed before" in str(error)
@@ -266,7 +289,7 @@ def _resume_evidence(plan_id: str, execution: dict) -> dict:
     plan = store.get_plan(plan_id)
     if plan is None:
         _fail("PLAN_NOT_FOUND", "The plan no longer exists.", 404)
-    if plan["status"] != "APPROVED" or not plan["approval_json"]:
+    if plan["status"] not in {"APPROVED", "APPROVED_PARTIAL"} or not plan["approval_json"]:
         _fail("RESUME_AUTHORIZATION_INVALID", "The plan approval is no longer valid.")
     steps = execution["steps"]
     index = execution["current_index"]
@@ -294,11 +317,12 @@ def _resume_evidence(plan_id: str, execution: dict) -> dict:
         _fail("RESUME_AUTHORIZATION_INVALID", "Persisted plan proposal is invalid.")
     agents = proposal.get("agents") or []
     if (not isinstance(agents, list) or any(not isinstance(agent, dict) for agent in agents)
-            or [agent.get("key") for agent in agents] != execution["agent_keys"]
+            or [agent.get("key") for agent in agents if agent.get("key") in execution["agent_keys"]] != execution["agent_keys"]
             or approval.get("max_turns_per_agent") != execution["max_turns_per_agent"]
             or approval.get("mission_timeout_seconds") != execution["mission_timeout_seconds"]):
         _fail("RESUME_AUTHORIZATION_INVALID", "Persisted execution no longer matches the plan approval.")
-    if (agents[index].get("depends_on") or []) != [previous["agent_key"]]:
+    pending_agent = next((agent for agent in agents if agent.get("key") == pending["agent_key"]), None)
+    if pending_agent is None or (pending_agent.get("depends_on") or []) != [previous["agent_key"]]:
         _fail("RESUME_TOPOLOGY_UNSUPPORTED", "Resume supports one declared dependency on the previous agent.")
     # P5.3B: a Codex Native agent has no trusted test profile (mirrors the
     # same split authorize_execution already enforces at authorization
@@ -486,7 +510,7 @@ def _run(plan_id: str, token: str) -> None:
                 if pane is not None else None
             )
             from nexus.dev.executor import session_backend
-            if (plan is None or plan["status"] != "APPROVED" or session is None
+            if (plan is None or plan["status"] not in {"APPROVED", "APPROVED_PARTIAL"} or session is None
                     or session["project_id"] != plan["project_id"]
                     or pane["model"] != choice.get("model")
                     or session_backend(session) != choice.get(
@@ -740,9 +764,9 @@ def recover(plan_id: str) -> dict:
 
 def bind_native_review(plan_id: str, agent_key: str, review_id: str) -> dict:
     """Explicit operator action: attach a confirmed human review as the
-    durable evidence that the current Codex Native step is done, then
-    resume the sequence -- the native sibling of resume() for an approved
-    handoff. Never creates, decides or re-validates the review itself
+    durable evidence that the current Codex Native step is done. The next
+    step returns to AWAITING_EXECUTION and needs its own explicit dispatch;
+    the last step reaches AWAITING_REVIEW. Never creates, decides or re-validates the review itself
     (that stays entirely in nexus.dev.integration); only checks that the
     exact review named applies to the exact session, turn and step that
     is actually awaiting one, immediately before claiming the transition.
@@ -770,7 +794,7 @@ def bind_native_review(plan_id: str, agent_key: str, review_id: str) -> dict:
     plan = store.get_plan(plan_id)
     approval = _approval(plan) if plan is not None else {}
     choice = (approval.get("agent_models") or {}).get(agent_key) or {}
-    if (plan is None or plan["status"] != "APPROVED"
+    if (plan is None or plan["status"] not in {"APPROVED", "APPROVED_PARTIAL"}
             or session_backend(session) != "codex_native"
             or choice.get(
                 "backend", approval.get("backend", "omniroute")
@@ -797,7 +821,6 @@ def bind_native_review(plan_id: str, agent_key: str, review_id: str) -> dict:
     token = execution_store.claim_native_review(plan_id, agent_key, review_id)
     if token is None:
         _fail("NATIVE_REVIEW_CONCURRENT", "The plan, step or review changed before this claim.")
-    _spawn(plan_id, token)
     return state(plan_id)
 
 
