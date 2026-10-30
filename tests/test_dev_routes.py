@@ -475,7 +475,7 @@ class NativeDevelopmentEndpointTest(unittest.TestCase):
         with patch("nexus.dev.approvals.decide", return_value={"status": "APPROVED"}) as mock_decide:
             decided = client.post("/api/dev/sessions/DEV-1/approvals/APPROVAL-1", json={"decision": "accept"})
         self.assertEqual(decided.status_code, 200)
-        mock_decide.assert_called_once_with("DEV-1", "APPROVAL-1", "accept")
+        mock_decide.assert_called_once_with("DEV-1", "APPROVAL-1", "accept", operation_sha256=None)
         for body in ({"decision": "acceptForSession"}, {"decision": "accept", "extra": 1}, {}):
             self.assertEqual(client.post("/api/dev/sessions/DEV-1/approvals/APPROVAL-1", json=body).status_code, 422)
 
