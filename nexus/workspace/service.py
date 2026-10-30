@@ -144,10 +144,20 @@ def pane_view(row) -> dict:
         else "omniroute"
     )
     pane_brief = _brief(row) or {}
+    try:
+        capabilities = json.loads(row["capabilities_json"] or "[]")
+    except (KeyError, TypeError, ValueError):
+        capabilities = []
+    if not isinstance(capabilities, list):
+        capabilities = []
+    capabilities = [item for item in capabilities if isinstance(item, str)]
     return {
         "pane_id": row["id"],
         "project_id": row["project_id"],
         "backend": backend,
+        "capabilities": capabilities,
+        "is_maestro": "maestro" in capabilities,
+        "maestro_parent_pane_id": row["maestro_parent_pane_id"],
         "plan_id": row["plan_id"],
         "origin": row["origin"],
         "role": row["role"],
@@ -527,6 +537,7 @@ def plan_view(row) -> dict:
         "project_id": row["project_id"],
         "task_text": row["task_text"],
         "created_at": row["created_at"],
+        "conversation_id": row["conversation_id"] if "conversation_id" in keys else None,
         **proposal,
         "status": row["status"] if "status" in keys else "PROPOSED",
         "approval": json.loads(row["approval_json"]) if "approval_json" in keys and row["approval_json"] else None,
@@ -597,6 +608,7 @@ def create_pane(
     _origin: str | None = None,
     _plan_agent_key: str | None = None,
     _brief: dict | None = None,
+    _maestro_parent_pane_id: str | None = None,
 ) -> dict:
     """Create one operational pane: a real Development session + identity."""
     from nexus.dev.service import create_dev_session, validate_dev_project
@@ -658,12 +670,45 @@ def create_pane(
         model=model,
         plan_id=plan_id,
         plan_agent_key=_plan_agent_key,
+        maestro_parent_pane_id=_maestro_parent_pane_id,
         brief=(
             {**(_brief or {}), "native_effort": effort}
             if effort is not None else _brief
         ),
     )
     return pane_view(store.get_pane(pane_id))
+
+
+def promote_pane_to_maestro(pane_id: str) -> dict:
+    """Grant Maestro planning capability to an existing Native pane.
+
+    Promotion never creates a Development session and never changes the
+    pane's model, backend, worktree or history.  The planning Chat session,
+    when authorized later, is linked to this persisted pane identity.
+    """
+    row = _require_pane(pane_id)
+    if _pane_backend(row) != "codex_native":
+        raise DevServiceError(
+            "MAESTRO_REQUIRES_CODEX_NATIVE",
+            "Only a Codex Native pane can be promoted to Maestro in this release.",
+            http_status=422,
+        )
+    try:
+        store.promote_pane_to_maestro(pane_id)
+    except ValueError as error:
+        if str(error) == "MAESTRO_ALREADY_ASSIGNED":
+            raise DevServiceError(
+                "MAESTRO_ALREADY_ASSIGNED",
+                "This project already has a Maestro pane.",
+                http_status=409,
+            ) from error
+        raise
+    from nexus.workspace import maestro
+
+    return {
+        "pane": get_pane(pane_id),
+        "maestro": maestro.conversation_state(row["project_id"]),
+    }
 
 
 MIN_PLAN_TURNS, MAX_PLAN_TURNS = 1, 6
@@ -804,6 +849,11 @@ def approve_plan(
     if not store.claim_plan_for_approval(plan_id, approval):
         raise DevServiceError("PLAN_NOT_PROPOSED", "This plan is already being approved.", http_status=409)
     created = []
+    maestro_parent_pane_id = None
+    if plan.get("conversation_id"):
+        conversation = store.get_conversation(plan["conversation_id"])
+        if conversation is not None:
+            maestro_parent_pane_id = conversation["maestro_pane_id"]
     for agent in agents:
         choice = chosen[agent["key"]]
         brief = {
@@ -831,6 +881,7 @@ def approve_plan(
                 _origin="maestro",
                 _plan_agent_key=agent["key"],
                 _brief=brief,
+                _maestro_parent_pane_id=maestro_parent_pane_id,
             )
         except DevServiceError as error:
             # Panes already created keep their sessions; nothing is rolled back

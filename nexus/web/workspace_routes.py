@@ -258,6 +258,13 @@ def get_pane(pane_id: str):
     return _call(service.get_pane, pane_id)
 
 
+@router.post("/panes/{pane_id}/promote-maestro")
+def promote_pane_to_maestro(pane_id: str):
+    from nexus.workspace import service
+
+    return _call(service.promote_pane_to_maestro, pane_id)
+
+
 @router.patch("/panes/{pane_id}")
 def update_pane(pane_id: str, request: PaneUpdateRequest):
     from nexus.workspace import service

@@ -140,6 +140,13 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
         box.maestro.messages.push({ author: 'user', text: body.text, status: 'COMPLETED' },
           { author: 'maestro', text: 'Plano pronto', status: 'COMPLETED', plan: { plan_id: 'PLAN-1', source: 'deterministic' } });
         data = box.maestro;
+      } else if (/^\/api\/workspace\/panes\/[^/]+\/promote-maestro$/.test(url)) {
+        const paneId = decodeURIComponent(url.split('/')[4]);
+        const pane = box.agents.find(item => item.pane_id === paneId);
+        pane.is_maestro = true;
+        pane.capabilities = ['maestro'];
+        box.maestro.maestro_pane_id = paneId;
+        data = { pane, maestro: box.maestro };
       } else if (url === '/api/workspace/cost-authorizations') {
         const body = JSON.parse(options.body);
         box.authorizations.push({ authorization_id: 'AUTH-1', project_id: body.project_id, model: body.model,
@@ -480,6 +487,23 @@ test('Codex and Claude workspace identities mount side by side and survive refre
   await reloaded.settle();
   assert.equal(reloaded.nativeMounts.length, 2);
   assert.equal(reloaded.calls.filter(call => call.method === 'POST').length, 0);
+});
+
+test('an existing Codex Native pane can be promoted in place and is linked to Maestro state', async () => {
+  const codex = { ...agent(1), project_id: 'demo', backend: 'codex_native', model: 'gpt-x',
+    latest_mission: null, session: { ...agent(1).session, backend: 'codex_native' } };
+  const app = harness([codex], { withNative: true });
+  await app.settle();
+  const original = app.grid.querySelector('[data-pane="PANE-1"]');
+  const promote = original.querySelector('.promote-maestro');
+  assert.ok(promote);
+  promote.dispatch('click');
+  await app.settle();
+  assert.ok(app.calls.some(call => call.url.endsWith('/PANE-1/promote-maestro') && call.method === 'POST'));
+  assert.equal(app.grid.querySelector('[data-pane="PANE-1"]'), original);
+  assert.equal(app.grid.querySelector('[data-pane="PANE-1"]').classList.contains('maestro-assigned'), true);
+  assert.match(original.querySelector('.pane-identity').textContent, /MAESTRO/);
+  assert.equal(app.box.maestro.maestro_pane_id, 'PANE-1');
 });
 
 test('+ Pane creates a Claude session only after explicit runtime, model and effort selection', async () => {

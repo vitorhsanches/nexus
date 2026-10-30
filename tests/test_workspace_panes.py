@@ -16,8 +16,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nexus.dev.service import DevServiceError
-from nexus.registry import database, dev_sessions
-from nexus.workspace import policy, service
+from nexus.registry import database, dev_sessions, workspace as workspace_store
+from nexus.workspace import maestro, policy, service
 
 FREE = {"id": "free/model", "cost_status": "free"}
 STANDARD = {"id": "std/model", "cost_status": "standard"}
@@ -166,7 +166,6 @@ def test_codex_native_invalid_model_and_session_failure_do_not_persist_panes(ws_
         service.create_pane("demo", role="implementer", model="gpt-invalid", backend="codex_native")
     assert invalid.value.code == "MODEL_NOT_ALLOWED"
     assert service.list_panes("demo") == []
-
     native_catalog["models"] = [NATIVE]
     monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
 
@@ -179,6 +178,79 @@ def test_codex_native_invalid_model_and_session_failure_do_not_persist_panes(ws_
     assert failed.value.code == "WORKTREE_CREATE_FAILED"
     assert service.list_panes("demo") == []
 
+
+def test_codex_native_pane_can_be_promoted_without_recreating_identity(ws_env, monkeypatch):
+    native_catalog = {
+        "backend": "codex_native", "models": [{**NATIVE, "supported_efforts": ["high"]}],
+        "catalog_error": None, "account": {"authenticated": True},
+    }
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: native_catalog)
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
+    pane = service.create_pane("demo", role="implementer", model="gpt-native", backend="codex_native", effort="high")
+    session_id = pane["session"]["session_id"]
+    worktree = pane["session"]["worktree_path"]
+
+    promoted = service.promote_pane_to_maestro(pane["pane_id"])
+    assert promoted["pane"]["pane_id"] == pane["pane_id"]
+    assert promoted["pane"]["session"]["session_id"] == session_id
+    assert promoted["pane"]["session"]["worktree_path"] == worktree
+    assert promoted["pane"]["model"] == "gpt-native"
+    assert promoted["pane"]["is_maestro"] is True
+    assert promoted["maestro"]["maestro_pane_id"] == pane["pane_id"]
+    assert promoted["maestro"]["planning"]["backend"] == "codex_native"
+
+    second = service.create_pane("demo", role="tester", model="gpt-native", backend="codex_native")
+    with pytest.raises(DevServiceError) as conflict:
+        service.promote_pane_to_maestro(second["pane_id"])
+    assert conflict.value.code == "MAESTRO_ALREADY_ASSIGNED"
+
+
+def test_native_maestro_authorization_uses_existing_pane_backend(ws_env, monkeypatch):
+    native_catalog = {
+        "backend": "codex_native", "models": [{**NATIVE, "cost_status": "free", "supported_efforts": ["high"]}],
+        "catalog_error": None, "account": {"authenticated": True},
+    }
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: native_catalog)
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
+    pane = service.create_pane("demo", role="implementer", model="gpt-native", backend="codex_native")
+    service.promote_pane_to_maestro(pane["pane_id"])
+    calls = []
+
+    def fake_create_session(project_id, model, effort=None, allow_unknown_cost=False, backend="omniroute"):
+        calls.append({"project_id": project_id, "model": model, "backend": backend, "effort": effort})
+        return {"session_id": "CHAT-NATIVE", "model": model}
+
+    monkeypatch.setattr("nexus.chat.service.create_session", fake_create_session)
+    state = maestro.authorize_planning("demo", "gpt-native", confirm_cost=False, effort="high")
+    assert calls == [{"project_id": "demo", "model": "gpt-native", "backend": "codex_native", "effort": "high"}]
+    assert state["maestro_pane_id"] == pane["pane_id"]
+    assert state["planning"]["backend"] == "codex_native"
+    assert state["planning"]["authorized"] is True
+
+
+def test_approved_maestro_plan_persists_parent_pane_on_each_agent(ws_env, monkeypatch):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native", "models": [{**NATIVE, "supported_efforts": ["high"]}],
+        "catalog_error": None, "account": {"authenticated": True},
+    })
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
+    maestro_pane = service.create_pane("demo", role="implementer", model="gpt-native", backend="codex_native")
+    state = service.promote_pane_to_maestro(maestro_pane["pane_id"])["maestro"]
+    plan_id = workspace_store.create_plan(
+        "demo", "Implement a feature", policy_version="test", complexity="simple",
+        proposal={"complexity": "simple", "summary": "Feature", "agents": [{
+            "key": "impl", "role": "implementer", "title": "Implementer", "model": "free/model",
+            "task": "Implement feature", "acceptance_criteria": ["Works"], "depends_on": [],
+        }]},
+        source="llm", conversation_id=state["conversation_id"],
+    )
+    result = service.approve_plan(
+        plan_id, agent_models={"impl": "free/model"}, max_turns_per_agent=1,
+        mission_timeout_seconds=60, confirm_costs=False,
+    )
+    assert result["panes"][0]["maestro_parent_pane_id"] == maestro_pane["pane_id"]
+    database.initialize_database()
+    assert service.get_pane(result["panes"][0]["pane_id"])["maestro_parent_pane_id"] == maestro_pane["pane_id"]
 
 def test_codex_and_claude_panes_keep_distinct_sessions_backends_and_efforts(
     ws_env, monkeypatch,
@@ -409,6 +481,22 @@ def test_workspace_pane_route_accepts_codex_native_backend(ws_env, monkeypatch):
     assert response.status_code == 200, response.text
     assert response.json()["backend"] == response.json()["session"]["backend"] == "codex_native"
     assert response.json()["session"]["status"] == "ACTIVE"
+
+
+def test_workspace_route_promotes_existing_native_pane(ws_env, monkeypatch):
+    monkeypatch.setattr("nexus.chat.service.list_models", lambda **kwargs: {
+        "backend": "codex_native", "models": [NATIVE], "catalog_error": None,
+    })
+    monkeypatch.setattr("nexus.dev.executor.validate_native_choice", lambda model, effort: None)
+    client = _client()
+    created = client.post("/api/workspace/panes", json={
+        "project_id": "demo", "role": "implementer", "model": "gpt-native", "backend": "codex_native",
+    })
+    pane_id = created.json()["pane_id"]
+    promoted = client.post(f"/api/workspace/panes/{pane_id}/promote-maestro")
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json()["pane"]["pane_id"] == pane_id
+    assert promoted.json()["maestro"]["maestro_pane_id"] == pane_id
 
 
 def test_workspace_pane_route_accepts_claude_native_with_explicit_effort(
