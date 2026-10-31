@@ -1,10 +1,24 @@
 from pathlib import Path
 import os
+import subprocess
 import tomllib
+import types
 import pytest
 
-from nexus.process_env import codex_subprocess_env
+from nexus.process_env import (
+    codex_subprocess_env,
+    _classify_hardlink_failure,
+    _directory_grants_broad_access,
+    _harden_directory_acl,
+    _require_private_directory,
+)
 from nexus.runtime_assets import MANAGER_SKILL_SOURCE
+
+
+def _fake_run(returncode: int, stdout: str = "", stderr: str = ""):
+    def run(_command, **_kwargs):
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    return run
 
 
 def test_codex_profile_is_isolated_and_receives_config(tmp_path, monkeypatch):
@@ -392,3 +406,181 @@ def test_native_profile_refuses_an_unreadable_session_config(tmp_path, monkeypat
     (session_home / "config.toml").write_text("this is [not toml", encoding="utf-8")
     with pytest.raises(RuntimeError, match="another backend"):
         codex_subprocess_env(profile="native", worker_home=str(session_home))
+
+
+# -- P9.D: ACL-aware fallback for the Windows hardlink failure -------------
+
+
+def test_classify_hardlink_failure_names_the_unmet_requirement():
+    cross_volume = OSError("cross-device")
+    cross_volume.winerror = 17
+    assert "different" in _classify_hardlink_failure(cross_volume) and "volume" in _classify_hardlink_failure(cross_volume)
+
+    link_limit = OSError("too many links")
+    link_limit.winerror = 1142
+    assert "1023" in _classify_hardlink_failure(link_limit)
+
+    denied = OSError("denied")
+    denied.winerror = 5
+    assert "denied" in _classify_hardlink_failure(denied)
+
+    unknown = OSError("???")
+    assert _classify_hardlink_failure(unknown)  # never empty/blank
+
+
+def _dispatch_run(**by_program):
+    """A fake ``run`` that answers differently per executable (argv[0]).
+
+    Mirrors _directory_grants_broad_access's two real subprocess calls
+    (``powershell`` for the ACL's SIDs, ``whoami`` for the caller's own SID)
+    without depending on locale-sensitive icacls text output.
+    """
+    def run(command, **_kwargs):
+        rc, out, err = by_program.get(command[0], (0, "", ""))
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+    return run
+
+
+def test_directory_grants_broad_access_detects_known_broad_identities(tmp_path):
+    assert _directory_grants_broad_access(str(tmp_path), run=_dispatch_run(powershell=(0, "S-1-1-0\n", "")))
+    assert _directory_grants_broad_access(str(tmp_path), run=_dispatch_run(powershell=(0, "S-1-5-11\n", "")))
+    # Reproduced live: a sandbox job identity with no well-known name at all
+    # is exactly the case a hardcoded name/SID blocklist would miss.
+    assert _directory_grants_broad_access(
+        str(tmp_path), run=_dispatch_run(powershell=(0, "S-1-5-21-1-2-3-9999\n", ""))
+    )
+
+
+def test_directory_grants_broad_access_is_false_for_a_private_listing(tmp_path):
+    private = "S-1-5-18\nS-1-5-32-544\n"  # SYSTEM, Administrators only
+    assert not _directory_grants_broad_access(str(tmp_path), run=_dispatch_run(powershell=(0, private, "")))
+
+
+def test_directory_grants_broad_access_allows_the_current_user_alongside_system_and_admins(tmp_path):
+    sids = "S-1-5-18\nS-1-5-32-544\nS-1-5-21-1-2-3-1001\n"
+    run = _dispatch_run(
+        powershell=(0, sids, ""),
+        whoami=(0, 'DESKTOP\\user,"S-1-5-21-1-2-3-1001"', ""),
+    )
+    assert not _directory_grants_broad_access(str(tmp_path), run=run)
+
+
+def test_directory_grants_broad_access_fails_safe_when_the_acl_cannot_be_read(tmp_path):
+    assert _directory_grants_broad_access(str(tmp_path), run=_dispatch_run(powershell=(1, "", "access denied")))
+    assert _directory_grants_broad_access(str(tmp_path), run=_dispatch_run(powershell=(0, "", "")))
+
+
+def test_harden_directory_acl_raises_when_a_grant_command_fails(tmp_path):
+    with pytest.raises(OSError, match="icacls"):
+        _harden_directory_acl(str(tmp_path), run=_fake_run(1, stderr="No mapping between account names"))
+
+
+def test_harden_directory_acl_succeeds_when_every_command_succeeds(tmp_path):
+    _harden_directory_acl(str(tmp_path), run=_fake_run(0))  # must not raise
+
+
+def test_require_private_directory_refuses_when_hardening_cannot_be_applied(tmp_path):
+    with pytest.raises(RuntimeError, match="Could not restrict permissions"):
+        _require_private_directory(str(tmp_path), run=_fake_run(1, stderr="access denied"))
+
+
+def test_require_private_directory_refuses_when_still_broad_after_hardening(tmp_path):
+    # The icacls /inheritance:r and /grant:r commands all report success, but
+    # the post-hardening SID check still finds a broad identity -- e.g. an
+    # ACE this tool does not know how to strip.
+    run = _dispatch_run(icacls=(0, "", ""), powershell=(0, "S-1-1-0\n", ""))
+
+    with pytest.raises(RuntimeError, match="still grants access"):
+        _require_private_directory(str(tmp_path), run=run)
+
+
+def test_require_private_directory_succeeds_on_a_hardened_private_directory(tmp_path):
+    run = _dispatch_run(icacls=(0, "", ""), powershell=(0, "S-1-5-18\nS-1-5-32-544\n", ""))
+
+    _require_private_directory(str(tmp_path), run=run)  # must not raise
+
+
+def test_require_private_directory_is_a_noop_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "name", "posix")
+
+    def explodes(*_args, **_kwargs):
+        raise AssertionError("icacls must never run off Windows")
+
+    _require_private_directory(str(tmp_path), run=explodes)  # must not raise or call run
+
+
+def test_native_profile_hardens_a_directory_with_inherited_broad_acl_before_copying(tmp_path, monkeypatch):
+    """Reproduces the real P9.D failure end to end: a worker_home that
+    inherited a broad ACL from its parent (e.g. a redirected NEXUS_CODEX_HOME
+    under a shared/temp location) must be hardened -- not silently trusted --
+    before the opt-in copy fallback writes a credential into it."""
+    _native_user(tmp_path, monkeypatch)
+    worker_home = tmp_path / "poisoned-home"
+    worker_home.mkdir()
+    # Granted by SID (*S-1-1-0 == Everyone): on this class of Windows setup
+    # even the well-known *name* "Everyone" fails to resolve via icacls
+    # ("No mapping between account names and security IDs was done"), the
+    # same account-name-lookup gap production hardening below works around.
+    grant = subprocess.run(
+        ["icacls", str(worker_home), "/grant", "*S-1-1-0:(OI)(CI)R"],
+        capture_output=True, text=True, check=False,
+    )
+    assert grant.returncode == 0, grant.stderr
+    # Real production check, not a text match on locale-dependent icacls
+    # output: confirms the fixture actually poisoned the ACL before relying
+    # on the fix to clean it up.
+    assert _directory_grants_broad_access(str(worker_home)), "fixture did not actually poison the ACL"
+
+    def no_links(*_args, **_kwargs):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setenv("NEXUS_NATIVE_ALLOW_AUTH_COPY", "1")
+
+    env = codex_subprocess_env(profile="native", worker_home=str(worker_home))
+
+    assert (worker_home / "auth.json").read_text(encoding="utf-8") == '{"tokens":{"access_token":"native-login"}}'
+    assert not _directory_grants_broad_access(str(worker_home)), (
+        "the broad grant must be stripped before the credential is copied"
+    )
+    assert env["CODEX_HOME"] == str(worker_home)
+
+
+def test_native_profile_copy_preserves_the_original_credential_untouched(tmp_path, monkeypatch):
+    user_home = _native_user(tmp_path, monkeypatch)
+    source_auth = user_home / ".codex" / "auth.json"
+    original_text = source_auth.read_text(encoding="utf-8")
+    original_mtime = os.stat(source_auth).st_mtime
+
+    def no_links(*_args, **_kwargs):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setenv("NEXUS_NATIVE_ALLOW_AUTH_COPY", "1")
+    codex_subprocess_env(profile="native", worker_home=str(tmp_path / "copy-home"))
+
+    assert source_auth.read_text(encoding="utf-8") == original_text
+    assert os.stat(source_auth).st_mtime == original_mtime
+
+
+def test_native_auth_hardlink_failure_message_never_includes_the_credential(tmp_path, monkeypatch):
+    user_home = _native_user(tmp_path, monkeypatch)
+    secret = "native-login"
+    assert secret in (user_home / ".codex" / "auth.json").read_text(encoding="utf-8")
+
+    def no_links(*_args, **_kwargs):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(os, "link", no_links)
+    with pytest.raises(RuntimeError) as exc_info:
+        codex_subprocess_env(profile="native", worker_home=str(tmp_path / "home-a"))
+    assert secret not in str(exc_info.value)
+
+
+def test_require_private_directory_error_never_echoes_raw_icacls_output_as_the_only_explanation(tmp_path):
+    with pytest.raises(RuntimeError) as exc_info:
+        _require_private_directory(
+            str(tmp_path), run=_fake_run(1, stderr="SECRET-TOKEN-LOOKALIKE-abc123 access denied")
+        )
+    message = str(exc_info.value)
+    assert "Could not restrict permissions on the native Codex session directory" in message
