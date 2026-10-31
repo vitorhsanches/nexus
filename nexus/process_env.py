@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
+import subprocess
 import tempfile
 import tomllib
 import uuid
@@ -143,6 +145,190 @@ def _configures_a_provider(config_path: str) -> bool:
     return "model_provider" in data or "model_providers" in data
 
 
+# Windows hardlink failures observed/documented for CreateHardLink: cross-
+# volume (the common case when NEXUS_CODEX_HOME or TEMP has been redirected
+# to a different drive than the user's own %USERPROFILE%\.codex), the
+# per-file hardlink ceiling, and plain access-denied. Mapped by winerror so
+# the diagnostic names the actual unmet requirement instead of a generic
+# "could not share" message.
+_HARDLINK_FAILURE_CATEGORIES = {
+    17: "source and destination are on different NTFS volumes",
+    1142: "the source file already has the maximum number of hardlinks (1023)",
+    5: "access to the source or destination was denied",
+    3: "the destination directory does not exist",
+}
+
+
+def _classify_hardlink_failure(exc: OSError) -> str:
+    """A short, non-secret category for why ``os.link`` failed."""
+    winerror = getattr(exc, "winerror", None)
+    if winerror in _HARDLINK_FAILURE_CATEGORIES:
+        return _HARDLINK_FAILURE_CATEGORIES[winerror]
+    if exc.errno == errno.EXDEV:
+        return "source and destination are on different volumes"
+    if exc.errno == errno.EACCES:
+        return "access to the source or destination was denied"
+    return "an unexpected filesystem error prevented the hardlink"
+
+
+# Exactly who a hardened native-auth directory is allowed to name: SYSTEM,
+# Administrators, and (added by _directory_grants_broad_access itself) the
+# current user. Anything else -- a sandbox job identity, another local or
+# domain account, Everyone/Authenticated Users/Users -- is "broad" here.
+# This is an allowlist, not a blocklist of known-bad names: reproduced live,
+# a directory under the default Windows %TEMP% inherited ACEs for a dozen
+# unrelated local/domain account SIDs *and* a `CodexSandboxUsers` group that
+# no hardcoded name list would have anticipated.
+_ALWAYS_ALLOWED_SIDS = {
+    "S-1-5-18",     # NT AUTHORITY\SYSTEM
+    "S-1-5-32-544", # BUILTIN\Administrators
+    "S-1-3-4",      # OWNER RIGHTS -- a placeholder for "whoever owns this
+                     # object" (i.e. the current user), not a distinct
+                     # account; Windows adds it to a freshly-set DACL on its
+                     # own, reproduced live right after /inheritance:r.
+}
+
+# Reads each ACE's identity translated to its raw SID -- never a friendly
+# name. icacls itself was found, live, to fail resolving even the English
+# well-known names ("Everyone", "BUILTIN\Administrators") for /grant on a
+# non-English Windows install ("No mapping between account names and
+# security IDs was done"), while still happily *displaying* their localized
+# names when listing -- so no name-based text match on icacls output can be
+# trusted for this check on every locale. SID translation via .NET has
+# neither problem.
+def _powershell_acl_sids_command(path: str) -> list[str]:
+    # The path is embedded directly in the script (as a single-quoted
+    # PowerShell literal) rather than passed as a trailing argument and read
+    # back via $args: reproduced live, `-Command <script> <arg>` does not
+    # reliably populate $args inside the script block across PowerShell
+    # invocations, leaving Get-Acl called with an empty path.
+    quoted = path.replace("'", "''")
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"(Get-Acl -LiteralPath '{quoted}').Access | ForEach-Object {{ "
+        "try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } "
+        "catch { $_.IdentityReference.Value } }"
+    )
+    return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
+
+
+def _current_user_sid(*, run=subprocess.run) -> str | None:
+    """The running user's raw SID (no name resolution), or ``None``."""
+    try:
+        result = run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    if result.returncode == 0 and result.stdout.strip():
+        last_field = result.stdout.strip().splitlines()[-1].rsplit(",", 1)[-1].strip().strip('"')
+        if last_field.upper().startswith("S-1-"):
+            return last_field
+    return None
+
+
+def _directory_grants_broad_access(path: str, *, run=subprocess.run) -> bool:
+    """True if *path*'s ACL (its own or inherited) names anyone beyond
+    SYSTEM, Administrators and the current user.
+
+    An unreadable/unverifiable ACL is treated as broad -- this gate only
+    ever has to say "safe to copy a credential here", never "probably fine".
+    """
+    result = run(_powershell_acl_sids_command(path), capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return True
+    sids = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    if not sids:
+        return True
+    allowed = set(_ALWAYS_ALLOWED_SIDS)
+    own_sid = _current_user_sid(run=run)
+    if own_sid:
+        allowed.add(own_sid)
+    return bool(sids - allowed)
+
+
+def _harden_directory_acl(path: str, *, run=subprocess.run) -> None:
+    """Strip every ACE from *path* except SYSTEM, Administrators and the
+    current user, then (re-)grant those three Full Control (new files/subdirs
+    inherit this).
+
+    ``/inheritance:r`` alone is not enough: it only drops ACEs *inherited*
+    from the parent, never an ACE already explicit on this exact directory
+    (for example because something else granted it before Nexus got to it) --
+    reproduced live, a pre-existing explicit grant survived /inheritance:r
+    plus three unrelated /grant:r calls untouched. So every ACE this
+    function does not recognize is individually removed before anything is
+    (re-)granted.
+
+    Raises ``OSError`` (never silently continues) if any step fails -- for
+    example because the caller's own token lacks WRITE_DAC on this directory,
+    which is exactly the "sandboxed, can't fix ACLs itself" scenario this
+    exists to fail closed on rather than paper over.
+    """
+    def run_icacls(*args: str) -> None:
+        command = ["icacls", path, *args]
+        result = run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise OSError(
+                f"icacls {' '.join(command[1:])} failed: "
+                f"{(result.stderr or result.stdout).strip() or 'no output'}"
+            )
+
+    # Granted/removed by well-known SID (not by name: "NT AUTHORITY\SYSTEM" /
+    # "BUILTIN\Administrators" require account-name-to-SID lookup, which is
+    # not available in every execution context -- reproduced directly on a
+    # local, non-domain Windows account, where the name form fails with
+    # "No mapping between account names and security IDs was done" while
+    # the equivalent `*S-1-5-...` SID form succeeds). SIDs are also
+    # locale-independent, unlike the localized group names icacls would
+    # otherwise need to resolve.
+    own_sid = _current_user_sid(run=run)
+    allowed = set(_ALWAYS_ALLOWED_SIDS)
+    if own_sid:
+        allowed.add(own_sid)
+
+    run_icacls("/inheritance:r")
+
+    result = run(_powershell_acl_sids_command(path), capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise OSError(f"could not read {path!r}'s current ACL to harden it: {result.stderr.strip() or 'no output'}")
+    for sid in {line.strip() for line in result.stdout.splitlines() if line.strip()} - allowed:
+        run_icacls("/remove:g", f"*{sid}")
+
+    run_icacls("/grant:r", "*S-1-5-18:(OI)(CI)F")  # NT AUTHORITY\SYSTEM
+    run_icacls("/grant:r", "*S-1-5-32-544:(OI)(CI)F")  # BUILTIN\Administrators
+    if own_sid:
+        run_icacls("/grant:r", f"*{own_sid}:(OI)(CI)F")
+
+
+def _require_private_directory(path: str, *, run=subprocess.run) -> None:
+    """Refuse to let *path* receive a copied credential unless it is private.
+
+    A worker directory created under a redirected ``NEXUS_CODEX_HOME`` (for
+    example a shared validation/temp location) can inherit a broad ACL from
+    its parent -- including sandbox job identities -- with nothing in the
+    create path to catch it. Hardening is attempted first; if it cannot be
+    applied, or the directory still looks broadly accessible afterward, the
+    copy is refused with a diagnostic naming the unmet requirement, never
+    performed against an unverified directory.
+    """
+    if os.name != "nt":
+        return  # Nexus Native targets Windows only; nothing to harden elsewhere.
+    try:
+        _harden_directory_acl(path, run=run)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not restrict permissions on the native Codex session directory ({path}): "
+            f"{exc}. This environment cannot fix the directory's ACL; point NEXUS_CODEX_HOME at "
+            "a private, per-user directory (the default under %LOCALAPPDATA%\\Nexus is already "
+            "private) instead of a shared or redirected location."
+        ) from exc
+    if _directory_grants_broad_access(path, run=run):
+        raise RuntimeError(
+            f"Refusing to copy the Codex login into {path}: it still grants access beyond the "
+            "current user, SYSTEM and Administrators after hardening. Point NEXUS_CODEX_HOME at "
+            "a private, per-user directory instead of a shared or redirected location."
+        )
+
+
 def _share_native_auth(source_auth: str, destination_auth: str) -> None:
     """Make the session's auth.json the *same file* as the user's local login.
 
@@ -165,14 +351,24 @@ def _share_native_auth(source_auth: str, destination_auth: str) -> None:
         os.unlink(destination_auth)
     try:
         os.link(source_auth, destination_auth)
+        return
     except OSError as exc:
-        if os.environ.get("NEXUS_NATIVE_ALLOW_AUTH_COPY") != "1":
-            raise RuntimeError(
-                "Could not share the local Codex login with the session (it must be on the same "
-                "NTFS volume and below the 1023-hardlink limit). Set NEXUS_NATIVE_ALLOW_AUTH_COPY=1 "
-                "to allow a private copy."
-            ) from exc
-        shutil.copy2(source_auth, destination_auth)
+        hardlink_error = exc
+    if os.environ.get("NEXUS_NATIVE_ALLOW_AUTH_COPY") != "1":
+        raise RuntimeError(
+            "Could not share the local Codex login with the session: "
+            f"{_classify_hardlink_failure(hardlink_error)}. Set NEXUS_NATIVE_ALLOW_AUTH_COPY=1 "
+            "to allow a private, ACL-restricted copy instead, or point NEXUS_CODEX_HOME at a "
+            "directory on the same NTFS volume as your Codex login."
+        ) from hardlink_error
+    # A hardlink shares the source file's own security descriptor, so the
+    # destination directory's ACL never mattered for it. A copy is a new
+    # file that inherits ITS ACL from that directory -- so unlike the
+    # hardlink path above, this one is only as private as the directory it
+    # lands in, which is exactly what _require_private_directory enforces
+    # before any credential bytes are written there.
+    _require_private_directory(os.path.dirname(destination_auth) or ".")
+    shutil.copy2(source_auth, destination_auth)
 
 
 def _native_codex_env(
