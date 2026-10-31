@@ -1,22 +1,7 @@
-/* Compact workspace shell. All operational controls remain in their existing modules. */
-:root{
-  --bg:#100f16;--sidebar:#15131e;--terminal:#111018;--surface:#191722;
-  --surface-raised:#211e2b;--surface-hover:#30283a;--border:#35313f;
-  --border-soft:#292634;--border-strong:#5d586c;--accent:#b4a0df;
-  --accent-strong:#d4c3f3;--accent-tint:#2c263d;--accent-border:#75658f;
-  --warning:#d8b17a;--text:#e6e2ed;--text-muted:#aaa5b8;--text-dim:#817b91;
-  --on-accent:#16121d;
-}
-html,body{height:100%;overflow:hidden}
-.app-shell{height:100dvh;min-height:0;grid-template-columns:192px minmax(0,1fr);grid-template-rows:29px minmax(0,1fr)}
-.window-bar{height:29px;padding:0 10px;font-size:9px}
-.window-dots i{width:7px;height:7px;background:var(--accent-border)}
-.window-dots i:nth-child(2){background:var(--warning)}
-.sidebar{height:calc(100dvh - 29px);min-height:0;padding:0 7px;background:var(--sidebar);overflow-y:auto}
-.brand{height:49px;padding:0 8px}.brand-mark{width:25px;height:25px;font-size:14px}
-.sidebar-caption{margin:16px 7px 6px}.nav-label{margin:15px 7px 6px;font-size:9px}
-.project{min-height:39px}.mission-link{min-height:32px}.pane-nav{max-height:none}
-.sidebar-create,.sidebar-review{display:block;width:100%;min-height:29px;padding:5px 8px;text-align:left;border:1px solid var(--border-soft);border-radius:2px;background:var(--surface);color:var(--text);font:10px 'Cascadia Code',Consolas,monospace}
+/* Workspace additions on top of the approved Dark Terminal layout (cockpit.css).
+   Palette and shell sizing come from cockpit.css; this file only styles new controls. */
+.sidebar{overflow-y:auto}
+.sidebar-create,.sidebar-review{display:block;width:100%;min-height:31px;padding:6px 9px;text-align:left;border:1px solid var(--border-soft);border-radius:2px;background:var(--surface);color:var(--text);font:10px 'Cascadia Code',Consolas,monospace}
 .sidebar-create{border-color:var(--accent-border);color:var(--accent-strong);background:var(--accent-tint)}
 .sidebar-review{margin-top:7px;background:transparent;color:var(--text-muted)}
 .sidebar-create:hover,.sidebar-review:hover{border-color:var(--accent);color:var(--accent-strong)}
@@ -38,52 +23,36 @@ html,body{height:100%;overflow:hidden}
 .manual-plan-nav{max-height:22dvh;overflow:auto;scrollbar-width:thin}
 .manual-plan-nav .mission-link{display:flex;align-items:center;gap:7px;padding:5px 8px;text-align:left;background:transparent;border:0;border-left:2px solid transparent;color:var(--text-muted)}
 .manual-plan-nav .mission-link:hover{background:var(--surface)}
-.manual-plan-nav .mission-link strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;font-weight:500}
+.manual-plan-nav .mission-link strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:500}
 .manual-plan-nav .mission-link small{display:block;margin-top:2px;font:8px 'Cascadia Code',Consolas,monospace;color:var(--text-dim)}
-.sidebar-spacer{min-height:16px}.sidebar-footer{min-height:40px;margin-top:auto}
-.workspace{height:calc(100dvh - 29px)!important;min-height:0!important;overflow:hidden!important;background:var(--bg)}
-.topbar{height:34px;min-height:34px;padding:0 11px;flex-wrap:nowrap;border-bottom:1px solid var(--border-soft)}
-.topbar-summary{gap:10px}.topbar-summary .overview-stat span{font-size:8px}
-.topbar-data-status{max-width:150px}.topbar-maestro{font-size:9px}
-.workspace-tabs{display:flex;align-items:stretch;gap:0;height:31px;min-height:31px;padding:0 8px;overflow-x:auto;overflow-y:hidden;background:var(--surface);border-bottom:1px solid var(--border-soft);scrollbar-width:thin}
-.workspace-tab{display:flex;align-items:center;gap:6px;max-width:175px;min-width:75px;padding:0 11px;border:0;border-right:1px solid var(--border-soft);border-bottom:2px solid transparent;background:transparent;color:var(--text-muted);font:9px 'Cascadia Code',Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.workspace-tabs{display:flex;align-items:stretch;gap:0;min-height:32px;margin:14px 26px 0;overflow-x:auto;overflow-y:hidden;background:var(--surface);border:1px solid var(--border-soft);scrollbar-width:thin}
+.workspace-tabs:empty{display:none}
+.workspace-tab{display:flex;align-items:center;gap:6px;max-width:190px;min-width:80px;padding:0 12px;border:0;border-right:1px solid var(--border-soft);border-bottom:2px solid transparent;background:transparent;color:var(--text-muted);font:10px 'Cascadia Code',Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .workspace-tab[aria-selected="true"]{color:var(--text);background:var(--terminal);border-bottom-color:var(--accent)}
 .workspace-tab:hover{color:var(--accent-strong)}.workspace-tab-dot{width:5px;height:5px;flex:none;border-radius:50%;background:var(--text-dim)}
 .workspace-tab[aria-selected="true"] .workspace-tab-dot{background:var(--accent)}
-.section-heading{min-height:29px;margin:0;padding:0 10px;border-bottom:1px solid var(--border-soft);background:var(--bg)}
-.section-heading h2{font-size:11px;margin:0}.section-kicker{font-size:8px}.view-controls{gap:5px}
-.restore-layout-button,.group-controls button{height:22px}.add-pane-button{padding:4px 8px}
-.pane-grid{flex:1 1 0;min-height:0!important;margin:0!important;padding:3px;gap:3px;background:var(--border-soft);border:0}
-.pane-grid[data-visible="0"]{grid-template-columns:1fr!important;grid-template-rows:1fr!important}
+.pane-grid[data-visible="0"]{grid-template-columns:1fr!important;grid-template-rows:minmax(290px,1fr)!important}
 .pane-grid[data-visible="0"]::before{content:attr(data-empty-message);align-self:center;justify-self:center;max-width:360px;padding:18px;color:var(--text-muted);font:11px/1.6 'Cascadia Code',Consolas,monospace;text-align:center}
-.pane-grid .pane{min-height:0;border:1px solid var(--border-soft);border-radius:0;background:var(--terminal)}
 .pane-grid .pane[data-workspace-inactive="true"]{display:none!important}
-.pane-grid .pane.selected{border-color:var(--accent-border);box-shadow:inset 0 1px 0 var(--accent-border)}
-.pane-grid .pane-header{height:30px;min-height:30px;background:var(--surface);padding:0 8px}
-.pane-grid .pane-meta{height:19px;min-height:19px;background:var(--terminal);padding:0 8px}
-.pane-grid .pane-footer{height:20px;min-height:20px;background:var(--surface);padding:0 8px}
-.pane-grid .foot-path{min-width:0;max-width:72%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pane-grid .pane-body{background:var(--terminal)}
-.pane-grid .cockpit-composer{max-height:27%;padding:4px 8px;gap:3px}
-.pane-grid .cockpit-input{min-height:24px;max-height:58px;padding:4px 6px}
-.pane-grid .cockpit-send{min-height:22px;padding:3px 7px}
-.pane-grid .cockpit-compose-controls{gap:3px 6px}
-.pane-grid .cockpit-mission-details{margin-top:3px}
-.pane-grid .cockpit-mission-details textarea{min-height:28px;max-height:54px}
 .legacy-review-summary{margin:7px 10px;border:1px solid var(--border-soft)}
-.pane-grid .pane-identity strong{font-size:10px}.pane-grid .pane-status{font-size:8px}
-.grid-divider::after{background:var(--border-strong)}
-.workspace-footer{height:25px;min-height:25px;padding:0 10px;margin:0;background:var(--sidebar);font-size:8px}
-.workspace-drawer-backdrop{position:fixed;inset:29px 0 0;z-index:28;background:rgba(4,3,7,.6)}
-.plan-authoring{position:fixed;z-index:29;top:29px;right:0;bottom:0;width:min(720px,calc(100vw - 32px));margin:0!important;padding:16px 18px!important;overflow:auto;background:var(--sidebar);border:0;border-left:1px solid var(--border-strong);box-shadow:-18px 0 50px rgba(0,0,0,.4)}
+.workspace-drawer-backdrop{position:fixed;inset:0;z-index:28;background:rgba(3,4,6,.6)}
+.plan-authoring{position:fixed;z-index:29;top:0;right:0;bottom:0;width:min(720px,calc(100vw - 32px));margin:0!important;padding:16px 18px!important;overflow:auto;background:var(--sidebar);border:0;border-left:1px solid var(--border-strong);box-shadow:-18px 0 50px rgba(0,0,0,.4)}
 .plan-authoring[hidden],.workspace-drawer-backdrop[hidden]{display:none!important}
 .plan-authoring-heading{position:relative;padding-right:35px}.drawer-close{position:absolute;right:0;top:0;width:28px;height:28px;border:1px solid var(--border-soft);background:var(--surface);color:var(--text);font-size:18px}
 .plan-authoring-intro{margin:9px 0 13px}.plan-authoring-list{padding-bottom:22px}
-.ai-settings:not([hidden]),.settings-advanced[open]{position:fixed;z-index:25;top:29px;right:0;bottom:0;width:min(720px,calc(100vw - 32px));margin:0;padding:15px;overflow:auto;background:var(--sidebar);border-left:1px solid var(--border-strong);box-shadow:-18px 0 50px rgba(0,0,0,.4)}
+.ai-settings:not([hidden]),.settings-advanced[open]{position:fixed;z-index:25;top:0;right:0;bottom:0;width:min(720px,calc(100vw - 32px));margin:0;padding:15px;overflow:auto;background:var(--sidebar);border-left:1px solid var(--border-strong);box-shadow:-18px 0 50px rgba(0,0,0,.4)}
 .ai-settings .model-catalog-heading{padding-right:35px;position:relative}.ai-settings .drawer-close{right:0;top:0}
 .settings-advanced:not([open]){position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
 .settings-advanced[open] summary{cursor:pointer;color:var(--accent-strong);font:10px 'Cascadia Code',Consolas,monospace}
 .settings-advanced[open] .model-catalog{margin:10px 0 0}
-@media(max-width:1370px){.topbar-summary{display:none}.topbar-data-status{display:none}}
-@media(max-width:830px){.app-shell{grid-template-columns:1fr}.sidebar{position:fixed;top:29px;bottom:0;width:192px;height:calc(100dvh - 29px)}.workspace{grid-column:1;grid-row:2}}
-@media(max-width:650px){html,body{overflow:hidden}.workspace{height:calc(100dvh - 29px)!important;overflow:hidden!important}.pane-grid{display:grid;overflow:auto;grid-auto-rows:minmax(240px,1fr);gap:3px}.pane-grid .pane{height:min(60dvh,520px);min-height:240px}.pane-grid .pane.minimized{height:30px;min-height:30px}.section-heading{padding:0 7px}.workspace-footer span:nth-child(2){display:none}}
+@media(max-width:900px){.workspace-tabs{margin:12px 17px 0}}
+.review-body .review-plan-picker{display:flex;align-items:center;gap:8px;margin:9px 17px 0}
+.review-body .review-plan-picker label{color:var(--text-dim);font:600 9px 'Cascadia Code',Consolas,monospace;letter-spacing:.08em;text-transform:uppercase}
+.review-body select{flex:1;min-width:0;padding:5px 7px;background:var(--terminal);border:1px solid var(--border-strong);border-radius:2px;color:var(--text);font:10px 'Cascadia Code',Consolas,monospace}
+.review-body select:disabled{opacity:.6}
+.review-body .native-note{margin:7px 17px 0;color:var(--text-muted);font:10px/1.5 'Cascadia Code',Consolas,monospace}
+.review-body .review-steps{color:var(--text-muted);font:10px/1.5 'Cascadia Code',Consolas,monospace}
+.review-body .review-steps:not(:has(.review-step)){padding:10px 12px;background:var(--surface)}
+.review-body .review-bind,.review-body .review-handoff,.review-body .review-resume{margin:9px 17px 0}
+.review-body .review-bind .native-note,.review-body .review-handoff .native-note,.review-body .review-resume .native-note{margin:0 0 6px}
+.review-body .native-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}

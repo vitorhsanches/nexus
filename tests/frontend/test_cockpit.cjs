@@ -38,8 +38,10 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
   grid.clientWidth = gridWidth;
   grid.append(buildPane('maestro'), ...(withNative ? [buildPane('native')] : []), buildPane('agent-a'), buildPane('agent-b'), buildPane('review'));
   if (compact) {
+    // compact: 'approved' mirrors cockpit.html (Maestro and Revisão persistent, Native on demand).
+    const persistent = compact === 'approved' ? ['maestro', 'review'] : [];
     for (const pane of grid.querySelectorAll(':scope > .pane')) {
-      if (['maestro', 'native', 'review'].includes(pane.dataset.pane)) pane.dataset.workspaceInactive = 'true';
+      if (['maestro', 'native', 'review'].includes(pane.dataset.pane)) pane.dataset.workspaceInactive = persistent.includes(pane.dataset.pane) ? 'false' : 'true';
     }
   }
   const overview = el('div');
@@ -263,14 +265,44 @@ function harness(initialAgents, { gridWidth = 1200, discoveredCatalog = null, pr
   return { byId, grid, box, calls, settle, refresh, sources, nativeMounts, tick, resize, context };
 }
 
-test('compact cockpit header keeps project counts and actions above the grid', () => {
+test('approved Dark Terminal header keeps mission bar and project overview above the grid', () => {
   const header = template.match(/<header class="topbar">([\s\S]*?)<\/header>/)?.[1];
   assert.ok(header);
-  for (const id of ['breadcrumb-title', 'workspace-id', 'execution-count', 'data-status', 'focus-maestro']) {
-    assert.match(header, new RegExp(`id="${id}"`));
+  assert.match(header, /id="breadcrumb-title"/);
+  const mission = template.match(/<section class="mission-bar"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(mission);
+  for (const id of ['workspace-id', 'mission-title', 'focus-maestro']) assert.match(mission, new RegExp(`id="${id}"`));
+  assert.match(mission, /Conversa Nexus/);
+  const overview = template.match(/<section class="overview"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(overview);
+  for (const id of ['execution-count', 'data-status']) assert.match(overview, new RegExp(`id="${id}"`));
+  assert.equal((overview.match(/class="overview-stat"/g) || []).length, 3);
+  assert.match(template, /Mensagens Nexus/);
+  assert.match(template, /id="workspace-tabs"/);
+  for (const id of ['open-new-project', 'open-native-plan', 'open-review', 'open-native-session']) {
+    assert.match(template, new RegExp(`id="${id}"`));
   }
-  assert.equal((header.match(/class="overview-stat"/g) || []).length, 3);
-  assert.doesNotMatch(template, /<section class="mission-bar"|<section class="overview"/);
+  const ids = [...template.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(ids.length, new Set(ids).size, 'no duplicated ids');
+  assert.match(template, /data-pane="maestro" data-workspace-inactive="false"/);
+  assert.match(template, /data-pane="review" data-workspace-inactive="false"/);
+  assert.match(template, /data-pane="native" data-workspace-inactive="true"/);
+});
+
+test('approved layout keeps Maestro and Revisão visible across project changes while Native stays on demand', async () => {
+  const projects = [{ id: 'demo', name: 'Demo', enabled: 1, dev_enabled: 1 },
+    { id: 'other', name: 'Other', enabled: 1, dev_enabled: 1 }];
+  const app = harness([], { withNative: true, compact: 'approved', projects });
+  await app.settle();
+  const state = kind => app.grid.querySelector(`[data-pane="${kind}"]`).dataset.workspaceInactive;
+  assert.deepEqual(['maestro', 'review', 'native'].map(state), ['false', 'false', 'true']);
+  const review = app.grid.querySelector('[data-pane="review"]');
+  const meta = review.querySelector('.pane-meta');
+  app.byId['project-nav'].children[1].dispatch('click');
+  await app.settle();
+  assert.deepEqual(['maestro', 'review', 'native'].map(state), ['false', 'false', 'true']);
+  assert.equal(app.grid.querySelector('[data-pane="maestro"]').classList.contains('selected'), true);
+  assert.equal(review.querySelector('.pane-meta'), meta, 'Native review metadata is not replaced by the legacy summary');
 });
 
 test('pane dividers still resize both axes and restore the automatic layout', () => {

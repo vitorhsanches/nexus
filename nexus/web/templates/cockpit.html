@@ -60,15 +60,20 @@
       <button class="pane-nav-link" id="settings-ai-link" type="button">✳ &nbsp; IA</button>
       <button class="pane-nav-link" id="settings-models-link" type="button">⚙ &nbsp; Modelos</button>
       <div class="sidebar-spacer"></div>
+      <div class="sidebar-note"><span class="note-dot"></span><div><strong>Mensagens Nexus</strong><p>Conversa com Maestro e agentes. Nenhum shell ou CLI conectado.</p></div></div>
       <div class="sidebar-footer"><span class="avatar">N</span><span><strong>Nexus</strong><small>Workspace atual: <a href="/nexus/workspace">abrir</a></small></span><span class="footer-more">···</span></div>
     </aside>
 
     <main class="workspace" id="workspace">
       <header class="topbar">
-        <div class="topbar-left"><button class="icon-button mobile-menu" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button><div class="breadcrumb"><span>WORKSPACE</span><span class="crumb-separator">/</span><strong id="breadcrumb-title">Cockpit</strong></div><span class="topbar-project" id="workspace-id">—</span></div>
-        <div class="topbar-summary" aria-label="Resumo do projeto"><span class="overview-stat"><strong>02</strong><span>panes na grade</span></span><span class="overview-stat"><strong>00</strong><span>agentes registrados</span></span><span class="overview-stat"><strong id="execution-count">00</strong><span>missões registradas</span></span></div>
-        <div class="topbar-right"><span class="topbar-data-status" id="data-status" role="status">Conectando ao Nexus…</span><button class="topbar-maestro" id="focus-maestro" type="button">Maestro ↗</button><button class="top-icon" id="settings-ai-button" type="button" aria-label="Abrir configurações de IA" title="Configurações de IA">⚙</button><button class="top-icon" type="button" aria-label="Ajuda sobre o cockpit" title="Mensagens usam o motor Nexus; nenhum terminal shell conectado">?</button><span class="top-avatar">N</span></div>
+        <div class="topbar-left"><button class="icon-button mobile-menu" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button><div class="breadcrumb"><span>WORKSPACE</span><span class="crumb-separator">/</span><strong id="breadcrumb-title">Cockpit</strong></div></div>
+        <div class="topbar-right"><span class="local-chip"><span></span>LOCAL · NEXUS</span><button class="top-icon" id="settings-ai-button" type="button" aria-label="Abrir configurações de IA" title="Configurações de IA">⚙</button><button class="top-icon" type="button" aria-label="Ajuda sobre o cockpit" title="Mensagens usam o motor Nexus; nenhum terminal shell conectado">?</button><span class="top-avatar">N</span></div>
       </header>
+      <section class="mission-bar" aria-labelledby="mission-title">
+        <div class="mission-heading"><div class="eyebrow"><span class="eyebrow-line"></span> WORKSPACE <span class="eyebrow-id" id="workspace-id">—</span></div><h1 id="mission-title">Cockpit <span class="heading-muted">/ visão geral</span></h1><p id="mission-description">Acompanhamento de agentes, missões e coordenação do projeto selecionado.</p></div>
+        <div class="mission-actions"><span class="status-pill"><span></span> Conversa Nexus</span><button class="outline-button" id="focus-maestro" type="button">Abrir Maestro <span>↗</span></button></div>
+      </section>
+      <section class="overview" aria-label="Resumo do projeto"><div class="overview-intro"><span class="overview-icon">▦</span><span>VISÃO DO PROJETO</span></div><div class="overview-stat"><strong>02</strong><span>panes na grade</span></div><div class="overview-stat"><strong>00</strong><span>agentes registrados</span></div><div class="overview-stat"><strong id="execution-count">00</strong><span>missões registradas</span></div><div class="overview-divider"></div><span class="overview-disclaimer" id="data-status" role="status">Conectando ao Nexus…</span></section>
       <nav class="workspace-tabs" id="workspace-tabs" role="tablist" aria-label="Contextos do workspace"></nav>
 
       <section class="ai-settings" id="settings-ai" aria-labelledby="ai-settings-title" hidden>
@@ -118,7 +123,7 @@
       </section>
       </details>
 
-      <div class="section-heading"><div><span class="section-kicker">SESSÕES E AGENTES</span><h2>Workspace <span id="pane-count">00</span></h2></div><div class="view-controls"><div class="group-controls" id="group-controls" hidden><button id="previous-group" type="button" aria-label="Grupo anterior">‹</button><span id="group-label" aria-live="polite">Grupo 1/1</span><button id="next-group" type="button" aria-label="Próximo grupo">›</button></div><button class="restore-layout-button" id="restore-layout" type="button" title="Restaurar layout automático" aria-label="Restaurar layout automático">↺ <span>Restaurar layout</span></button><button class="restore-layout-button" id="toggle-layout" type="button" title="Alternar entre colunas e linhas" aria-label="Alternar disposição dos panes" hidden>↕ <span>Disposição</span></button><span class="view-selected" id="grid-layout-label">▦ &nbsp; Grade</span><button class="add-pane-button" id="add-pane" type="button" aria-label="Criar ou restaurar pane">+ Pane</button></div></div>
+      <div class="section-heading"><div><span class="section-kicker">ÁREA DE TRABALHO</span><h2>Panes do projeto <span id="pane-count">02</span></h2></div><div class="view-controls"><div class="group-controls" id="group-controls" hidden><button id="previous-group" type="button" aria-label="Grupo anterior">‹</button><span id="group-label" aria-live="polite">Grupo 1/1</span><button id="next-group" type="button" aria-label="Próximo grupo">›</button></div><button class="restore-layout-button" id="restore-layout" type="button" title="Restaurar layout automático" aria-label="Restaurar layout automático">↺ <span>Restaurar layout</span></button><button class="restore-layout-button" id="toggle-layout" type="button" title="Alternar entre colunas e linhas" aria-label="Alternar disposição dos panes" hidden>↕ <span>Disposição</span></button><span class="view-selected" id="grid-layout-label">▦ &nbsp; Grade</span><button class="add-pane-button" id="add-pane" type="button" aria-label="Criar ou restaurar pane">+ Pane</button></div></div>
       <section class="pane-create-panel plan-authoring" id="pane-create-panel" role="dialog" aria-modal="true" aria-labelledby="pane-create-title" hidden>
         <div class="plan-authoring-heading"><div><span class="plan-authoring-kicker">NOVO AGENTE</span><h2 id="pane-create-title">Criar pane Native</h2></div><button class="drawer-close" id="pane-create-close" type="button" aria-label="Fechar">×</button></div>
         <p class="plan-authoring-intro">A sessão terá identidade e worktree próprios. Criar um pane não inicia um turno.</p>
@@ -133,7 +138,7 @@
       </section>
 
       <section class="pane-grid" id="pane-grid" data-count="2" data-empty-message="Selecione um projeto ou crie uma missão para abrir sessões reais." aria-label="Grade de panes do projeto">
-        <article class="pane maestro-pane" data-pane="maestro" data-workspace-inactive="true" tabindex="0" aria-label="Pane Maestro">
+        <article class="pane maestro-pane selected" data-pane="maestro" data-workspace-inactive="false" tabindex="0" aria-label="Pane Maestro">
           <div class="pane-header"><div class="pane-identity"><span class="pane-icon maestro-icon">✳</span><div><strong>Maestro</strong><span>COORDENAÇÃO</span></div></div><div class="pane-tools"><span class="pane-status ready"><i></i> Prévia</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Maestro" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Maestro" title="Expandir">⤢</button></div></div>
           <div class="pane-meta"><span>TIPO <b>Orquestrador</b></span><span>MODELO <b>Não conectado</b></span><span>SESSÃO <b>—</b></span></div>
           <div class="pane-body maestro-body"><div class="terminal-kicker"><span>●</span> NEXUS / MAESTRO <span class="right">CONVERSA</span></div><div class="maestro-copy"><div class="orbit-symbol">✳</div><span class="mini-label">CENTRO DE COORDENAÇÃO</span><h3>Selecione um projeto.</h3><p>O estado do Maestro aparecerá aqui quando um projeto autorizado for selecionado.</p><div class="maestro-chips"><span>Plano</span><span>Handoffs</span><span>Aprovações</span></div></div></div>
@@ -227,7 +232,7 @@
           <div class="pane-footer"><span class="foot-path">◇ &nbsp;worktree / agente-b</span><span>SEM SESSÃO REAL</span></div>
         </article>
 
-        <article class="pane" data-pane="review" data-workspace-inactive="true" tabindex="0" aria-label="Pane Revisão">
+        <article class="pane" data-pane="review" data-workspace-inactive="false" tabindex="0" aria-label="Pane Revisão">
           <div class="pane-header"><div class="pane-identity"><span class="pane-icon review-icon">✓</span><div><strong>Revisão</strong><span>GATE HUMANO</span></div></div><div class="pane-tools"><span class="pane-status waiting" id="review-status-badge"><i></i> Aguardando</span><button class="pane-tool minimize" type="button" aria-label="Minimizar Revisão" title="Minimizar">−</button><button class="pane-tool expand" type="button" aria-label="Expandir Revisão" title="Expandir">⤢</button></div></div>
           <div class="pane-meta"><span>PLANO <b id="review-meta-plan">—</b></span><span>STATUS <b id="review-meta-status">Sem resultado</b></span><span>PASSO <b id="review-meta-step">—</b></span></div>
           <div class="pane-body review-body">

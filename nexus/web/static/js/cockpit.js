@@ -31,7 +31,10 @@
   grid.querySelector('[data-pane="agent-b"]').remove();
   // Panes owned by the cockpit itself (not per-agent): never created or removed from agent data.
   const systemPanes = ['maestro', 'native', 'review'];
-  const compactSystemPanes = grid.querySelector('[data-pane="maestro"]')?.dataset.workspaceInactive === 'true';
+  // Panes carrying data-workspace-inactive are shown on demand; those starting at "false" stay
+  // visible across project changes (approved Dark Terminal: Maestro and Revisão always present).
+  const compactSystemPanes = 'workspaceInactive' in (grid.querySelector('[data-pane="maestro"]')?.dataset || {});
+  const persistentPanes = systemPanes.filter(kind => grid.querySelector(`[data-pane="${kind}"]`)?.dataset.workspaceInactive === 'false');
   const knownAgents = new Map();
   const nativeControllers = new Map();
   const projectListeners = new Set();
@@ -2057,8 +2060,8 @@
     });
     renderProjects();
     syncUI();
-    if (compactSystemPanes) systemPanes.forEach(kind => setPaneAvailable(kind, false));
-    else selectPane(grid.querySelector('[data-pane="maestro"]'));
+    if (compactSystemPanes) systemPanes.filter(kind => !persistentPanes.includes(kind)).forEach(kind => setPaneAvailable(kind, false));
+    if (!compactSystemPanes || persistentPanes.includes('maestro')) selectPane(grid.querySelector('[data-pane="maestro"]'));
     projectListeners.forEach(listener => {
       try { listener(projectId); } catch (error) { notify(`Falha no painel do projeto: ${error.message}`); }
     });
