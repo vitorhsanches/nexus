@@ -57,8 +57,9 @@ function Test-OmniRouteOnline {
 
 function Test-NexusOnline {
     try {
-        $payload = Invoke-RestMethod -Uri "http://127.0.0.1:$NexusPort/api/routing/status" -TimeoutSec 3
-        return ($null -ne $payload.runtime -and $null -ne $payload.summary)
+        # Routing status can wait for OmniRoute telemetry even in Native mode.
+        $payload = Invoke-RestMethod -Uri "http://127.0.0.1:$NexusPort/api/dev/execution-status" -TimeoutSec 3
+        return ($null -ne $payload.execution_enabled)
     } catch {
         return $false
     }
@@ -68,6 +69,14 @@ function Get-PortOwner([int]$Port) {
     $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($connection) { return [int]$connection.OwningProcess }
     return $null
+}
+
+function Test-ExpectedNexusProcess([int]$ProcessId, [string]$ExpectedRoot) {
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if (-not $process -or -not $process.CommandLine) { return $false }
+    $command = [string]$process.CommandLine
+    return ($command.IndexOf("nexus.web.app:app", [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $command.IndexOf("--app-dir `"$ExpectedRoot`"", [StringComparison]::OrdinalIgnoreCase) -ge 0)
 }
 
 # Only the native claude.exe counts: never a .cmd/.bat/.ps1 shim, another
@@ -112,6 +121,13 @@ if (-not $RepoRoot) { $RepoRoot = Join-Path (Split-Path -Parent $MyInvocation.My
 $root = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction SilentlyContinue)
 if (-not $root) { Stop-Launch "Nexus repository not found:" @($RepoRoot) }
 $root = $root.Path
+$portOwner = Get-PortOwner $NexusPort
+if ($portOwner -and -not (Test-ExpectedNexusProcess $portOwner $root)) {
+    Stop-Launch "Port $NexusPort belongs to an unverified Nexus checkout or another process (PID $portOwner)." @(
+        "Requested checkout: $root",
+        "Use a free port or stop that process yourself; this launcher will not reuse it."
+    )
+}
 $python = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
     Stop-Launch "Python environment not found:" @($python, "Create the .venv before starting Nexus.")
@@ -245,7 +261,7 @@ if ($PreflightOnly) {
     $stdout = Join-Path $logDir "control-center-$stamp.out.log"
     $stderr = Join-Path $logDir "control-center-$stamp.err.log"
     Start-Process -FilePath $python `
-        -ArgumentList @("-m", "uvicorn", "nexus.web.app:app", "--host", "127.0.0.1", "--port", "$NexusPort") `
+        -ArgumentList @("-m", "uvicorn", "nexus.web.app:app", "--app-dir", "`"$root`"", "--host", "127.0.0.1", "--port", "$NexusPort") `
         -WorkingDirectory $root -WindowStyle Hidden `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
     if (-not (Wait-Until { Test-NexusOnline } $TimeoutSeconds)) {
