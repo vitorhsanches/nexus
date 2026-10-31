@@ -1,5 +1,6 @@
 import os
 import shutil
+import socket
 import site
 import subprocess
 import tempfile
@@ -77,6 +78,16 @@ def _launcher_env(repo, *, install_codex, install_claude=False, omni_profile=Fal
 
 
 class StartNexusLauncherTests(unittest.TestCase):
+    def test_occupied_port_from_another_checkout_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as repo, socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = listener.getsockname()[1]
+            result = _run_launcher("-RepoRoot", repo, "-NexusPort", str(port),
+                                   "-PreflightOnly", "-NoBrowser")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unverified Nexus checkout or another process", result.stdout)
+
     def test_missing_project_venv_fails_clearly_without_starting_anything(self):
         with tempfile.TemporaryDirectory() as empty_repo:
             result = _run_launcher("-RepoRoot", empty_repo, "-NoBrowser")
